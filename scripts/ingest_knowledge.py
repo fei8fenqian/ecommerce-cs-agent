@@ -1,8 +1,9 @@
-import psycopg2
-from sentence_transformers import SentenceTransformer
+import hashlib
 import re
 from pathlib import Path
-import hashlib
+
+import psycopg2
+from sentence_transformers import SentenceTransformer
 
 
 def connect_knowledge_db() -> psycopg2.extensions.connection:
@@ -41,15 +42,11 @@ def load_model() -> SentenceTransformer:
     return SentenceTransformer("BAAI/bge-large-zh-v1.5")
 
 
-def ingest(
-    conn: psycopg2.extensions.connection, model: SentenceTransformer, chunks: list
-):
+def ingest(conn: psycopg2.extensions.connection, model: SentenceTransformer, chunks: list):
     inputs = [f"{s} {t}: {c}" for s, t, c in chunks]
     # 批量编码 model.encode 需要 list[str]
     print("正在编码向量...")
-    embeddings = model.encode(
-        inputs=inputs, normalize_embeddings=True, show_progress_bar=True
-    )
+    embeddings = model.encode(inputs=inputs, normalize_embeddings=True, show_progress_bar=True)
 
     # 逐行插入
     cur = conn.cursor()

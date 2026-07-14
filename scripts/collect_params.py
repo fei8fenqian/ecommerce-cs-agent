@@ -1,6 +1,6 @@
-from pathlib import Path
 import json
 from collections import Counter
+from pathlib import Path
 
 root = Path(__file__).parent.parent
 raw_path = root / "data" / "products" / "raw"
@@ -30,7 +30,6 @@ for file in file_paths:
                         continue
 
                     for category_param in params.values():
-
                         if not isinstance(category_param, dict):
                             continue
 
@@ -38,5 +37,3 @@ for file in file_paths:
                             keys.append(param)
 
 param_counter = Counter(keys)
-
-

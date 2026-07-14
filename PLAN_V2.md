@@ -35,11 +35,11 @@
 | Phase | 状态 | 产出 |
 |-------|:---:|------|
 | Phase 1: 爬虫 + 知识库 | ✅ | 6 品牌 304 产品 / 5 篇知识库 / pgvector 入库 |
-| Phase 2: 检索 + 评估 | 🔜 | 多知识库路由 / BM25+向量+RRF 三方案消融 / 25 题 |
-| Phase 3: Agent 引擎 | ⬜ | 手写 ReAct / Tool Calling / 意图路由 |
-| Phase 4: 人工兜底 + 多轮 | ⬜ | 情绪检测 / 转人工 / 上下文管理 |
+| Phase 2: 检索 + 评估 + 工程基础 | 🔜 | src 骨架 / ruff+mypy+pytest / BM25+向量+Rerank / 25 题 |
+| Phase 3: Agent 引擎 | ⬜ | 手写 ReAct / Tool Calling / 意图路由 / 单元测试 |
+| Phase 4: 人工兜底 + 多轮 | ⬜ | 情绪检测 / 转人工 / 上下文管理 / conventional commits |
 | Phase 5: 中台能力 + 管理后台 | ⬜ | /admin API / 多库管理 / 模型网关 / Token 统计 |
-| Phase 6: 部署 + 测试 + 文档 | ⬜ | Docker / 端到端测试 / README / 面试稿 |
+| Phase 6: 部署 + CI/CD + 文档 | ⬜ | Docker / GitHub Actions / PR template / README / 面试稿 |
 
 ---
 
@@ -258,36 +258,92 @@ PostgreSQL + pgvector（统一数据层）：
 
 ---
 
-### Phase 2：检索 + 评估（Day 4-5）🔜 当前阶段
+### Phase 2：检索 + 评估 + 工程基础（Day 4-5）🔜 当前阶段
 
-**目标**：可量化的检索质量，三种方案对比
+**目标**：建立"团队级"工程规范 + 量化检索质量 + 四种方案对比
 
-**2.1 搭建 `src/` 目录骨架**
+**2.0 工程基础（最先做——面试时每个文件都是"团队经验"的证明）**
+
+- [ ] `pyproject.toml` — 项目元数据 + 工具配置中心
+  ```toml
+  [project]
+  name = "3c-cs-agent"
+  requires-python = ">=3.12"
+
+  [tool.ruff]
+  # 代码规范：E/W/F/I/N 全套规则，行宽 100
+
+  [tool.mypy]
+  # 类型检查：strict = false（渐进式，后续收紧）
+
+  [tool.pytest.ini_options]
+  # 测试配置：testpaths = ["tests/"], addopts = "-v --tb=short"
+  ```
+
+- [ ] `.pre-commit-config.yaml` — git commit 前自动检查
+  ```yaml
+  repos:
+    - repo: https://github.com/astral-sh/ruff-pre-commit
+      hooks: [ruff, ruff-format]
+    - repo: https://github.com/pre-commit/mirrors-mypy
+      hooks: [mypy]
+  ```
+
+- [ ] `Makefile` — 常用命令入口（新成员 clone 下来就知道怎么跑）
+  ```makefile
+  install:  pip install -e ".[dev]"
+  lint:     ruff check src/ scripts/ && mypy src/
+  test:     pytest -v
+  eval:     python scripts/eval.py
+  ingest:   python -m scripts.ingest_knowledge && python -m scripts.ingest_pgvector
+  clean:    rm -rf __pycache__ .pytest_cache .mypy_cache
+  ```
+
+- [ ] `tests/` 目录 — 从 Day 1 就写测试，不是事后补
+  ```
+  tests/
+  ├── __init__.py
+  ├── test_retrieve.py      # 检索单元测试
+  ├── test_bm25.py           # BM25 分词 + 搜索测试
+  ├── test_rrf.py            # RRF 融合测试
+  └── test_ingest.py         # 摄入 pipeline 测试
+  ```
+
+**为什么 Phase 2 就做这些**：你一个人写，但这些文件让面试官看到的不是"我一个人写的项目"，而是"一个被 review 过的、有门禁的、新成员能接手的项目"。`Makefile` + `pyproject.toml` + `.pre-commit-config.yaml` 这三个文件一摆，团队感就出来了。
+
+**2.1 搭建 `src/` 业务骨架**
 
 - [ ] `src/config.py` — pydantic-settings，统一管理 PG 连接串 / Embedding 模型 / LLM Key
 - [ ] `src/logging.py` — JSON 结构化日志（request_id + latency_ms + module）
+- [ ] `src/exceptions.py` — 异常继承体系（先定义，Phase 3 用）
 - [ ] `src/core/retrieve.py` — 多知识库检索引擎（见下方设计）
 - [ ] `src/core/bm25.py` — BM25 关键词检索适配 pgvector 场景
 - [ ] `src/core/rrf.py` — RRF 融合算法
+- [ ] `src/core/rerank.py` — Cross-encoder 精排（bge-reranker-v2-m3）
 
-**2.2 检索架构设计（pgvector 版）**
+**2.2 检索架构设计（pgvector 版，含 Rerank）**
 
 ```
 用户 query
     │
-    ├──→ BM25 检索（对 product_specs.description + knowledge_chunks.content 分词建倒排）
-    │     └── 返回：[(id, bm25_score), ...]
+    ├──→ BM25 检索（对 laptop_products.description + knowledge_chunks.content）
+    │     └── 返回：Top-20 + bm25_score
     │
     ├──→ pgvector 向量检索
     │     ├── 知识库路由：query 分类 → knowledge_chunks 或 laptop_products
-    │     ├── 混合查询：SELECT ... ORDER BY embedding <=> query_vec LIMIT K
+    │     ├── 混合查询：SELECT ... ORDER BY embedding <=> query_vec LIMIT 20
     │     │   （可选 WHERE brand/price/product_type 缩小范围）
-    │     └── 返回：[(id, vector_score), ...]
+    │     └── 返回：Top-20 + vector_score
     │
-    └──→ RRF 融合
-          RRF_score(d) = Σ 1/(k + rank_i(d))
-          输出最终 Top-K
+    ├──→ RRF 融合（两面 Top-20 → 融合后 Top-20）
+    │     RRF_score(d) = Σ 1/(k + rank_i(d))
+    │
+    └──→ Rerank 精排（Cross-encoder 对 Top-20 逐条打分 → Top-5）
+          bge-reranker-v2-m3(query, doc) → relevance_score
+          输出最终 Top-5
 ```
+
+**为什么 Rerank 放在 Phase 2**：双塔（bge-large）把 query 和 doc 分别编码，快但交互不充分；Cross-encoder 把 query+doc 拼一起编码，慢但准。先粗筛 20 条再精排 5 条，MRR 通常提 10-20%，是 RAG 性价比最高的优化。`pip install FlagEmbedding` 一行依赖，~50 行代码。
 
 **2.3 多知识库路由策略**
 
@@ -311,18 +367,19 @@ PostgreSQL + pgvector（统一数据层）：
 ```
 
 - [ ] 每题标注 `expected_source`：产品 ID 或文档 source
-- [ ] 跑三方案评估：
+- [ ] 跑四种方案消融实验：
 
 ```
 方案 A：纯 BM25 关键词检索
 方案 B：纯 pgvector 向量检索（cosine distance）
 方案 C：BM25 + 向量 RRF 混合
+方案 D：C + Rerank 精排
 ```
 
-- [ ] 评估指标：Hit@1 / Hit@3 / Hit@5 + MRR
-- [ ] 输出对比表格，确定最终检索方案
+- [ ] 评估指标：Hit@1 / Hit@3 / Hit@5 / MRR / NDCG@5
+- [ ] 输出对比表格，记录各方案延迟（P50/P95），确定最终检索方案
 
-**产出**：检索评估报告，三方案对比数据，确定最终检索方案
+**产出**：检索评估报告、四方案对比数据、带 Rerank 的最终检索 pipeline
 
 ---
 
@@ -350,6 +407,11 @@ while step < max_steps:
            异常？   → 降级兜底
 ```
 
+- [ ] 单元测试覆盖（跟着代码写，不事后补）：
+  - `tests/test_loop.py` — ReAct 循环状态转换测试（mock LLM 输出）
+  - `tests/test_tools.py` — 工具注册/执行/校验测试
+  - `tests/test_intent_router.py` — 意图分类准确率测试
+
 **产出**：Agent 能查库存、查订单、做商品对比
 
 ---
@@ -357,6 +419,16 @@ while step < max_steps:
 ### Phase 4：人工兜底 + 多轮对话（Day 9-10）
 
 **目标**：异常有兜底，对话有记忆
+
+**工程规范**：
+- [ ] 启用 [Conventional Commits](https://www.conventionalcommits.org/)：
+  ```
+  feat(src): 实现情绪检测和转人工逻辑
+  fix(agent): ReAct 循环同 Tool 连续 3 次检测未生效
+  test(eval): 补充分流场景 15 道端到端测试题
+  docs(README): 更新架构图和快速开始指南
+  ```
+  每个 commit 像被同事 review 过——`feat/fix/test/docs/chore` 前缀 + 作用域。
 
 - [ ] 情绪检测：负面词/连续否定/投诉词 → 触发转人工
 - [ ] 转人工逻辑：生成对话摘要 + 已尝试方案 → 生成工单
@@ -395,16 +467,67 @@ while step < max_steps:
 
 ---
 
-### Phase 6：部署 + 测试 + 文档（Day 13-14）
+### Phase 6：部署 + CI/CD + 文档（Day 13-14）
 
-**目标**：一键部署，全链路能跑，面试能讲
+**目标**：一键部署 + CI 绿勾 + 团队级 repo 面貌，面试打开 GitHub 就加分
+
+**6.1 CI/CD（GitHub Actions）**
+
+- [ ] `.github/workflows/ci.yml` — 每次 push 自动跑：
+  ```yaml
+  on: [push, pull_request]
+  jobs:
+    lint:    ruff check + mypy
+    test:    pytest -v --cov=src --cov-report=term-missing
+    eval:    python scripts/eval.py -m fast  # 5 题抽查
+  ```
+  面试官打开 repo 看到 CI 绿勾 → 默认你是在规范化团队待过的。
+
+- [ ] `.github/workflows/eval-nightly.yml` — 每天凌晨完整评估：
+  ```yaml
+  on:
+    schedule: [{cron: "37 2 * * *"}]
+    # 凌晨 2:37（避开整点 + 半小时高峰）
+  jobs:
+    eval-full:
+      python scripts/eval.py -m full --output eval_history/
+  ```
+  记录每次评估结果，Phase 2 到 Phase 6 的 Hit@K/MRR 变化可视化。
+
+- [ ] `codecov.yml` — 测试覆盖率配置（可选但好看）
+
+**6.2 团队协作文档（一个下午写完，永久加分）**
+
+- [ ] `CONTRIBUTING.md` — 新成员上手指南：
+  ```
+  # 贡献指南
+  1. git clone + make install
+  2. 创建分支 feat/xxx 或 fix/xxx
+  3. pre-commit install（自动 ruff + mypy）
+  4. 写测试，make test 通过
+  5. PR 到 main，描述变更 + 测试结果
+  ```
+
+- [ ] `PULL_REQUEST_TEMPLATE.md`（`.github/` 目录下）：
+  ```markdown
+  ## 变更说明
+  ## 测试
+  - [ ] make lint 通过
+  - [ ] make test 通过
+  - [ ] make eval 通过（不退步）
+  ## 截图（如有 UI 变更）
+  ```
+
+- [ ] `CHANGELOG.md` — 按 Conventional Commits 自动或手动维护
+
+**6.3 部署**
 
 - [ ] Docker Compose：FastAPI + PostgreSQL 编排
 - [ ] Dockerfile：多阶段构建（bge-large 模型可选挂载）
 - [ ] `.env.example`：必填配置项（DEEPSEEK_API_KEY, EMBEDDING_DEVICE）
 - [ ] 健康检查：PostgreSQL + Embedding 模型 + LLM 可达性
 - [ ] 端到端场景测试（5 个核心场景，每个 3 个变体）
-- [ ] README：架构图 + 快速开始 + API 文档 + 评估数据
+- [ ] README：架构图 + CI badge + 快速开始 + API 文档 + 评估数据
 - [ ] 面试话术：每个 Phase 的关键决策和踩坑记录
 
 **Docker 注意事项**：
@@ -508,6 +631,14 @@ BaseAppException
 - ACID 事务、主从复制、备份恢复都是全行业成熟方案，ChromaDB 的持久化和高可用方案相对薄弱
 - 面试能讲"从 ChromaDB 切到 pgvector 的架构决策"——这是一个好的技术选型故事
 
+### 6.7 为什么一个人也要做 CI/CD + PR Template + pre-commit
+
+- 前几次面试被问 "有团队协作经验吗" 答不上来
+- GitHub 仓库面貌是面试官判断你团队经验的直觉依据——CI 绿勾、PR 模板、Makefile、pre-commit 门禁，这些文件摆在那，默认你在规范化团队待过
+- Conventional Commits 让 commit 历史有章法——一个 `feat/fix/test/docs/chore` 的 commit log 比 50 条 "update" 有力得多
+- 成本极低：`Makefile` 10 行，`.pre-commit-config.yaml` 15 行，CI yaml 30 行——加起来不到 100 行配置，但 repo 面貌从 "个人练手" 变成 "团队项目"
+- 本质上是给自己做 CI——一个人写久了会忘测试、忘 lint，pre-commit 在你 commit 之前拦住你，CI 在你 push 之后告诉你有没有退化
+
 ---
 
 ## 七、风险与降级
@@ -534,6 +665,8 @@ BaseAppException
 | 响应延迟 | ≤ 5s 非流式 | 结构化日志 timing |
 | 工具调用成功率 | ≥ 95% | Tool 日志 |
 | 图片覆盖率 | ≥ 90% 产品有图 | products.json 检查 |
+| 测试覆盖率 | ≥ 70% | pytest --cov |
+| CI 通过率 | 100% | GitHub Actions badge |
 
 ---
 
@@ -541,6 +674,11 @@ BaseAppException
 
 ```
 3c-cs-agent/
+├── .github/
+│   ├── workflows/
+│   │   ├── ci.yml                # push 自动 ruff + pytest + eval
+│   │   └── eval-nightly.yml      # 凌晨完整评估
+│   └── PULL_REQUEST_TEMPLATE.md  # PR 模板
 ├── src/
 │   ├── __init__.py
 │   ├── main.py                  # FastAPI 入口 + lifespan
@@ -549,8 +687,6 @@ BaseAppException
 │   ├── middleware.py            # 请求计时 + CORS
 │   ├── exceptions.py            # 异常继承体系
 │   ├── session.py               # 多轮会话管理
-│   ├── bm25.py                  # BM25 关键词检索
-│   ├── rrf.py                   # RRF 融合算法
 │   ├── api/
 │   │   ├── __init__.py
 │   │   ├── chat.py              # /chat /chat/stream
@@ -558,6 +694,9 @@ BaseAppException
 │   ├── core/
 │   │   ├── __init__.py
 │   │   ├── retrieve.py          # RAG 多库检索引擎
+│   │   ├── bm25.py              # BM25 关键词检索
+│   │   ├── rrf.py               # RRF 融合算法
+│   │   ├── rerank.py            # Cross-encoder 精排
 │   │   ├── generate.py          # LLM 生成 + 模型网关
 │   │   ├── ingest.py            # 文档/商品数据摄入
 │   │   ├── intent_router.py     # 意图分类
@@ -573,44 +712,57 @@ BaseAppException
 │   │   └── human_loop.py        # 人工审批/转接
 │   └── modules/                  # 业务模块（扩展位）
 │       ├── __init__.py
-│       ├── customer_service/    # 客服模块
-│       ├── product_compare/     # 商品对比
-│       └── content_gen/         # 内容生成（预留）
+│       ├── customer_service/
+│       ├── product_compare/
+│       └── content_gen/
+├── tests/                        # 单元测试（跟随代码写，不事后补）
+│   ├── __init__.py
+│   ├── test_retrieve.py
+│   ├── test_bm25.py
+│   ├── test_rrf.py
+│   ├── test_rerank.py
+│   ├── test_loop.py
+│   ├── test_tools.py
+│   └── test_intent_router.py
 ├── data/
 │   ├── knowledge/               # 知识库源文档
-│   │   ├── laptop_guide.md      # 笔记本选购指南
-│   │   ├── phone_guide.md       # 手机选购指南
-│   │   ├── after_sales.md       # 售后政策
-│   │   ├── trade_in.md          # 以旧换新政策
-│   │   └── payment.md           # 支付与分期
+│   │   ├── laptop_guide.md
+│   │   ├── phone_guide.md
+│   │   ├── after_sales.md
+│   │   ├── trade_in.md
+│   │   └── payment.md
 │   ├── products/                # 商品数据（爬虫产出）
-│   │   ├── raw/                  # 原始爬取数据（JSONL，按品牌分文件）
-│   │   ├── normalized/           # KEY_MAP 归一化清洗后（JSONL，按品牌分文件）
-│   │   └── laptops.jsonl         # 合并清洗后的 304 条产品数据
+│   │   ├── raw/
+│   │   ├── normalized/
+│   │   └── laptops.jsonl
 │   ├── images/                  # 产品图片
-│   │   └── laptops/             # 笔记本主图
-│   │       ├── zol_10001.jpg
-│   │       └── ...
+│   │   └── laptops/
 │   ├── mock/                    # 模拟数据
-│   │   ├── orders.json          # 订单数据
-│   │   └── stores.json          # 库存数据
+│   │   ├── orders.json
+│   │   └── stores.json
 │   └── test_questions.json      # 评估测试题
 ├── scripts/
-│   ├── crawl_test.py            # Playwright 爬虫主脚本
-│   ├── collect_params.py        # 从爬取结果提取参数
-│   ├── clean_products.py        # KEY_MAP 规格清洗 + 归一化
-│   ├── generate_descriptions.py # 模板拼接自然语言描述
-│   ├── ingest_knowledge.py      # 知识库 Markdown → pgvector knowledge_chunks 表
-│   ├── ingest_pgvector.py       # 产品数据 → pgvector laptop_products 表
-│   ├── verify_knowledge.py      # 知识库向量检索验证
-│   ├── verify_retrieval.py      # 产品混合检索验证（向量 + WHERE 过滤）
-│   ├── eval.py                  # 检索评估脚本（Phase 2）
-│   └── generate_orders.py       # 模拟订单生成（Phase 3）
+│   ├── crawl_test.py
+│   ├── collect_params.py
+│   ├── clean_products.py
+│   ├── generate_descriptions.py
+│   ├── ingest_knowledge.py
+│   ├── ingest_pgvector.py
+│   ├── verify_knowledge.py
+│   ├── verify_retrieval.py
+│   ├── eval.py
+│   └── generate_orders.py
+├── eval_history/                 # 每次评估结果存档（Phase 2+）
 ├── pgdata/                      # PostgreSQL 持久化目录（gitignore）
 ├── docker-compose.yml
 ├── Dockerfile
 ├── .env.example
 ├── .gitignore
+├── .pre-commit-config.yaml      # git commit 前自动门禁
+├── pyproject.toml               # ruff + mypy + pytest 配置
+├── Makefile                     # 常用命令入口
+├── CONTRIBUTING.md              # 新成员贡献指南
+├── CHANGELOG.md                 # 变更记录
 ├── requirements.txt
 ├── README.md
 └── PLAN.md                      # 本文件
@@ -622,7 +774,7 @@ BaseAppException
 
 ### 30 秒版：这是什么
 
-> "我做了一个面向 3C 数码电商场景的智能客服 Agent 系统。用真实爬取的商品数据搭建了多知识库 RAG 和 ReAct Agent 引擎，支持参数查询、商品对比、库存查询和自动转人工。"
+> "我做了一个面向 3C 数码电商场景的智能客服 Agent 系统。用真实爬取的 304 个笔记本数据搭建了 pgvector 多知识库 RAG 和 ReAct Agent 引擎，支持参数查询、商品对比、库存查询和自动转人工。整个项目按团队标准维护：CI/CD、pre-commit 门禁、Makefile 一键命令、Conventional Commits。"
 
 ### 2 分钟版：怎么做的
 
@@ -630,10 +782,10 @@ BaseAppException
 
 ### 核心技术亮点
 
-> "一是用 Playwright 解决了中关村的 JS Challenge 反爬，二是选了 pgvector 做统一数据层——向量检索和元数据过滤一次 SQL 搞定，比 ChromaDB 架构更简洁，三是手写 ReAct 循环理解了 Agent 的状态管理，四是用三方案消融实验量化了检索效果——不是感觉好，是数据说话。"
+> "一是用 Playwright 解决了中关村的 JS Challenge 反爬，二是选了 pgvector 做统一数据层——向量检索和元数据过滤一次 SQL 搞定，三是手写 ReAct 循环理解了 Agent 的状态管理，四是用四方案消融实验（含 Rerank）量化了检索效果——不是感觉好，是数据说话。另外整个项目按团队工程标准维护：GitHub Actions CI、ruff+mypy 代码门禁、Makefile 一键命令、Conventional Commits——虽然是我一个人写的，但项目面貌是团队级的。"
 
 ### 踩过的坑
 
-> "爬虫踩了 JS Challenge 的坑。pgvector 踩了 psycopg2 向量传参的坑——没有用 pgvector Python adapter，靠字符串 cast `'[...]'::vector` 绕过去。Agent 踩了死循环的坑——LLM 反复调同一个工具，加了相同 Tool 连续 3 次检测。多库检索踩了路由的坑——用户问'X1 Carbon 怎么退货'，该先搜售后政策库还是先搜商品库。这些坑让我理解了为什么生产级 Agent 需要显式状态图。"
+> "爬虫踩了 JS Challenge 的坑。pgvector 踩了 psycopg2 向量传参的坑。Agent 踩了死循环的坑——LLM 反复调同一个工具，加了相同 Tool 连续 3 次检测。工程上踩了'一个人怎么写团队项目'的坑——靠 pyproject.toml + pre-commit + CI + Conventional Commits 这套组合拳，让 solo project 看起来像团队维护的。这些坑让我理解了为什么生产级代码需要门禁和自动化。"
 
 ---

@@ -1,0 +1,29 @@
+# =============================================================================
+# .pre-commit-config.yaml — git commit 之前的自动门禁
+# =============================================================================
+# 工作原理：
+#   你敲 git commit → pre-commit 拦截 → 自动跑 ruff + mypy → 通过才放行
+#   第一次用需要先跑一次：pre-commit install（把钩子注册到 .git/hooks/）
+# ============================================================================= 
+
+# -------------------------------------------------------------------
+# repos — 列出每次 commit 前要跑的工具
+# -------------------------------------------------------------------
+repos:
+  # ruff — 自动格式化 + 代码检查
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.11.0                        # ruff 版本，跟 pip 装的保持一致
+    hooks:
+      # 第一步：自动格式化（双引号、import 排序、换行）——先 format 再 check      
+      - id: ruff-format
+      # 第二步：代码检查（E/W/F/I 规则）
+      - id: ruff
+        args: [--fix]                   # 能自动修的自动修，修不了的才报错       
+
+  # mypy — 类型检查（只查 src/，不查 scripts/）
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.15.0                        # mypy 版本
+    hooks:
+      - id: mypy
+        args: [--ignore-missing-imports]
+        # additional_dependencies 可以指定 mypy 需要的额外包（如果 src/ 用了pydantic 之类的）

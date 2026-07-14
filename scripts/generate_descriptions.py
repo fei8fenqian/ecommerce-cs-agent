@@ -5,7 +5,7 @@ def build_description(record: dict) -> str:
     # 句1: 产品名称价格
 
     price_str = f"￥{record['price']}" if record.get("price") else "价格待定"
-    name = record.get("product_name")
+    name = record.get("product_name") or ""
     if name.startswith(record["brand"]):
         sentences.append(f"{name}，售价{price_str}")
     else:

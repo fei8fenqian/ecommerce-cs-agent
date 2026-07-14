@@ -1,6 +1,6 @@
-from pathlib import Path
 import json
 import re
+from pathlib import Path
 
 # ====== 映射表 ======
 FIELD_MAP = {
@@ -41,12 +41,25 @@ for std_key, raw_keys in FIELD_MAP.items():
 
 # 垃圾词列表，匹配后删除
 NOISE_WORDS = [
-    r'运行流畅', r'极速运行', r'多任务运行强', r'显示流畅',
-    r'旗舰机', r'高端机', r'中端主流机', r'强', r'流畅', r'高清', r'普清',
-    r'热门游戏本>?', r'长续航笔记本>?', r'耗电高',
-    r'更多.*?>',
-    r'游戏、便捷',
-    r'略显吃力', r'多任务运行弱', r'运行弱',
+    r"运行流畅",
+    r"极速运行",
+    r"多任务运行强",
+    r"显示流畅",
+    r"旗舰机",
+    r"高端机",
+    r"中端主流机",
+    r"强",
+    r"流畅",
+    r"高清",
+    r"普清",
+    r"热门游戏本>?",
+    r"长续航笔记本>?",
+    r"耗电高",
+    r"更多.*?>",
+    r"游戏、便捷",
+    r"略显吃力",
+    r"多任务运行弱",
+    r"运行弱",
 ]
 
 # 色域类型标注：raw_key → 显示前缀
@@ -66,88 +79,95 @@ def clean_value(std_key, raw_val, raw_key=""):
 
     # ===== 通用：去掉垃圾词 =====
     for noise in NOISE_WORDS:
-        raw_val = re.sub(noise, '', raw_val)
+        raw_val = re.sub(noise, "", raw_val)
     # 去掉所有残留的 >（都在数据中是噪音）
-    raw_val = raw_val.replace('>', '')
-    raw_val = re.sub(r'\s+', ' ', raw_val).strip()
+    raw_val = raw_val.replace(">", "")
+    raw_val = re.sub(r"\s+", " ", raw_val).strip()
 
     # ===== 单位保留型：提取数字，拼回单位 =====
     if std_key == "ram":
         # "32GB（16GB×2）极速运行" → "32GB"
-        m = re.search(r'(\d+)GB', raw_val.replace(' ', ''))
+        m = re.search(r"(\d+)GB", raw_val.replace(" ", ""))
         return f"{m.group(1)}GB" if m else raw_val
 
     if std_key == "storage":
-        m = re.search(r'(\d+)\s*(GB|TB)', raw_val)
+        m = re.search(r"(\d+)\s*(GB|TB)", raw_val)
         return f"{m.group(1)}{m.group(2)}" if m else raw_val
 
     if std_key == "weight":
         # "970g" → "0.97Kg", "1.49Kg" → "1.49Kg"
-        raw_clean = raw_val.lower().replace(' ', '')
-        m = re.search(r'[\d.]+', raw_val)
+        raw_clean = raw_val.lower().replace(" ", "")
+        m = re.search(r"[\d.]+", raw_val)
         if not m:
             return raw_val
         num = float(m.group())
-        if raw_clean.endswith('g') and not raw_clean.endswith('kg'):
+        if raw_clean.endswith("g") and not raw_clean.endswith("kg"):
             return f"{num / 1000:.2f}Kg"
         return f"{num}Kg"
 
     if std_key == "screen_size":
-        m = re.search(r'[\d.]+', raw_val)
-        return f'{m.group()}英寸' if m else raw_val
+        m = re.search(r"[\d.]+", raw_val)
+        return f"{m.group()}英寸" if m else raw_val
 
     if std_key == "resolution":
-        m = re.search(r'\d+[xX×]\d+', raw_val)
+        m = re.search(r"\d+[xX×]\d+", raw_val)
         return m.group() if m else raw_val
 
     if std_key == "brightness":
         # "400nits" → "400nit"
-        m = re.search(r'\d+', raw_val)
+        m = re.search(r"\d+", raw_val)
         return f"{m.group()}nit" if m else raw_val
 
     if std_key == "refresh_rate":
-        m = re.search(r'\d+', raw_val)
+        m = re.search(r"\d+", raw_val)
         return f"{m.group()}Hz" if m else raw_val
 
     if std_key == "cpu_base_freq":
-        m = re.search(r'[\d.]+', raw_val)
+        m = re.search(r"[\d.]+", raw_val)
         return f"{m.group()}GHz" if m else raw_val
 
     if std_key == "cpu_turbo_freq":
-        m = re.search(r'[\d.]+', raw_val)
+        m = re.search(r"[\d.]+", raw_val)
         return f"{m.group()}GHz" if m else raw_val
 
     if std_key == "thickness":
-        return raw_val.replace('mm', 'mm').strip()
+        return raw_val.replace("mm", "mm").strip()
 
     if std_key == "gpu_vram":
-        m = re.search(r'(\d+)GB', raw_val.replace(' ', ''))
+        m = re.search(r"(\d+)GB", raw_val.replace(" ", ""))
         return f"{m.group(1)}GB" if m else raw_val
 
     # ===== 文字清洗型 =====
     if std_key == "product_type":
-        types = re.findall(r'(轻薄笔记本|轻薄本|游戏本|商务办公本|商务本|家用|商用|全能学生本|影音娱乐本|二合一笔记本)', raw_val)
+        types = re.findall(
+            r"(轻薄笔记本|轻薄本|游戏本|商务办公本|商务本|"
+            "家用|商用|全能学生本|影音娱乐本|二合一笔记本)",
+            raw_val,
+        )
         return types[0] if types else raw_val
 
     if std_key == "os":
-        raw_val = raw_val.replace('预装', '')
-        raw_val = re.sub(r'[（(].*', '', raw_val)
-        raw_val = raw_val.replace('64bit', '').replace('64位', '')
+        raw_val = raw_val.replace("预装", "")
+        raw_val = re.sub(r"[（(].*", "", raw_val)
+        raw_val = raw_val.replace("64bit", "").replace("64位", "")
         return raw_val.strip()
 
     # CPU / GPU 芯片
     if std_key in ("cpu", "cpu_series", "gpu_chip", "gpu_type", "ram_type", "storage_desc"):
-        raw_val = re.sub(r'>.*$', '', raw_val)
-        raw_val = re.sub(r'更多.*$', '', raw_val)
+        raw_val = re.sub(r">.*$", "", raw_val)
+        raw_val = re.sub(r"更多.*$", "", raw_val)
         return raw_val.strip()
 
     # 接口类
     if std_key == "usb_ports":
         # 剔除 RJ45、电源等非 USB 接口
-        segments = re.split(r'[；;]', raw_val)
-        usb_segments = [s.strip() for s in segments
-                        if s.strip() and not re.search(r'RJ45|网络接口|电源接口|电源', s)]
-        return '；'.join(usb_segments).strip()
+        segments = re.split(r"[；;]", raw_val)
+        usb_segments = [
+            s.strip()
+            for s in segments
+            if s.strip() and not re.search(r"RJ45|网络接口|电源接口|电源", s)
+        ]
+        return "；".join(usb_segments).strip()
 
     if std_key == "video_ports":
         return raw_val.strip()
@@ -158,7 +178,7 @@ def clean_value(std_key, raw_val, raw_key=""):
 
     # 色域：带上类型前缀
     if std_key == "color_gamut":
-        m = re.search(r'\d+%', raw_val)
+        m = re.search(r"\d+%", raw_val)
         if not m:
             return raw_val
         prefix = GAMUT_PREFIX.get(raw_key, "")
@@ -207,7 +227,7 @@ def _parse_price(val):
     if not val:
         return None
     try:
-        return int(re.sub(r'[^\d]', '', str(val)))
+        return int(re.sub(r"[^\d]", "", str(val)))
     except ValueError:
         return None
 
@@ -217,14 +237,14 @@ def _is_recent(product):
     rd = product.get("release_date", "")
     if not rd:
         return True  # 没有日期的不删
-    years = re.findall(r'20\d{2}', rd)
+    years = re.findall(r"20\d{2}", rd)
     if not years:
         return True
     return int(years[0]) >= 2024
 
 
 # ====== 主流程 ======
-if __name__=="__main__":
+if __name__ == "__main__":
     root = Path(__file__).parent.parent
     normalized_dir = root / "data" / "products" / "normalized"
     normalized_dir.mkdir(parents=True, exist_ok=True)

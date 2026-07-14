@@ -1,6 +1,7 @@
-from playwright.sync_api import sync_playwright
-from pathlib import Path
 import json
+from pathlib import Path
+
+from playwright.sync_api import sync_playwright
 
 # ====== 配置 ======
 root = Path(__file__).parent.parent
@@ -53,9 +54,7 @@ def scrape_params(detail_page, data_page, product_url):
         data_page.goto(product_url, timeout=30000, wait_until="domcontentloaded")
         data_page.wait_for_selector("text=查看完整参数", timeout=10000)
 
-        param_path = data_page.locator("a._j_MP_more.section-more").first.get_attribute(
-            "href"
-        )
+        param_path = data_page.locator("a._j_MP_more.section-more").first.get_attribute("href")
         if not param_path:
             return {}
 
@@ -92,12 +91,8 @@ def scrape_params(detail_page, data_page, product_url):
                 if th.count() == 0 or td.count() == 0:
                     continue
 
-                param_name = (
-                    th.first.text_content().strip().replace("问豆包", "").strip()
-                )
-                param_val = (
-                    td.locator('span[id^="newPmVal"]').first.text_content().strip()
-                )
+                param_name = th.first.text_content().strip().replace("问豆包", "").strip()
+                param_val = td.locator('span[id^="newPmVal"]').first.text_content().strip()
                 params[param_name] = param_val
 
             if category and params:
@@ -116,14 +111,12 @@ if __name__ == "__main__":
         browser = p.chromium.launch(headless=True)
 
         for brand_name, brand_url in BRANDS:
-            print(f"\n{'='*50}")
+            print(f"\n{'=' * 50}")
             print(f"开始爬取: {brand_name}")
-            print(f"{'='*50}")
+            print(f"{'=' * 50}")
 
             # 创建存储文件
-            save_path = (
-                root / "data" / "products" / "raw" / f"{brand_name}_laptops.jsonl"
-            )
+            save_path = root / "data" / "products" / "raw" / f"{brand_name}_laptops.jsonl"
             save_path.parent.mkdir(parents=True, exist_ok=True)
 
             # 开标签页
@@ -154,27 +147,23 @@ if __name__ == "__main__":
                     # 取基础信息
                     product = extract_card_info(card)
                     if product is None:
-                        print(f"    [{card_idx+1}] 跳过推广")
+                        print(f"    [{card_idx + 1}] 跳过推广")
                         continue
 
                     # 抓参数
                     product_url = f"https://detail.zol.com.cn{product['详情链接']}"
-                    product["params"] = scrape_params(
-                        detail_page, data_page, product_url
-                    )
+                    product["params"] = scrape_params(detail_page, data_page, product_url)
 
                     # 保存一行 JSONL
                     f.write(json.dumps(product, ensure_ascii=False) + "\n")
-                    print(f"    [{card_idx+1}] {product['产品名称'][:30]}...")
+                    print(f"    [{card_idx + 1}] {product['产品名称'][:30]}...")
 
                 # 翻页
                 next_btn = page.locator(".pagebar a.next")
                 if next_btn.count() == 0:
                     print("  没有下一页了")
                     break
-                current_url = (
-                    f"https://detail.zol.com.cn{next_btn.first.get_attribute('href')}"
-                )
+                current_url = f"https://detail.zol.com.cn{next_btn.first.get_attribute('href')}"
 
             f.close()
             page.close()

@@ -1,10 +1,12 @@
-import psycopg2
-from sentence_transformers import SentenceTransformer
-import json
-from .generate_descriptions import build_description
 import hashlib
-from psycopg2.extras import Json
+import json
 from pathlib import Path
+
+import psycopg2
+from psycopg2.extras import Json
+from sentence_transformers import SentenceTransformer
+
+from .generate_descriptions import build_description
 
 
 def connect_product_db() -> psycopg2.extensions.connection:
@@ -57,7 +59,7 @@ def load_model() -> SentenceTransformer:
     return SentenceTransformer("BAAI/bge-large-zh-v1.5")
 
 
-def read_products(path: str) -> list[dict]:
+def read_products(path: str | Path) -> list[dict]:
     """读 JSONL，返回产品列表"""
     products = []
     with open(path, "r", encoding="utf-8") as f:
