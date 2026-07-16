@@ -5,21 +5,11 @@ from pathlib import Path
 import psycopg2
 from sentence_transformers import SentenceTransformer
 
+from .db import connect_db
 
-def connect_knowledge_db() -> psycopg2.extensions.connection:
-    conn = psycopg2.connect(
-        host="localhost",
-        port=5433,
-        user="postgres",
-        password="postgres",
-        dbname="postgres",
-    )
 
+def create_knowledge_table(conn: psycopg2.extensions.connection):
     cur = conn.cursor()
-
-    # PG 里装的扩展叫 vector
-    cur.execute("create extension if not exists vector")
-
     cur.execute("drop table if exists knowledge_chunks")
 
     # 最后一行不加逗号
@@ -34,7 +24,6 @@ def connect_knowledge_db() -> psycopg2.extensions.connection:
     conn.commit()
     cur.close()
     print("表建好了")
-    return conn
 
 
 def load_model() -> SentenceTransformer:
@@ -134,7 +123,8 @@ def _split_long(source, title, content):
 
 
 if __name__ == "__main__":
-    conn = connect_knowledge_db()
+    conn = connect_db()
+    create_knowledge_table(conn)
     model = load_model()
     print("加载完成")
 

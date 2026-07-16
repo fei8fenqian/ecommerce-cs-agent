@@ -6,25 +6,14 @@ import psycopg2
 from psycopg2.extras import Json
 from sentence_transformers import SentenceTransformer
 
+from .db import connect_db
 from .generate_descriptions import build_description
 
 
-def connect_product_db() -> psycopg2.extensions.connection:
+def create_product_table(conn: psycopg2.extensions.connection):
     """连 pgvector，建表，返回连接"""
-    # 跟 PG 服务器握手、验证身份、建立一条 TCP 连接
-    # 返回一个 Connection 对象
-    conn = psycopg2.connect(
-        host="localhost",
-        port=5433,
-        user="postgres",
-        password="postgres",
-        dbname="postgres",
-    )
     # cursor 是一个执行句柄。你通过它发 SQL、读结果。
     cur = conn.cursor()
-    # cur.execute(sql) 把字符串里的 SQL 发到 PG 执行
-    # 安装pgvector插件
-    cur.execute("create extension if not exists vector")
     # 删除 laptop_products 表，方便重跑脚本
     cur.execute("drop table if exists laptop_products")
     # CREATE TABLE 建表
@@ -50,7 +39,6 @@ def connect_product_db() -> psycopg2.extensions.connection:
     conn.commit()
     print("表建好了")
     cur.close()
-    return conn
 
 
 def load_model() -> SentenceTransformer:
@@ -117,7 +105,8 @@ def ingest(
 
 
 if __name__ == "__main__":
-    conn = connect_product_db()
+    conn = connect_db()
+    create_product_table(conn)
     model = load_model()
 
     root = Path(__file__).parent.parent

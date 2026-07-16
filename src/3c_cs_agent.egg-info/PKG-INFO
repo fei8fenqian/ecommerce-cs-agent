@@ -1,0 +1,5 @@
+Metadata-Version: 2.4
+Name: 3c-cs-agent
+Version: 0.1.0
+Summary: 3C 数码智能客服 Agent 系统
+Requires-Python: >=3.12

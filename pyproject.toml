@@ -67,3 +67,6 @@ ignore_missing_imports = true
 testpaths = ["tests/"]              # pytest 只在这个目录下找测试
 addopts = "-v --tb=short"           # -v：每个测试函数都打印 PASS/FAIL
                                     # --tb=short：报错时只显示关键几行，不刷屏
+
+[tool.setuptools.packages.find]
+where = ["src"]
