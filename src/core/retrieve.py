@@ -31,6 +31,7 @@ _model = SentenceTransformer(settings.embedding_model)
 # 用一个短连接建完 BM25 索引就关
 _conn = _connect()
 _bm25_products = BM25Index(_conn, table="laptop_products", text_col="description")
+_bm25_phones = BM25Index(_conn, table="phone_products", text_col="description")
 _bm25_knowledge = BM25Index(_conn, table="knowledge_chunks", text_col="content")
 _conn.close()
 
@@ -58,7 +59,7 @@ def vector_search(
     q_vec_str = str(q_vec)
     where = where or "1=1"  # 没有过滤条件时查全表
 
-    if table == "laptop_products":
+    if table in ("laptop_products", "phone_products"):
         cols = "id, product_name, brand, price, description"
     elif table == "knowledge_chunks":
         cols = "id, source, title, content"
@@ -78,7 +79,7 @@ def vector_search(
     cur = conn.cursor()
 
     try:
-        if table == "laptop_products":
+        if table in ("laptop_products", "phone_products"):
             cur.execute(sql, (q_vec_str, q_vec_str, top_k))
             res = []
             for row in cur.fetchall():
@@ -131,6 +132,8 @@ def hybrid_search(
     retrieve_vector = vector_search(query, table=table, where=where, top_k=top_k)
     if table == "laptop_products":
         retrieve_bm25 = _bm25_products.search(query, top_k=20)
+    elif table == "phone_products":
+        retrieve_bm25 = _bm25_phones.search(query, top_k=20)
     elif table == "knowledge_chunks":
         retrieve_bm25 = _bm25_knowledge.search(query, top_k=20)
     else:

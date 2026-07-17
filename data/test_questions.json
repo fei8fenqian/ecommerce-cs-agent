@@ -1,0 +1,498 @@
+[
+  {
+    "id": 1,
+    "query": "联想拯救者用的什么CPU？",
+    "type": "precise",
+    "difficulty": "easy",
+    "expected_source": "laptop_products",
+    "expected_keywords": ["Ryzen", "AMD", "Intel", "酷睿", "锐龙"]
+  },
+  {
+    "id": 2,
+    "query": "华为MateBook 14内存多大？",
+    "type": "precise",
+    "difficulty": "easy",
+    "expected_source": "laptop_products",
+    "expected_keywords": ["GB", "DDR", "LPDDR"]
+  },
+  {
+    "id": 3,
+    "query": "微星泰坦16用的什么显卡？",
+    "type": "precise",
+    "difficulty": "easy",
+    "expected_source": "laptop_products",
+    "expected_keywords": ["RTX", "GeForce"]
+  },
+  {
+    "id": 4,
+    "query": "惠普星Book Pro Air屏幕分辨率？",
+    "type": "precise",
+    "difficulty": "easy",
+    "expected_source": "laptop_products",
+    "expected_keywords": ["分辨率", "x"]
+  },
+  {
+    "id": 5,
+    "query": "MacBook Neo多重？",
+    "type": "precise",
+    "difficulty": "easy",
+    "expected_source": "laptop_products",
+    "expected_keywords": ["Kg", "g", "重量", "kg"]
+  },
+  {
+    "id": 6,
+    "query": "戴尔灵越15有哪些接口？",
+    "type": "precise",
+    "difficulty": "easy",
+    "expected_source": "laptop_products",
+    "expected_keywords": ["USB", "Type-C", "HDMI"]
+  },
+  {
+    "id": 7,
+    "query": "荣耀MagicBook Pro的CPU是啥？",
+    "type": "precise",
+    "difficulty": "easy",
+    "expected_source": "laptop_products",
+    "expected_keywords": ["Ultra", "Core", "酷睿", "Intel"]
+  },
+  {
+    "id": 8,
+    "query": "机械革命无界15X内存多大？",
+    "type": "precise",
+    "difficulty": "easy",
+    "expected_source": "laptop_products",
+    "expected_keywords": ["GB", "DDR", "32", "16"]
+  },
+  {
+    "id": 9,
+    "query": "拯救者R9000P屏幕刷新率多少？",
+    "type": "precise",
+    "difficulty": "easy",
+    "expected_source": "laptop_products",
+    "expected_keywords": ["Hz", "刷新率"]
+  },
+  {
+    "id": 10,
+    "query": "华为MateBook电池多大？",
+    "type": "precise",
+    "difficulty": "easy",
+    "expected_source": "laptop_products",
+    "expected_keywords": ["瓦时", "Wh", "电池", "锂电池"]
+  },
+  {
+    "id": 11,
+    "query": "华为Pura X的电池多大容量？",
+    "type": "precise",
+    "difficulty": "easy",
+    "expected_source": "phone_products",
+    "expected_keywords": ["mAh", "电池", "容量"]
+  },
+  {
+    "id": 12,
+    "query": "OPPO Find X9s Pro充电多快？",
+    "type": "precise",
+    "difficulty": "easy",
+    "expected_source": "phone_products",
+    "expected_keywords": ["W", "闪充", "有线充电", "充电"]
+  },
+  {
+    "id": 13,
+    "query": "红米那款2亿像素的是哪个型号？",
+    "type": "precise",
+    "difficulty": "easy",
+    "expected_source": "phone_products",
+    "expected_keywords": ["红米", "亿像素", "像素", "摄像头"]
+  },
+  {
+    "id": 14,
+    "query": "三星的旗舰机屏幕刷新率能到多少？",
+    "type": "precise",
+    "difficulty": "easy",
+    "expected_source": "phone_products",
+    "expected_keywords": ["Hz", "刷新率", "三星"]
+  },
+  {
+    "id": 15,
+    "query": "小米15 Ultra多重？",
+    "type": "precise",
+    "difficulty": "easy",
+    "expected_source": "phone_products",
+    "expected_keywords": ["g", "重量"]
+  },
+  {
+    "id": 16,
+    "query": "iphone最新款支持防水吗？",
+    "type": "precise",
+    "difficulty": "easy",
+    "expected_source": "phone_products",
+    "expected_keywords": ["IP", "防水"]
+  },
+  {
+    "id": 17,
+    "query": "一加那个手机用的什么处理器？",
+    "type": "precise",
+    "difficulty": "easy",
+    "expected_source": "phone_products",
+    "expected_keywords": ["骁龙", "天玑", "CPU", "处理器"]
+  },
+  {
+    "id": 18,
+    "query": "有没有NFC功能的手机推荐？",
+    "type": "precise",
+    "difficulty": "easy",
+    "expected_source": "phone_products",
+    "expected_keywords": ["NFC", "支持"]
+  },
+  {
+    "id": 19,
+    "query": "荣耀Magic系列的屏幕是什么材质？",
+    "type": "precise",
+    "difficulty": "easy",
+    "expected_source": "phone_products",
+    "expected_keywords": ["荣耀", "OLED", "AMOLED", "屏幕材质"]
+  },
+  {
+    "id": 20,
+    "query": "vivo X200 Pro的摄像头参数？",
+    "type": "precise",
+    "difficulty": "easy",
+    "expected_source": "phone_products",
+    "expected_keywords": ["vivo", "像素", "摄像头", "OIS", "光圈"]
+  },
+  {
+    "id": 21,
+    "query": "笔记本退货什么流程？",
+    "type": "policy",
+    "difficulty": "easy",
+    "expected_source": "knowledge_chunks",
+    "expected_keywords": ["退货", "退款", "7天", "无理由"]
+  },
+  {
+    "id": 22,
+    "query": "笔记本保修多久？",
+    "type": "policy",
+    "difficulty": "easy",
+    "expected_source": "knowledge_chunks",
+    "expected_keywords": ["保修", "质保", "年"]
+  },
+  {
+    "id": 23,
+    "query": "以旧换新支持哪些品类？",
+    "type": "policy",
+    "difficulty": "easy",
+    "expected_source": "knowledge_chunks",
+    "expected_keywords": ["以旧换新", "手机", "平板", "笔记本"]
+  },
+  {
+    "id": 24,
+    "query": "笔记本激活了还能退吗？",
+    "type": "policy",
+    "difficulty": "easy",
+    "expected_source": "knowledge_chunks",
+    "expected_keywords": ["激活", "Windows", "退货", "不支持"]
+  },
+  {
+    "id": 25,
+    "query": "Intel和AMD处理器怎么选？",
+    "type": "recommendation",
+    "difficulty": "easy",
+    "expected_source": "knowledge_chunks",
+    "expected_keywords": ["Intel", "AMD", "选购", "处理器", "游戏", "办公"]
+  },
+  {
+    "id": 26,
+    "query": "RTX 4060能玩什么游戏？",
+    "type": "recommendation",
+    "difficulty": "easy",
+    "expected_source": "knowledge_chunks",
+    "expected_keywords": ["RTX", "游戏", "显卡"]
+  },
+  {
+    "id": 27,
+    "query": "手机进水了保修吗？",
+    "type": "policy",
+    "difficulty": "easy",
+    "expected_source": "knowledge_chunks",
+    "expected_keywords": ["进水", "保修", "人为", "损坏"]
+  },
+  {
+    "id": 28,
+    "query": "退款多久到账？",
+    "type": "policy",
+    "difficulty": "easy",
+    "expected_source": "knowledge_chunks",
+    "expected_keywords": ["退款", "到账", "工作日"]
+  },
+  {
+    "id": 29,
+    "query": "学生党编程买什么笔记本？",
+    "type": "recommendation",
+    "difficulty": "medium",
+    "expected_source": "knowledge_chunks",
+    "expected_keywords": ["编程", "学生", "轻薄", "32GB"]
+  },
+  {
+    "id": 30,
+    "query": "轻薄本和游戏本有什么区别？",
+    "type": "recommendation",
+    "difficulty": "medium",
+    "expected_source": "knowledge_chunks",
+    "expected_keywords": ["独显", "续航", "重量", "轻薄", "游戏"]
+  },
+  {
+    "id": 31,
+    "query": "Mac适合程序员吗？",
+    "type": "recommendation",
+    "difficulty": "medium",
+    "expected_source": "knowledge_chunks",
+    "expected_keywords": ["Mac", "编程", "开发", "程序员"]
+  },
+  {
+    "id": 32,
+    "query": "拯救者和微星泰坦哪个性能强？",
+    "type": "comparison",
+    "difficulty": "medium",
+    "expected_source": "laptop_products",
+    "expected_keywords": ["拯救者", "泰坦", "RTX", "CPU", "显卡"]
+  },
+  {
+    "id": 33,
+    "query": "华为MateBook和荣耀MagicBook怎么选？",
+    "type": "comparison",
+    "difficulty": "medium",
+    "expected_source": "laptop_products",
+    "expected_keywords": ["华为", "荣耀", "MateBook", "MagicBook"]
+  },
+  {
+    "id": 34,
+    "query": "惠普星Book和MacBook Neo哪个轻？",
+    "type": "comparison",
+    "difficulty": "medium",
+    "expected_source": "laptop_products",
+    "expected_keywords": ["惠普", "MacBook", "重量", "Kg"]
+  },
+  {
+    "id": 35,
+    "query": "AppleCare+值不值得买？",
+    "type": "policy",
+    "difficulty": "medium",
+    "expected_source": "knowledge_chunks",
+    "expected_keywords": ["AppleCare", "意外", "电池", "保修"]
+  },
+  {
+    "id": 36,
+    "query": "屏幕有坏点能换吗？",
+    "type": "policy",
+    "difficulty": "medium",
+    "expected_source": "knowledge_chunks",
+    "expected_keywords": ["坏点", "亮点", "换货", "屏幕"]
+  },
+  {
+    "id": 37,
+    "query": "华为Pura X和iPhone 17 Pro Max拍照哪个强？",
+    "type": "comparison",
+    "difficulty": "medium",
+    "expected_source": "phone_products",
+    "expected_keywords": ["华为", "苹果", "iPhone", "像素", "摄像头"]
+  },
+  {
+    "id": 38,
+    "query": "OPPO Find和vivo X系列哪个性价比高？",
+    "type": "comparison",
+    "difficulty": "medium",
+    "expected_source": "phone_products",
+    "expected_keywords": ["OPPO", "vivo", "Find", "价格"]
+  },
+  {
+    "id": 39,
+    "query": "预算3000左右拍照好点的手机有推荐吗？",
+    "type": "recommendation",
+    "difficulty": "medium",
+    "expected_source": "phone_products",
+    "expected_keywords": ["像素", "摄像头", "拍照"]
+  },
+  {
+    "id": 40,
+    "query": "剪辑视频需要什么配置的笔记本？",
+    "type": "recommendation",
+    "difficulty": "medium",
+    "expected_source": "knowledge_chunks",
+    "expected_keywords": ["视频剪辑", "独显", "内存", "GB"]
+  },
+  {
+    "id": 41,
+    "query": "LPDDR和DDR5内存有什么区别？",
+    "type": "recommendation",
+    "difficulty": "medium",
+    "expected_source": "knowledge_chunks",
+    "expected_keywords": ["LPDDR", "DDR", "板载", "升级", "内存"]
+  },
+  {
+    "id": 42,
+    "query": "那个华为触屏本好用吗？",
+    "type": "precise",
+    "difficulty": "medium",
+    "expected_source": "laptop_products",
+    "expected_keywords": ["华为", "MateBook", "触控"]
+  },
+  {
+    "id": 43,
+    "query": "经常出差 轻一点的本 续航长 有啥推荐的",
+    "type": "recommendation",
+    "difficulty": "hard",
+    "expected_source": "laptop_products",
+    "expected_keywords": ["轻薄", "Kg", "续航"]
+  },
+  {
+    "id": 44,
+    "query": "搞AI跑模型 不要太贵的 1万以内",
+    "type": "recommendation",
+    "difficulty": "hard",
+    "expected_source": "laptop_products",
+    "expected_keywords": ["RTX", "显存", "AI", "GPU"]
+  },
+  {
+    "id": 45,
+    "query": "大一新生 学计算机的 买啥本好",
+    "type": "recommendation",
+    "difficulty": "hard",
+    "expected_source": "knowledge_chunks",
+    "expected_keywords": ["编程", "学生", "轻薄", "内存"]
+  },
+  {
+    "id": 46,
+    "query": "苹果最便宜那款MacBook够用吗 就上上网写写文档",
+    "type": "recommendation",
+    "difficulty": "hard",
+    "expected_source": "laptop_products",
+    "expected_keywords": ["MacBook", "Neo"]
+  },
+  {
+    "id": 47,
+    "query": "打游戏的本2kg以内 有没有能玩3A的",
+    "type": "recommendation",
+    "difficulty": "hard",
+    "expected_source": "laptop_products",
+    "expected_keywords": ["RTX", "游戏", "Kg", "重量"]
+  },
+  {
+    "id": 48,
+    "query": "退了退了 屏幕看着不舒服 有没有OLED屏或高刷的本",
+    "type": "recommendation",
+    "difficulty": "hard",
+    "expected_source": "laptop_products",
+    "expected_keywords": ["OLED", "Hz", "刷新率", "屏幕"]
+  },
+  {
+    "id": 49,
+    "query": "听说联想拯救者风扇声音贼大 散热到底行不行",
+    "type": "precise",
+    "difficulty": "hard",
+    "expected_source": "laptop_products",
+    "expected_keywords": ["拯救者", "散热"]
+  },
+  {
+    "id": 50,
+    "query": "荣耀和华为手机现在能互联吗 我电脑是华为的",
+    "type": "comparison",
+    "difficulty": "hard",
+    "expected_source": "phone_products",
+    "expected_keywords": ["荣耀", "华为", "互联"]
+  },
+  {
+    "id": 51,
+    "query": "惠普星Book Air跟MacBook Air比咋样 都挺薄的",
+    "type": "comparison",
+    "difficulty": "hard",
+    "expected_source": "laptop_products",
+    "expected_keywords": ["惠普", "MacBook", "Air", "星Book"]
+  },
+  {
+    "id": 52,
+    "query": "键盘手感好点的笔记本有没有 程序员你懂的",
+    "type": "recommendation",
+    "difficulty": "hard",
+    "expected_source": "laptop_products",
+    "expected_keywords": ["键盘", "键程"]
+  },
+  {
+    "id": 53,
+    "query": "旧手机加旧电脑能一起以旧换新换个笔记本吗",
+    "type": "policy",
+    "difficulty": "hard",
+    "expected_source": "knowledge_chunks",
+    "expected_keywords": ["以旧换新", "多台", "抵扣"]
+  },
+  {
+    "id": 54,
+    "query": "笔记本激活了发现屏幕有亮斑 还能退吗",
+    "type": "policy",
+    "difficulty": "hard",
+    "expected_source": "knowledge_chunks",
+    "expected_keywords": ["激活", "坏点", "亮点", "退货"]
+  },
+  {
+    "id": 55,
+    "query": "电池7000以上的手机 要快充 不要苹果",
+    "type": "recommendation",
+    "difficulty": "hard",
+    "expected_source": "phone_products",
+    "expected_keywords": ["mAh", "快充", "电池", "W"]
+  },
+  {
+    "id": 56,
+    "query": "自拍好看又不太贵的 给女生用 两三千的",
+    "type": "recommendation",
+    "difficulty": "hard",
+    "expected_source": "phone_products",
+    "expected_keywords": ["前置", "像素", "自拍", "万像素"]
+  },
+  {
+    "id": 57,
+    "query": "续航特别顶的那种 经常在外面跑没法充电",
+    "type": "recommendation",
+    "difficulty": "hard",
+    "expected_source": "phone_products",
+    "expected_keywords": ["mAh", "电池", "续航"]
+  },
+  {
+    "id": 58,
+    "query": "小米和红米现在有啥区别 买哪个好",
+    "type": "comparison",
+    "difficulty": "hard",
+    "expected_source": "phone_products",
+    "expected_keywords": ["小米", "红米", "品牌"]
+  },
+  {
+    "id": 59,
+    "query": "真我GT和红米K系列打游戏帧率稳不稳？",
+    "type": "comparison",
+    "difficulty": "hard",
+    "expected_source": "phone_products",
+    "expected_keywords": ["真我", "红米", "游戏", "Hz"]
+  },
+  {
+    "id": 60,
+    "query": "IP69防水的手机有哪些 经常户外用",
+    "type": "precise",
+    "difficulty": "hard",
+    "expected_source": "phone_products",
+    "expected_keywords": ["IP68", "IP69", "防水"]
+  },
+  {
+    "id": 61,
+    "query": "想换个手机 顺便看看有没有轻点的笔记本 两个加起来1万5以内",
+    "type": "recommendation",
+    "difficulty": "hard",
+    "expected_source": "phone_products",
+    "expected_keywords": ["手机", "轻薄"]
+  },
+  {
+    "id": 62,
+    "query": "手机和笔记本都支持星闪或者华为分享的 生态好一点的",
+    "type": "recommendation",
+    "difficulty": "hard",
+    "expected_source": "phone_products",
+    "expected_keywords": ["华为", "荣耀", "鸿蒙", "互联"]
+  }
+]

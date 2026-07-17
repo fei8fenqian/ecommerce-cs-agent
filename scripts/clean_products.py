@@ -249,7 +249,7 @@ if __name__ == "__main__":
     normalized_dir = root / "data" / "products" / "normalized"
     normalized_dir.mkdir(parents=True, exist_ok=True)
 
-    raw_dir = root / "data" / "products" / "raw"
+    raw_dir = root / "data" / "products" / "raw" / "laptops"
     for path in raw_dir.glob("*.jsonl"):
         brand = path.stem.replace("_laptops", "")
         out_path = normalized_dir / f"{brand}_normalized.jsonl"

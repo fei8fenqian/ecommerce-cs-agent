@@ -1,3 +1,5 @@
+"""爬取中关村在线手机频道的产品列表和详细参数，输出 JSONL"""
+
 import json
 from pathlib import Path
 
@@ -8,21 +10,16 @@ root = Path(__file__).parent.parent
 MAX_PAGES = 3
 
 BRANDS = [
-    ("联想", "https://detail.zol.com.cn/notebook_index/subcate16_160_list_1.html"),
-    ("华硕", "https://detail.zol.com.cn/notebook_index/subcate16_227_list_1.html"),
-    ("惠普", "https://detail.zol.com.cn/notebook_index/subcate16_223_list_1.html"),
-    ("戴尔", "https://detail.zol.com.cn/notebook_index/subcate16_21_list_1.html"),
-    ("华为", "https://detail.zol.com.cn/notebook_index/subcate16_613_list_1.html"),
-    ("Acer宏碁", "https://detail.zol.com.cn/notebook_index/subcate16_218_list_1.html"),
-    ("小米", "https://detail.zol.com.cn/notebook_index/subcate16_34645_list_1.html"),
-    ("苹果", "https://detail.zol.com.cn/notebook_index/subcate16_544_list_1.html"),
-    ("荣耀", "https://detail.zol.com.cn/notebook_index/subcate16_50840_list_1.html"),
-    (
-        "机械革命",
-        "https://detail.zol.com.cn/notebook_index/subcate16_35578_list_1.html",
-    ),
-    ("微星", "https://detail.zol.com.cn/notebook_index/subcate16_133_list_1.html"),
-    ("神舟", "https://detail.zol.com.cn/notebook_index/subcate16_1191_list_1.html"),
+    ("华为", "https://detail.zol.com.cn/cell_phone_index/subcate57_613_list_1.html"),
+    ("苹果", "https://detail.zol.com.cn/cell_phone_index/subcate57_544_list_1.html"),
+    ("小米", "https://detail.zol.com.cn/cell_phone_index/subcate57_34645_list_1.html"),
+    ("荣耀", "https://detail.zol.com.cn/cell_phone_index/subcate57_50840_list_1.html"),
+    ("OPPO", "https://detail.zol.com.cn/cell_phone_index/subcate57_1673_list_1.html"),
+    ("vivo", "https://detail.zol.com.cn/cell_phone_index/subcate57_1795_list_1.html"),
+    ("三星", "https://detail.zol.com.cn/cell_phone_index/subcate57_98_list_1.html"),
+    ("一加", "https://detail.zol.com.cn/cell_phone_index/subcate57_35579_list_1.html"),
+    ("真我", "https://detail.zol.com.cn/cell_phone_index/subcate57_55535_list_1.html"),
+    ("红米", "https://detail.zol.com.cn/cell_phone_index/subcate57_55731_list_1.html"),
 ]
 
 
@@ -34,17 +31,19 @@ def extract_card_info(card):
     if not link:
         return None
 
-    # 过滤推广页
-    if not link.startswith("/notebook/") and not link.startswith("/ultrabook/"):
+    # 手机频道：详情链接以 /cell_phone/ 开头
+    if not link.startswith("/cell_phone/"):
         return None
 
-    title = card.locator("span").locator("a").first.text_content()
+    # 手机列表页标题在 h3 里
+    title_el = card.locator("h3").first
+    title = title_el.text_content().strip() if title_el else ""
 
     price_el = card.locator("b.price-type")
-    price = price_el.first.text_content() if price_el.count() > 0 else None
+    price = price_el.first.text_content().strip() if price_el.count() > 0 else None
 
     img_el = card.locator("img").first
-    img = img_el.get_attribute("src") or img_el.get_attribute(".src")
+    img = img_el.get_attribute("src") or img_el.get_attribute("data-src")
 
     return {
         "产品ID": data_id,
@@ -57,13 +56,21 @@ def extract_card_info(card):
 
 
 def scrape_params(detail_page, data_page, product_url):
-    """进产品页 → 找参数页链接 → 进参数页 → 抓参数"""
+    """进产品页 → 找参数页链接 → 进参数页 → 拉所有参数表"""
     try:
-        # 进产品页，找参数页链接
         data_page.goto(product_url, timeout=30000, wait_until="domcontentloaded")
-        data_page.wait_for_selector("text=查看完整参数", timeout=10000)
 
-        param_path = data_page.locator("a._j_MP_more.section-more").first.get_attribute("href")
+        # 手机页面结构不同，"查看完整参数" 按钮的 class 可能不一样
+        # 先找文本，再从父级找链接
+        more_btn = data_page.locator("a:has-text('查看完整参数')")
+        if more_btn.count() == 0:
+            # 尝试笔记本的 selector 作为兜底
+            more_btn = data_page.locator("a._j_MP_more.section-more")
+
+        if more_btn.count() == 0:
+            return {}
+
+        param_path = more_btn.first.get_attribute("href")
         if not param_path:
             return {}
 
@@ -72,11 +79,9 @@ def scrape_params(detail_page, data_page, product_url):
         else:
             param_url = f"https://detail.zol.com.cn{param_path}"
 
-        # 进参数页
         detail_page.goto(param_url, timeout=30000, wait_until="domcontentloaded")
         detail_page.wait_for_selector("div.detailed-parameters", timeout=10000)
 
-        # 抓所有参数表
         tables = detail_page.locator("div.detailed-parameters").locator("table")
         detailed_dict = {}
 
@@ -88,13 +93,11 @@ def scrape_params(detail_page, data_page, product_url):
             for r in range(rows.count()):
                 row = rows.nth(r)
 
-                # 分类标题行
                 hd = row.locator("td.hd")
                 if hd.count() > 0:
                     category = hd.first.text_content().strip()
                     continue
 
-                # 参数行
                 th = row.locator("th")
                 td = row.locator("td")
                 if th.count() == 0 or td.count() == 0:
@@ -124,13 +127,9 @@ if __name__ == "__main__":
             print(f"开始爬取: {brand_name}")
             print(f"{'=' * 50}")
 
-            # 创建存储文件
-            save_path = (
-                root / "data" / "products" / "raw" / "laptops" / f"{brand_name}_laptops.jsonl"
-            )
+            save_path = root / "data" / "products" / "raw" / "phones" / f"{brand_name}_phones.jsonl"
             save_path.parent.mkdir(parents=True, exist_ok=True)
 
-            # 开标签页
             page = browser.new_page()
             data_page = browser.new_page()
             detail_page = browser.new_page()
@@ -155,19 +154,17 @@ if __name__ == "__main__":
                 for card_idx in range(card_count):
                     card = cards.nth(card_idx)
 
-                    # 取基础信息
                     product = extract_card_info(card)
                     if product is None:
                         print(f"    [{card_idx + 1}] 跳过推广")
                         continue
 
-                    # 抓参数
                     product_url = f"https://detail.zol.com.cn{product['详情链接']}"
                     product["params"] = scrape_params(detail_page, data_page, product_url)
 
-                    # 保存一行 JSONL
                     f.write(json.dumps(product, ensure_ascii=False) + "\n")
-                    print(f"    [{card_idx + 1}] {product['产品名称'][:30]}...")
+                    name_preview = product["产品名称"][:40] if product["产品名称"] else "?"
+                    print(f"    [{card_idx + 1}] {name_preview}...")
 
                 # 翻页
                 next_btn = page.locator(".pagebar a.next")

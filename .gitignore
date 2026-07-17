@@ -4,3 +4,9 @@ __pycache__/
 .env
 .claude/
 test.py
+
+# 爬虫原始数据（可重新爬取）
+data/products/raw/
+
+# PostgreSQL 持久化
+pgdata/
