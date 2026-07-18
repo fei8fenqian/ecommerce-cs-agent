@@ -196,7 +196,25 @@ Agent：[情绪检测 → 负面+投诉] →
 | 部署 | Docker Compose | FastAPI + PostgreSQL 编排 |
 | 图片 | 本地 FileResponse | 原型规模够用，生产迁 OSS |
 
-### 3.3 模型分层
+### 3.3 扩展方向：MCP 工具接入（Phase 5+ 预留）
+
+[MCP（Model Context Protocol）](https://modelcontextprotocol.io/) 是 Anthropic 发布的标准化工具接入协议。当前项目手写的 `ToolRegistry` 管理 Python 函数，MCP 让它能调用外部进程提供的工具。
+
+**价值**：
+- 公司内部如果有独立的订单系统/ERP，可以暴露 MCP Server，Agent 直接调
+- 社区已有的 MCP Server（数据库查询、文件操作、Slack 通知等）可以直接接入，不用重复开发
+- 面试时展示"架构预留 MCP 接入能力"说明关注行业标准
+
+**对现有代码的影响**：
+- `ToolSpec` 的 `{name, description, parameters}` 和 MCP 的 `Tool` schema 天然兼容
+- 接入时只需写一个 `MCPToolAdapter` 把 MCP 工具包装成 `ToolSpec`，注册进同一个 `ToolRegistry`
+- Agent Loop 完全无感——它只管调 `registry.execute()`，不关心工具是本地的还是远程的
+
+**时间点**：Phase 5（中台能力）之前不做，但架构预留适配位。
+
+---
+
+### 3.4 模型分层
 
 | 场景 | 模型 | 原因 |
 |------|------|------|
@@ -638,6 +656,13 @@ BaseAppException
 - Conventional Commits 让 commit 历史有章法——一个 `feat/fix/test/docs/chore` 的 commit log 比 50 条 "update" 有力得多
 - 成本极低：`Makefile` 10 行，`.pre-commit-config.yaml` 15 行，CI yaml 30 行——加起来不到 100 行配置，但 repo 面貌从 "个人练手" 变成 "团队项目"
 - 本质上是给自己做 CI——一个人写久了会忘测试、忘 lint，pre-commit 在你 commit 之前拦住你，CI 在你 push 之后告诉你有没有退化
+
+### 6.8 为什么预留 MCP 但不现在做
+
+- MCP 本质是工具接入的标准化协议，当前项目工具只有 2 个（查库存、查订单），手写 `ToolRegistry` 够用
+- `ToolSpec` 的 `{name, description, parameters}` 和 MCP 的 Tool schema 天然对齐，未来接入不需要重构
+- 面试能讲"架构预留 MCP 接入能力，关注行业标准"——证明你不是只会写 demo，知道生产环境的工具集成怎么做
+- Phase 5（中台能力）阶段如果有多知识库、多系统的工具调用需求，再引入 MCP Client
 
 ---
 
