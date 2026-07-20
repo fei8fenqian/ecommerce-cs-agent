@@ -1,0 +1,180 @@
+import json
+import logging
+import time
+from dataclasses import dataclass, field
+from typing import Any
+
+from agent.tools_registry import ToolRegistry
+from config import settings
+from core.llm_client import LLMClient, ToolCall
+from exceptions import AgentLoopError
+
+logger = logging.getLogger(__name__)
+
+
+DEFAULT_SYSTEM_PROMPT = """你是"极客数码"的 AI 客服助手。请遵守以下规则：
+
+1. 只回答与 3C 数码产品（手机、笔记本、平板、配件）、售后政策、订单相关的问题
+2. 回答基于参考信息中的产品参数和知识库文档，不要编造
+3. 用户要对比产品时，列出关键参数差异
+4. 需要实时数据（库存、订单）时，调用对应工具查询
+5. 语气简洁专业，不废话
+6. 遇到无法回答的问题，诚实告知并建议转人工"""
+
+
+@dataclass
+class StepResult:
+    """记录循环中每一步"""
+
+    step: int
+    thought: str | None = None  # LLM 这次的文本输出
+    tool_calls: list[ToolCall] | None = None
+    observation: str | None = None  # 工具返回的结果文本
+    latency_ms: float = 0.0
+
+
+@dataclass
+class LoopResult:
+    """整个循环跑完的结果"""
+
+    answer: str = ""  # 最终的回答
+    steps: list[StepResult] = field(default_factory=list)  # 每一步的详情
+    total_steps: int = 0
+    total_tokens: int = 0
+    total_latency_ms: float = 0.0
+
+
+class AgentLoop:
+    def __init__(
+        self,
+        llm: LLMClient,
+        registry: ToolRegistry,
+        *,
+        max_steps: int = 5,
+        system_prompt: str = "",
+    ):
+        self.llm = llm
+        self.registry = registry
+        self.max_steps = max_steps
+        self.system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
+
+    async def run(self, query: str, *, context: str = "") -> LoopResult:
+        t_start = time.perf_counter()
+        step_results: list[StepResult] = []
+        total_tokens = 0
+
+        # 构建初始消息
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": self.system_prompt},
+        ]
+
+        user_content = f"参考信息:\n{context}\n\n用户问题: {query}" if context else query
+        messages.append({"role": "user", "content": user_content})
+
+        # 防死循环：记录最近 N 次调用的工具名
+        recent_tools: list[str] = []
+
+        answer = ""
+
+        for step in range(1, self.max_steps + 1):
+            step_start = time.perf_counter()
+
+            # 调LLM
+            tools = self.registry.to_openai_schemas()
+            response = await self.llm.chat(
+                messages,
+                tools=tools,
+                temperature=settings.temperature,
+                max_tokens=settings.max_tokens,
+            )
+            step_latency = (time.perf_counter() - step_start) * 1000
+            total_tokens += response.usage.total_tokens
+
+            # 没有工具调用 → LLM 给出了最终回答
+            if not response.has_tool_calls:
+                answer = response.content or ""
+                step_results.append(
+                    StepResult(step=step, thought=response.content, latency_ms=step_latency)
+                )
+                messages.append({"role": "assistant", "content": answer})
+                break
+
+            # 有工具调用 → 逐个执行
+            observations: list[str] = []
+
+            # 先记录 assistant 消息（含 tool_calls）
+            # 需要转成 API 能接受的格式
+            messages.append(self._assistant_message(tool_calls=response.tool_calls))
+
+            for tool_call in response.tool_calls:
+                # 防死循环检测
+                recent_tools.append(tool_call.name)
+                if len(recent_tools) >= settings.max_same_tools:
+                    last_tools = recent_tools[-settings.max_same_tools :]
+                    if len(set(last_tools)) == 1:
+                        raise AgentLoopError(
+                            f"""同一工具 '{tool_call.name}'
+                            连续调用 {settings.max_same_tools} 次，疑似死循环""",
+                            step_count=step,
+                            reason="tool_loop",
+                        )
+
+                # 执行工具
+                tool_result = self.registry.execute(tool_call.name, **tool_call.arguments)
+                observation = tool_result.to_observation()
+                observations.append(observation)
+
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": observation,
+                    }
+                )
+
+            step_results.append(
+                StepResult(
+                    step=step,
+                    thought=response.content,
+                    tool_calls=response.tool_calls,
+                    observation=" | ".join(observations),
+                    latency_ms=step_latency,
+                )
+            )
+
+        # 兜底：循环结束还没答案，取最后一步 LLM 的输出
+        if not answer:
+            # 再调一次 LLM 强制生成回答
+            messages.append({"role": "user", "content": "请根据以上信息回答用户问题。"})
+            final_response = await self.llm.chat(messages)
+            answer = (
+                final_response.content or "抱歉，我暂时无法处理您的问题，正在为您转接人工客服。"
+            )
+            total_tokens += final_response.usage.total_tokens
+
+        total_latency = (time.perf_counter() - t_start) * 1000
+        return LoopResult(
+            answer=answer,
+            steps=step_results,
+            total_steps=len(step_results),
+            total_tokens=total_tokens,
+            total_latency_ms=total_latency,
+        )
+
+    def _assistant_message(self, tool_calls: list[ToolCall]) -> dict[str, Any]:
+        """构建带 tool_calls 的 assistant 消息"""
+        return {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": tool_call.id,
+                    "type": "function",
+                    "function": {
+                        "name": tool_call.name,
+                        "arguments": json.dumps(tool_call.arguments, ensure_ascii=False),
+                    },
+                }
+                for tool_call in tool_calls
+            ],
+        }

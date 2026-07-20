@@ -71,9 +71,7 @@ class LLMResponse:
 
 class LLMClient:
     """
-    通用 LLM 客户端。兼容所有 OpenAI 格式的 API。
-
-    Phase 3 用 chat()（同步），Phase 4 接 FastAPI 后换 achat()（异步）。
+    通用 LLM 客户端，兼容所有 OpenAI 格式的 API，异步调用。
 
     参数全部外部注入——换厂商只改 config.py，不动这个文件：
     api_key:  API 密钥

@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     retrieval_top_k: int = Field(default=20, ge=1, le=100, description="粗筛返回条数")
     rerank_top_k: int = Field(default=5, ge=1, le=20, description="精排后保留条数")
 
+    # ---- Agent 参数 ----
+    temperature: float = Field(default=0.0, ge=0.0, le=2.0, description="llm输出温度")
+    max_tokens: int = Field(default=1024, ge=0, le=16384, description="上下文最大tokens")
+    max_same_tools: int = Field(default=3, ge=0, le=100, description="最大连续调用同一工具次数")
+
     class Config:
         # 从项目根目录的 .env 文件读取（环境变量优先级更高）
         env_file = str(Path(__file__).parent.parent / ".env")
