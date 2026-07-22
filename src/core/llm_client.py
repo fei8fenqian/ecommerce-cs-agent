@@ -110,7 +110,7 @@ class LLMClient:
         max_tokens: int = 2048,
     ) -> LLMResponse:
         """
-        同步调用 LLM，带自动重试。
+        异步调用 LLM，带自动重试。
 
         Agent 场景用 temperature=0.0（确定性输出），
         不要让 LLM 有"创意"——查库存就是查库存，别自己编。

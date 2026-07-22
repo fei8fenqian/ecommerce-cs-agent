@@ -3,7 +3,7 @@ __pycache__/
 *.pyc
 .env
 .claude/
-test.py
+draft.py
 
 # 爬虫原始数据（可重新爬取）
 data/products/raw/

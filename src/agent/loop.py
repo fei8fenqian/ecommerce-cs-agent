@@ -42,6 +42,7 @@ class LoopResult:
     total_steps: int = 0
     total_tokens: int = 0
     total_latency_ms: float = 0.0
+    last_entities: dict[str, str] = field(default_factory=dict)
 
 
 class AgentLoop:
@@ -58,7 +59,13 @@ class AgentLoop:
         self.max_steps = max_steps
         self.system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
 
-    async def run(self, query: str, *, context: str = "") -> LoopResult:
+    async def run(
+        self,
+        query: str,
+        *,
+        context: str = "",
+        history: list[dict[str, Any]] | None = None,
+    ) -> LoopResult:
         t_start = time.perf_counter()
         step_results: list[StepResult] = []
         total_tokens = 0
@@ -67,6 +74,10 @@ class AgentLoop:
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": self.system_prompt},
         ]
+
+        # 拼入历史消息
+        if history:
+            messages.extend(history)
 
         user_content = f"参考信息:\n{context}\n\n用户问题: {query}" if context else query
         messages.append({"role": "user", "content": user_content})
@@ -152,6 +163,17 @@ class AgentLoop:
             )
             total_tokens += final_response.usage.total_tokens
 
+        # 提取本轮涉及的业务实体（用于下一轮指代消解）
+        last_entities: dict[str, str] = {}
+        for sr in step_results:
+            if sr.tool_calls:
+                for tool_call in sr.tool_calls:
+                    args = tool_call.arguments
+                    if "product_name" in args:
+                        last_entities["product"] = str(args["product_name"])
+                    if "order_id" in args:
+                        last_entities["order"] = str(args["order_id"])
+
         total_latency = (time.perf_counter() - t_start) * 1000
         return LoopResult(
             answer=answer,
@@ -159,6 +181,7 @@ class AgentLoop:
             total_steps=len(step_results),
             total_tokens=total_tokens,
             total_latency_ms=total_latency,
+            last_entities=last_entities,
         )
 
     def _assistant_message(self, tool_calls: list[ToolCall]) -> dict[str, Any]:
