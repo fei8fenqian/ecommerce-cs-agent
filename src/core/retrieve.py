@@ -124,7 +124,7 @@ def hybrid_search(
     *,
     table: str = "laptop_products",
     where: str | None = None,
-    top_k: int = settings.retrieval_top_k,
+    top_k: int = 5,
 ):
     """
     混合检索：向量 + BM25 → RRF 融合 → top-k 结果。

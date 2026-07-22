@@ -11,11 +11,26 @@
 | Phase | 状态 | 关键产出 |
 |-------|:---:|------|
 | Phase 1: 爬虫 + 知识库 | ✅ | 笔记本 + 手机产品 / 5 篇知识库 / pgvector 入库 |
-| Phase 2: 检索 + 评估 + 工程基础 | ✅ 80% | BM25/向量/RRF/Rerank 四方案消融 / 62 题评测集 / ruff+mypy/pre-commit/Makefile |
+| Phase 2: 检索 + 评估 + 工程基础 | ✅ 80% | BM25/向量/RRF/Rerank 四方案消融 / 62 题评测集 / ruff+mypy/pre-commit/Makefile / RRF 单元测试 |
 | Phase 3: Agent 引擎 | 🔜 50% | 异步 LLM 客户端 / ABC 工具注册中心 / ReAct Loop / RAG+LLM 端到端 / **缺：5 个工具 + 意图路由 + mock 数据** |
 | Phase 4: 人工兜底 + 多轮对话 | ⬜ | 情绪检测 / 转人工工单 / 上下文记忆 / 指代消解 |
 | Phase 5: 中台能力 + 管理后台 | ⬜ | /admin API / 模型网关 / Token 统计 / MCP 接入 |
 | Phase 6: 部署 + CI/CD + 文档 | ⬜ | Docker Compose / GitHub Actions / README / 面试稿 |
+
+### 📍 当前位置：Phase 3.3 — 写业务工具
+
+```
+✅ 已完成：
+  Phase 3.1: tools_registry.py / llm_client.py / loop.py / smoke_rag.py
+  Phase 3.2: mock 数据 — inventory + orders 入 PG, stock 一致性修复
+  src/agent/tools/search_product.py  — 检索型工具（✅）
+
+🔜 下一步：
+  src/agent/tools/check_stock.py     — DB 查询型
+  src/agent/tools/track_order.py     — 订单查询型
+  src/agent/tools/create_ticket.py   — 写操作型
+  src/agent/tools/compare_products.py — 组合型
+```
 
 ---
 
@@ -163,9 +178,9 @@ AI 自动解决率 ≥ 65%
 ```
 PostgreSQL + pgvector（统一数据层）：
   ├── knowledge_chunks     → 选购指南/售后政策 chunks + 向量（~80 条）
-  ├── laptop_products      → 笔记本规格+向量+价格+status（~200 条）
-  ├── phone_products       → 手机规格+向量+价格+status（~100 条）
-  ├── orders               → 模拟订单数据（10-20 条）
+  ├── laptop_products      → 笔记本规格+向量+价格+stock+warehouse（~200 条，Phase 5 加 SKU）
+  ├── phone_products       → 手机规格+向量+价格+stock+warehouse（~100 条，Phase 5 加 SKU）
+  ├── orders               → 订单主表 + order_items 明细表（~5000 条，从 generate_orders.py 生成）
   └── tickets              → 工单记录（Agent 转人工时写入）
 
 静态文件：
@@ -180,7 +195,7 @@ PostgreSQL + pgvector（统一数据层）：
 |---|--------|----------|------|-----------|
 | 1 | `search_product` | pgvector 向量检索 | **检索型** — 包一层 hybrid_search | RAG 也能作为 Tool 被 Agent 调用 |
 | 2 | `check_stock` | PostgreSQL `laptop_products.status` | **DB 查询型** — SQL 查询 | 最典型的生产工具模式 |
-| 3 | `track_order` | `data/mock/orders.json` | **外部 API 型** — 读文件模拟 API 调用 | 模拟微服务调用，可换 MCP |
+| 3 | `track_order` | PostgreSQL `orders` / `order_items` 表 | **DB 查询型** — SQL 查询 | 多表关联查询 |
 | 4 | `create_ticket` | `data/mock/tickets.json`（写入） | **写操作型** — 生成工单 | 有副作用的工具，需要日志审计 |
 | 5 | `compare_products` | 2 次 search_product + LLM | **组合型** — 调其他工具 + LLM 推理 | 展示工具间协作，不是孤立调用 |
 
@@ -244,11 +259,12 @@ PostgreSQL + pgvector（统一数据层）：
 - [x] `src/agent/loop.py` — ReAct 循环引擎（OpenAI function calling）
 - [x] `scripts/smoke_rag.py` — RAG+LLM 端到端验证（5 场景全过）
 
-**3.2 Mock 数据（Day 6）**
+**3.2 Mock 数据（Day 6）✅**
 
-- [ ] `laptop_products` / `phone_products` 表加 `status` 字段（"在售"/"已下架"）
-- [ ] `data/mock/orders.json` — 20 条模拟订单（含不同物流状态）
-- [ ] `data/mock/tickets.json` — 空数组起步，create_ticket 写入
+- [x] `laptop_products` / `phone_products` 表加 `stock` + `warehouse` 字段
+- [x] `generate_inventory.py` — 随机库存分布，6 仓库
+- [x] `orders` + `order_items` 表 → 5000 条订单入 PG
+- [x] 库存一致性修复：下单产品 stock >= 10
 
 **3.3 5 个业务工具（Day 6-7）**
 
@@ -303,6 +319,7 @@ PostgreSQL + pgvector（统一数据层）：
 - [ ] `src/core/model_gateway.py` — 模型路由 + Token 记账
 - [ ] MCP 接入（如时间允许）：`MCPTool(BaseTool)` 适配器 + 一个 MCP Server 示例
 - [ ] 商品图片端点：`GET /product/{id}/image`
+- [ ] **SKU 编码体系**：品牌码+品类码+配置码，唯一约束，`generate_sku.py` 脚本，商品管理 CRUD 统一用 SKU 索引
 
 ### Phase 6：部署 + CI/CD + 文档（Day 14-15）
 
