@@ -64,9 +64,17 @@ ignore_missing_imports = true
 # 测试文件命名 test_xxx.py，函数命名 test_xxx()，放 tests/ 目录
 # -------------------------------------------------------------------
 [tool.pytest.ini_options]
-testpaths = ["tests/"]              # pytest 只在这个目录下找测试
-addopts = "-v --tb=short"           # -v：每个测试函数都打印 PASS/FAIL
-                                    # --tb=short：报错时只显示关键几行，不刷屏
+testpaths = ["tests/"]
+pythonpath = ["src"]                   # 让测试文件能 import agent / core / config
+addopts = "-v --tb=short"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.5",
+    "mypy>=1.10",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
