@@ -6,30 +6,36 @@
 
 ---
 
-## 当前进度（更新于 2026-07-19）
+## 当前进度（更新于 2026-07-21）
 
 | Phase | 状态 | 关键产出 |
 |-------|:---:|------|
 | Phase 1: 爬虫 + 知识库 | ✅ | 笔记本 + 手机产品 / 5 篇知识库 / pgvector 入库 |
 | Phase 2: 检索 + 评估 + 工程基础 | ✅ 80% | BM25/向量/RRF/Rerank 四方案消融 / 62 题评测集 / ruff+mypy/pre-commit/Makefile / RRF 单元测试 |
-| Phase 3: Agent 引擎 | 🔜 50% | 异步 LLM 客户端 / ABC 工具注册中心 / ReAct Loop / RAG+LLM 端到端 / **缺：5 个工具 + 意图路由 + mock 数据** |
-| Phase 4: 人工兜底 + 多轮对话 | ⬜ | 情绪检测 / 转人工工单 / 上下文记忆 / 指代消解 |
-| Phase 5: 中台能力 + 管理后台 | ⬜ | /admin API / 模型网关 / Token 统计 / MCP 接入 |
+| Phase 3: Agent 引擎 | ✅ 85% | 4 个工具 + 意图路由 + mock 数据入 PG + 全链路冒烟 5 场景 / **缺：compare_products + 单元测试** |
+| Phase 4: 人工兜底 + 多轮对话 | 🔜 | 情绪检测 / session 管理 / 指代消解 |
+| Phase 5: 中台能力 + 管理后台 | ⬜ | FastAPI + SSE / /admin API / 模型网关 / MCP 接入 / SKU 编码 |
 | Phase 6: 部署 + CI/CD + 文档 | ⬜ | Docker Compose / GitHub Actions / README / 面试稿 |
 
-### 📍 当前位置：Phase 3.3 — 写业务工具
+### 📍 当前位置：Phase 4 — 多轮对话 + 人工兜底
 
 ```
-✅ 已完成：
-  Phase 3.1: tools_registry.py / llm_client.py / loop.py / smoke_rag.py
-  Phase 3.2: mock 数据 — inventory + orders 入 PG, stock 一致性修复
-  src/agent/tools/search_product.py  — 检索型工具（✅）
+✅ Phase 3 已完成：
+  3.1: tools_registry.py / llm_client.py / loop.py / smoke_rag.py
+  3.2: generate_inventory.py + generate_orders.py → PG
+  3.3: search_product / check_stock / track_order / create_ticket（4/5 工具）
+  3.4: intent_router.py → 意图分类 + 路由
+  3.5: smoke_agent.py → 5 场景全链路冒烟通过
 
-🔜 下一步：
-  src/agent/tools/check_stock.py     — DB 查询型
-  src/agent/tools/track_order.py     — 订单查询型
-  src/agent/tools/create_ticket.py   — 写操作型
-  src/agent/tools/compare_products.py — 组合型
+❌ Phase 3 欠债（面试前补齐）：
+  compare_products.py（组合型工具）
+  tests/test_tools_registry.py
+  tests/test_intent_router.py
+  tests/test_loop.py
+
+🔜 Phase 4 下一步：
+  src/session.py → 多轮上下文管理 + 指代消解
+  情绪检测 → 负面词触发 create_ticket
 ```
 
 ---
@@ -196,7 +202,7 @@ PostgreSQL + pgvector（统一数据层）：
 | 1 | `search_product` | pgvector 向量检索 | **检索型** — 包一层 hybrid_search | RAG 也能作为 Tool 被 Agent 调用 |
 | 2 | `check_stock` | PostgreSQL `laptop_products.status` | **DB 查询型** — SQL 查询 | 最典型的生产工具模式 |
 | 3 | `track_order` | PostgreSQL `orders` / `order_items` 表 | **DB 查询型** — SQL 查询 | 多表关联查询 |
-| 4 | `create_ticket` | `data/mock/tickets.json`（写入） | **写操作型** — 生成工单 | 有副作用的工具，需要日志审计 |
+| 4 | `create_ticket` | PostgreSQL `tickets` 表（写入） | **写操作型** — 生成工单 | 有副作用的工具，需要日志审计 |
 | 5 | `compare_products` | 2 次 search_product + LLM | **组合型** — 调其他工具 + LLM 推理 | 展示工具间协作，不是孤立调用 |
 
 **所有工具共享的共同行为**（ABC 的价值）：
@@ -268,34 +274,47 @@ PostgreSQL + pgvector（统一数据层）：
 
 **3.3 5 个业务工具（Day 6-7）**
 
-- [ ] `src/agent/tools/search_product.py` — SearchProduct(BaseTool)：检索型
-- [ ] `src/agent/tools/check_stock.py` — CheckStock(BaseTool)：DB 查询型
-- [ ] `src/agent/tools/track_order.py` — TrackOrder(BaseTool)：JSON/API 型
-- [ ] `src/agent/tools/create_ticket.py` — CreateTicket(BaseTool)：写操作型
+- [x] `src/agent/tools/search_product.py` — SearchProduct(BaseTool)：检索型
+- [x] `src/agent/tools/check_stock.py` — CheckStock(BaseTool)：DB 查询型
+- [x] `src/agent/tools/track_order.py` — TrackOrder(BaseTool)：DB 查询型（PG orders + order_items）
+- [x] `src/agent/tools/create_ticket.py` — CreateTicket(BaseTool)：写操作型（PG tickets 表）
 - [ ] `src/agent/tools/compare_products.py` — CompareProducts(BaseTool)：组合型
 
 **3.4 意图路由（Day 7-8）**
 
-- [ ] `src/core/intent_router.py` — IntentRouter
-  - 轻量 LLM 调用做意图分类
-  - 路由表：参数查询→RAG / 政策→RAG / 库存→Agent / 订单→Agent / 对比→CompareProducts / 投诉→CreateTicket
-  - 输出：`Intent(target="rag", table="laptop_products", query=...)`
+- [x] `src/core/intent_router.py` — IntentRouter
+  - 轻量 LLM 调用做意图分类（temperature=0.0, max_tokens=256）
+  - 路由：rag→RAG 直接答 / agent→AgentLoop+工具 / ticket→AgentLoop+create_ticket
+  - 低置信度(<0.5)降级 RAG，LLM 解析失败降级 RAG
 
 **3.5 端到端集成（Day 8-9）**
 
-- [ ] `scripts/smoke_agent.py` — 全链路冒烟测试
-  - 场景 1：精确参数查询 → RAG → 回答
-  - 场景 2：库存查询 → Agent Loop → check_stock → 回答
-  - 场景 3：订单追踪 → Agent Loop → track_order → 回答
-  - 场景 4：商品对比 → Agent Loop → compare_products → 回答
-  - 场景 5：投诉升级 → Agent Loop → create_ticket → 回答
-  - 场景 6：多轮对话（指代消解）→ session 上下文 → 回答
+- [x] `scripts/smoke_agent.py` — 全链路冒烟测试
+  - 场景 1：精确参数查询 → RAG → 回答 ✅
+  - 场景 2：库存查询 → Agent Loop → check_stock → 回答 ✅
+  - 场景 3：订单追踪 → Agent Loop → track_order → 回答 ✅
+  - 场景 4：手机号查单 → Agent Loop → track_order → 回答 ✅
+  - 场景 5：政策查询 → RAG → 回答 ✅
+  - 场景 6：商品对比（缺 compare_products）
+  - 场景 7：投诉升级（缺 create_ticket 端到端验证）
 
 **3.6 单元测试（跟着代码写）**
 
 - [ ] `tests/test_tools_registry.py`
 - [ ] `tests/test_intent_router.py`
 - [ ] `tests/test_tools/` — 每个工具的功能测试
+
+### ⚠️ 已知差距（Phase 3 欠债 + 企业实践偏离）
+
+| # | 问题 | 严重度 | 说明 | 计划 |
+|---|------|:---:|------|------|
+| 1 | **零单元测试** | 🔴 高 | tools_registry / intent_router / loop / tools 无 test | Phase 3 收尾补齐 `tests/test_registry.py` `tests/test_intent_router.py` `tests/test_loop.py` |
+| 2 | Embedding 模块级加载 | 🟡 中 | `_model = SentenceTransformer()` 在 import 时加载，非 lifespan 管理 | Phase 5 FastAPI lifespan |
+| 3 | 每次连接 PG 不池化 | 🟡 中 | check_stock / track_order 每次 execute 都 connect+close | Phase 5 引入 `psycopg2.pool` 或换 `asyncpg` |
+| 4 | 工具无法访问 LLM | 🟡 中 | compare_products 需要调 LLM 做对比总结，但 BaseTool 无 LLMClient 注入路径 | Phase 5 依赖注入 |
+| 5 | Session 层未实现 | 🟡 中 | 无多轮上下文，无指代消解 | Phase 4 |
+| 6 | 缺 `compare_products` | 🟢 低 | 组合型工具未实现 | Phase 3 收尾 |
+| 7 | LLMClient 错误处理不完整 | 🟢 低 | 网络超时、连接重置等边界 case 未覆盖 | Phase 5 |
 
 ### Phase 4：人工兜底 + 多轮对话（Day 10-11）
 
@@ -455,7 +474,7 @@ BaseAppException
 |------|------|---------|
 | pgvector 挂了 | 检索不可用 | 降级 JSON 关键词搜索 |
 | DeepSeek API 挂了 | 无法生成回答 | 返回检索文档原文 |
-| Agent 死循环 | Token 暴涨 | max_steps=5 + 同 Tool 连续 3 次检测 |
+| Agent 死循环 | Token 暴涨 | max_steps=5 + 同 Tool 连续 5 次检测 |
 | 工具执行失败 | 回答不完整 | ToolResult(error) → LLM 看到错误后自行降级 |
 | Prompt 注入 | 模型越权 | 输入长度限制 + 输出校验 |
 | 图片下载失败 | 产品图缺失 | 占位图路径，不阻塞主流程 |
@@ -541,20 +560,20 @@ BaseAppException
 │   │   └── normalized/
 │   ├── images/                     # 产品图片
 │   │   └── laptops/
-│   ├── mock/                       # 模拟数据
-│   │   ├── orders.json
-│   │   └── tickets.json
+│   ├── mock/                       # 模拟数据（已迁入 PG，目录仅保留占位）
 │   └── test_questions.json         # 62 题评测集
 ├── scripts/
 │   ├── crawl_test.py
 │   ├── clean_products.py
 │   ├── ingest_knowledge.py
-│   ├── ingest_pgvector.py
+│   ├── ingest_laptops.py
 │   ├── verify_retrieval.py
 │   ├── eval.py
+│   ├── generate_inventory.py       # 库存数据入 PG
+│   ├── generate_orders.py          # 5000 订单入 PG
 │   ├── smoke_llm.py
 │   ├── smoke_rag.py
-│   └── smoke_agent.py              # 全链路冒烟（Phase 3 收尾）
+│   └── smoke_agent.py              # 全链路冒烟 5 场景
 ├── docker-compose.yml
 ├── Dockerfile
 ├── .env.example
