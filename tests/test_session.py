@@ -5,8 +5,8 @@ import time
 import pytest
 
 from agent.loop import LoopResult, StepResult
+from agent.session import SessionContext, SessionManager, resolve_pronouns
 from core.llm_client import ToolCall
-from session import SessionContext, SessionManager, resolve_pronouns
 
 
 # =============================================================================

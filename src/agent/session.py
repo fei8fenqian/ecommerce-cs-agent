@@ -14,7 +14,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from agent.loop import LoopResult
+from .loop import LoopResult
 
 logger = logging.getLogger(__name__)
 
