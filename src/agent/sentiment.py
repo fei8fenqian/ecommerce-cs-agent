@@ -1,4 +1,4 @@
-"""src/agent/human_loop.py — 情绪检测 + 人工兜底
+"""src/agent/sentiment.py — 情绪检测 + 升级策略
 
 职责：
 1. detect_sentiment()   — 规则检测用户负面情绪（0ms，不花 Token）

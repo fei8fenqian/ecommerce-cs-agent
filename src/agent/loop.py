@@ -65,14 +65,18 @@ class AgentLoop:
         *,
         context: str = "",
         history: list[dict[str, Any]] | None = None,
+        system_prompt_extra="",
     ) -> LoopResult:
         t_start = time.perf_counter()
         step_results: list[StepResult] = []
         total_tokens = 0
 
         # 构建初始消息
+        system_content = self.system_prompt
+        if system_prompt_extra:
+            system_content += "\n" + system_prompt_extra
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": self.system_prompt},
+            {"role": "system", "content": system_content},
         ]
 
         # 拼入历史消息
