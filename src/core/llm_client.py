@@ -100,7 +100,7 @@ class LLMClient:
 
         self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
 
-    # chat() — 同步调用，Agent Loop 用这个
+    # chat() — 异步调用，Agent Loop 用这个
     async def chat(
         self,
         messages: list[dict[str, Any]],

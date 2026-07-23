@@ -8,6 +8,7 @@
 未来换 Redis：改 _sessions 存储后端，接口不动。
 """
 
+import json
 import logging
 import time
 import uuid
@@ -101,15 +102,27 @@ class SessionManager:
                     {
                         "role": "assistant",
                         "content": step.thought,
-                        "tool_calls": step.tool_calls,
+                        "tool_calls": [
+                            {
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.name,
+                                    "arguments": json.dumps(tc.arguments, ensure_ascii=False),
+                                },
+                            }
+                            for tc in step.tool_calls
+                        ],
                     }
                 )
-                ctx.messages.append(
-                    {
-                        "role": "tool",
-                        "content": step.observation or "",
-                    }
-                )
+                for tc in step.tool_calls:
+                    ctx.messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": step.observation or "",
+                        }
+                    )
 
         # 最终回答
         ctx.messages.append({"role": "assistant", "content": result.answer})
