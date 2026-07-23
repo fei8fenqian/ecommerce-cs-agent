@@ -112,7 +112,7 @@ class SessionManager:
                 )
 
         # 最终回答
-        ctx.messages.append({"role": "tool", "content": result.answer})
+        ctx.messages.append({"role": "assistant", "content": result.answer})
 
         # 更新entity
         # 把新实体的键值对合并进 ctx。相同的 key 覆盖，新的 key 新增。
