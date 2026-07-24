@@ -12,7 +12,7 @@ import asyncio
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from agent.loop import AgentLoop
 from agent.tools.check_stock import CheckStock

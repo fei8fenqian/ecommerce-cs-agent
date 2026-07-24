@@ -6,7 +6,7 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 # ====== 配置 ======
-root = Path(__file__).parent.parent
+root = Path(__file__).parent.parent.parent
 MAX_PAGES = 3
 
 BRANDS = [

@@ -27,7 +27,7 @@ from typing import Any
 
 import psycopg2
 
-ROOT = Path(__file__).parent.parent
+ROOT = Path(__file__).parent.parent.parent
 DATA = ROOT / "data" / "products" / "raw"
 
 sys.path.insert(0, str(ROOT / "src"))

@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 # 把项目根目录加入 sys.path，让脚本能 import src/ 下的模块
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from config import settings
 from core.llm_client import LLMClient

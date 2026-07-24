@@ -129,7 +129,7 @@ if __name__ == "__main__":
     print("加载完成")
 
     all_chunks = []
-    root = Path(__file__).parent.parent
+    root = Path(__file__).parent.parent.parent
     knowledge_path = root / "data" / "knowledge"
     for file_path in knowledge_path.glob("*.md"):
         with open(file_path, "r", encoding="utf-8") as f:

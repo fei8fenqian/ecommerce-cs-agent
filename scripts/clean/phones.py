@@ -231,7 +231,7 @@ def _is_recent(product: dict) -> bool:
 
 # ====== 主流程 ======
 if __name__ == "__main__":
-    root = Path(__file__).parent.parent
+    root = Path(__file__).parent.parent.parent
     normalized_dir = root / "data" / "products" / "normalized"
     normalized_dir.mkdir(parents=True, exist_ok=True)
 

@@ -88,7 +88,7 @@ if __name__ == "__main__":
     create_phone_table(conn)
     model = load_model()
 
-    root = Path(__file__).parent.parent
+    root = Path(__file__).parent.parent.parent
     file_path = root / "data" / "products" / "phones.jsonl"
     products = read_products(file_path)
     ingest(conn, model, products)
