@@ -3,10 +3,8 @@ import random
 from datetime import datetime
 from typing import Any
 
-import psycopg2
-
 from agent.tools_registry import BaseTool, ToolResult
-from config import settings
+from core.db_pool import get_connection, put_connection
 
 logger = logging.getLogger(__name__)
 
@@ -70,13 +68,7 @@ class CreateTicket(BaseTool):
         ticket_id = f"TK{datetime.now().strftime('%Y%m%d%H%M%S')}{random.randint(100, 999)}"
 
         try:
-            conn = psycopg2.connect(
-                host=settings.pg_host,
-                port=settings.pg_port,
-                user=settings.pg_user,
-                password=settings.pg_password.get_secret_value(),
-                dbname=settings.pg_dbname,
-            )
+            conn = get_connection()
             cur = conn.cursor()
 
             # 幂等建表
@@ -121,4 +113,4 @@ class CreateTicket(BaseTool):
             if "cur" in locals():
                 cur.close()
             if "conn" in locals():
-                conn.close()
+                put_connection(conn)

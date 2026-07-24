@@ -15,6 +15,7 @@ from agent.tools_registry import ToolRegistry
 from api.chat import router
 from api.middleware import RequestIDMiddleware
 from config import settings
+from core.db_pool import close_pool, init_pool
 from core.llm_client import LLMClient
 from log_config import setup_logging
 
@@ -23,6 +24,7 @@ from log_config import setup_logging
 async def lifespan(app: FastAPI):
     # startup
     setup_logging()
+    init_pool()
     llm = LLMClient(
         api_key=settings.llm_api_key.get_secret_value(),
         base_url=settings.llm_base_url,
@@ -44,7 +46,8 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # shutdown — 目前内存存储没有要关的，占位
+    # shutdown
+    close_pool()
 
 
 app = FastAPI(title="极客数码 AI 客服", version="0.1.0", lifespan=lifespan)

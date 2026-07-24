@@ -1,10 +1,8 @@
 import logging
 from typing import Any
 
-import psycopg2
-
 from agent.tools_registry import BaseTool, ToolResult
-from config import settings
+from core.db_pool import get_connection, put_connection
 
 logger = logging.getLogger(__name__)
 
@@ -57,13 +55,7 @@ class TrackOrder(BaseTool):
         label = "order_id" if order_id else "phone"
 
         try:
-            conn = psycopg2.connect(
-                host=settings.pg_host,
-                port=settings.pg_port,
-                user=settings.pg_user,
-                password=settings.pg_password.get_secret_value(),
-                dbname=settings.pg_dbname,
-            )
+            conn = get_connection()
             cur = conn.cursor()
             cur.execute(self._SQL.format(where=where), (param,))
             rows = cur.fetchall()
@@ -113,4 +105,4 @@ class TrackOrder(BaseTool):
             if "cur" in locals():
                 cur.close()
             if "conn" in locals():
-                conn.close()
+                put_connection(conn)

@@ -1,10 +1,8 @@
 import logging
 from typing import Any
 
-import psycopg2
-
 from agent.tools_registry import BaseTool, ToolResult
-from config import settings
+from core.db_pool import get_connection, put_connection
 
 logger = logging.getLogger(__name__)
 
@@ -44,13 +42,7 @@ class CheckStock(BaseTool):
             return ToolResult(name=self.name, status="error", error=f"不支持的表: {table}")
 
         try:
-            conn = psycopg2.connect(
-                host=settings.pg_host,
-                port=settings.pg_port,
-                user=settings.pg_user,
-                password=settings.pg_password.get_secret_value(),
-                dbname=settings.pg_dbname,
-            )
+            conn = get_connection()
             cur = conn.cursor()
             cur.execute(
                 f"SELECT product_name, brand, price, stock, warehouse "
@@ -61,7 +53,9 @@ class CheckStock(BaseTool):
 
             if not rows:
                 return ToolResult(
-                    name=self.name, status="error", error=f"未找到 {product_name} 的库存信息"
+                    name=self.name,
+                    status="error",
+                    error=f"未找到 {product_name} 的库存信息",
                 )
 
             results: list[dict[str, Any]] = []
@@ -95,4 +89,4 @@ class CheckStock(BaseTool):
             if "cur" in locals():
                 cur.close()
             if "conn" in locals():
-                conn.close()
+                put_connection(conn)
