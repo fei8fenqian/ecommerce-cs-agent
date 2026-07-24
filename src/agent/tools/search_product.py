@@ -1,8 +1,9 @@
 import logging
 from typing import Any
+
 from agent.tools_registry import BaseTool, ToolResult
-from core.retrieve import hybrid_search
 from config import settings
+from core.retrieve import hybrid_search
 
 logger = logging.getLogger(__name__)
 
@@ -14,9 +15,7 @@ class SearchProduct(BaseTool):
 
     @property
     def description(self) -> str:
-        return (
-            "搜索商品参数和知识库文档。当用户询问产品规格、选购建议、售后政策时使用。"
-        )
+        return "搜索商品参数和知识库文档。当用户询问产品规格、选购建议、售后政策时使用。"
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -49,13 +48,9 @@ class SearchProduct(BaseTool):
         top_k: int = settings.retrieval_top_k,
     ) -> ToolResult:
         try:
-            candidates: list[dict] = hybrid_search(
-                query, table=table, where=None, top_k=top_k
-            )
+            candidates: list[dict] = hybrid_search(query, table=table, where=None, top_k=top_k)
             if not candidates:
-                return ToolResult(
-                    name=self.name, status="error", error="未找到相关内容"
-                )
+                return ToolResult(name=self.name, status="error", error="未找到相关内容")
             results: list[dict[str, Any]] = []
             for c in candidates:
                 results.append(
@@ -80,6 +75,4 @@ class SearchProduct(BaseTool):
                 table,
                 str(e),
             )
-            return ToolResult(
-                name=self.name, status="error", error=f"检索失败: {str(e)}"
-            )
+            return ToolResult(name=self.name, status="error", error=f"检索失败: {str(e)}")

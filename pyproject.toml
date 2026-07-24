@@ -13,6 +13,16 @@ name = "3c-cs-agent"                # pip 包名，也是项目标识
 version = "0.1.0"                   # 语义化版本：主版本.次版本.补丁
 description = "3C 数码智能客服 Agent 系统"
 requires-python = ">=3.12"          # 低于 3.12 装不上。match 语句、泛型语法都要求 3.12
+dependencies = [
+    "fastapi>=0.110",
+    "openai>=1.30",
+    "psycopg2-binary>=2.9",
+    "pydantic>=2.5",
+    "pydantic-settings>=2.1",
+    "sentence-transformers>=3.0",
+    "langgraph>=1.0",
+    "mcp>=1.0",
+]
 
 # -------------------------------------------------------------------
 # [tool.ruff] — ruff 的配置
@@ -56,6 +66,10 @@ python_version = "3.12"
 # 项目初期用 false，后面可以慢慢收紧
 strict = false
 # ignore_missing_imports：第三方库没类型标注的别报错（很多小库没有 py.typed）    
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["langgraph.*", "mcp.*"]
 ignore_missing_imports = true
 
 # -------------------------------------------------------------------

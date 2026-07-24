@@ -1,6 +1,8 @@
 import logging
-import psycopg2
 from typing import Any
+
+import psycopg2
+
 from agent.tools_registry import BaseTool, ToolResult
 from config import settings
 
@@ -14,7 +16,7 @@ class TrackOrder(BaseTool):
 
     @property
     def description(self) -> str:
-        return """查询订单状态与物流信息。  
+        return """查询订单状态与物流信息。
         适用场景：用户询问"我的订单到哪了""帮我查一下订单""这个手机号下的订单"等。
         查单规则：优先用订单号精确查询；若无订单号则用手机号查该号码下所有订单。
         两者至少提供一个。"""
@@ -56,8 +58,10 @@ class TrackOrder(BaseTool):
 
         try:
             conn = psycopg2.connect(
-                host=settings.pg_host, port=settings.pg_port,
-                user=settings.pg_user, password=settings.pg_password.get_secret_value(),
+                host=settings.pg_host,
+                port=settings.pg_port,
+                user=settings.pg_user,
+                password=settings.pg_password.get_secret_value(),
                 dbname=settings.pg_dbname,
             )
             cur = conn.cursor()
@@ -84,11 +88,14 @@ class TrackOrder(BaseTool):
                         "items": [],
                     }
                 if row[8] is not None:  # LEFT JOIN 有商品
-                    orders[oid]["items"].append({
-                        "product_name": row[8], "brand": row[9],
-                        "price": float(row[10]) if row[10] else 0.0,
-                        "quantity": row[11],
-                    })
+                    orders[oid]["items"].append(
+                        {
+                            "product_name": row[8],
+                            "brand": row[9],
+                            "price": float(row[10]) if row[10] else 0.0,
+                            "quantity": row[11],
+                        }
+                    )
 
             # 单号查询返回单个订单，手机号查询返回列表
             if order_id:
