@@ -6,8 +6,8 @@ import psycopg2
 from psycopg2.extras import Json
 from sentence_transformers import SentenceTransformer
 
-from .db import connect_db
-from .generate_descriptions import build_description
+from ..db import connect_db
+from ..generate_descriptions import build_description
 
 
 def create_product_table(conn: psycopg2.extensions.connection):

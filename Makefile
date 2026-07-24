@@ -45,8 +45,9 @@ eval:
 # 数据注入（知识库 + 产品一起灌）
 # -------------------------------------------------------------------
 ingest:
-	python -m scripts.ingest_knowledge
-	python -m scripts.ingest_pgvector
+	python -m scripts.ingest.knowledge
+	python -m scripts.ingest.laptops
+	python -m scripts.ingest.phones
 
 # -------------------------------------------------------------------
 # 清理缓存

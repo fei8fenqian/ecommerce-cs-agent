@@ -6,6 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import psycopg2
+
 from config import settings
 
 # 仓库城市 + 权重（一线城市权重高，同城配送最常见）
@@ -151,18 +152,12 @@ def generate(seed: int = 42, dry_run: bool = False):
     for table, s in stats.items():
         print(f"\n📦 {table}:")
         print(f"   总计: {s['total']} SKU")
+        print(f"   正常({10}-{199}台): {s['in_stock']} ({s['in_stock'] / s['total'] * 100:.1f}%)")
+        print(f"   紧张(1-9台):     {s['low_stock']} ({s['low_stock'] / s['total'] * 100:.1f}%)")
         print(
-            f"   正常({10}-{199}台): {s['in_stock']} ({s['in_stock']/s['total']*100:.1f}%)"
+            f"   缺货(0台):       {s['out_of_stock']} ({s['out_of_stock'] / s['total'] * 100:.1f}%)"
         )
-        print(
-            f"   紧张(1-9台):     {s['low_stock']} ({s['low_stock']/s['total']*100:.1f}%)"
-        )
-        print(
-            f"   缺货(0台):       {s['out_of_stock']} ({s['out_of_stock']/s['total']*100:.1f}%)"
-        )
-        print(
-            f"   充足(200+台):    {s['high_stock']} ({s['high_stock']/s['total']*100:.1f}%)"
-        )
+        print(f"   充足(200+台):    {s['high_stock']} ({s['high_stock'] / s['total'] * 100:.1f}%)")
         print(f"   仓库分布: {s['warehouses']}")
 
 

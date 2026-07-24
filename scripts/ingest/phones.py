@@ -8,8 +8,8 @@ import psycopg2
 from psycopg2.extras import Json
 from sentence_transformers import SentenceTransformer
 
-from .db import connect_db
-from .generate_descriptions import build_phone_description
+from ..db import connect_db
+from ..generate_descriptions import build_phone_description
 
 
 def create_phone_table(conn: psycopg2.extensions.connection):
