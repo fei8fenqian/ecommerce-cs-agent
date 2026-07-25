@@ -36,7 +36,7 @@ dependencies = [
 # -------------------------------------------------------------------
 [tool.ruff]
 target-version = "py312"            # 告诉 ruff 你的代码运行在 3.12 上
-line-length = 100                   # 每行最多 100 字符（默认 88，团队一般 100-120）
+line-length = 120                   # 每行最多 120 字符
 
 [tool.ruff.lint]
 # select 选你要启用哪些规则：
@@ -45,6 +45,9 @@ line-length = 100                   # 每行最多 100 字符（默认 88，团�
 #   F  = pyflakes            — import 了但没用的包、定义了但没用的变量
 #   I  = isort               — import 顺序不对（标准库 → 第三方 → 自己的）       
 select = ["E", "W", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/**/*.py" = ["E402"]  # scripts 需要 sys.path.insert 在 import 之前
 
 [tool.ruff.format]
 quote-style = "double"              # 统一双引号，不管你自己写的是单还是双 
