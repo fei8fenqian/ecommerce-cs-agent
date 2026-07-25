@@ -498,17 +498,60 @@ def put_connection(conn):
 
 ---
 
-## 八、实施顺序
+## 八、实施顺序（2026-07-25 修订）
 
 ```
-Step 1: 爬虫 + 数据入库             (脚本，独立可跑)
-Step 2: search_component 工具       (纯 PG，无 MCP 依赖)
-Step 3: PG 连接池                    (改进现有 3 个工具)
+Step 1: 爬虫 + 数据入库             ✅ 已完成 (9 品类 1427 条)
+Step 1.5: retrieve.py 重构          ← 当前 (BM25懒加载+连接池+component分支)
+Step 2: search_component 工具        (薄封装，调 hybrid_search)
+Step 3: 上游脚本适配                 (eval/smoke 加 init_pool)
 Step 4: MCP 适配器 + Compat Server  (MCP 基础设施)
 Step 5: LangGraph PlanAndExecute    (核心编排)
 Step 6: IntentRouter 扩展           (路由接入)
 Step 7: chat.py / main.py 集成      (端到端联通)
 Step 8: 测试 + 端到端验证           (配机流程全链路)
+```
+
+> **Step 1.5 说明**: Step 2 (search_component) 依赖 retrieve.py 支持 component_products 表和连接池。原 Step 3 (PG 连接池) 在 commit e50dfc0 中已部分完成（工具层），但 retrieve.py 漏了——它仍用 `_connect()` 每次新建连接、BM25 索引在 import 时建（早于 `init_pool()`）。详见下方"检索层待修复问题"。
+
+### 检索层待修复问题（Step 1.5 详细清单）
+
+#### P0 — 阻塞 search_component
+
+| # | 问题 | 位置 | 修复 |
+|---|------|------|------|
+| 1 | BM25 索引模块级初始化，import 时执行，早于 `init_pool()` | `retrieve.py:31-36` | 懒加载：类变量初始 `None`，首次 search 时建 |
+| 2 | `_connect()` 每次新建连接，不走连接池 | `retrieve.py:18-25` | 改用 `get_connection()` / `put_connection()` |
+| 3 | `vector_search` 没有 `component_products` 分支 | `retrieve.py:62-67` | 加 `elif table == "component_products"`，列名：`id, name, category, price, url, normalized, params, description` |
+| 4 | `hybrid_search` 没有 `component_products` 分支 | `retrieve.py:133-138` | 加 `_bm25_components` + `elif` 分支 |
+| 5 | `hybrid_search` 结果不带 `normalized` 字段 | `retrieve.py:148-157` | component 分支返回时多带 `normalized`（供后续兼容性检查） |
+
+#### P1 — 顺手修（同一批改动）
+
+| # | 问题 | 位置 | 修复 |
+|---|------|------|------|
+| 6 | `where` 是 f-string 拼进 SQL，不参数化 | `retrieve.py:69-72` | 用 `%s` 占位符 + 参数列表，或至少保持内部可控 |
+| 7 | BM25 不认 WHERE——`hybrid_search` 把 `where` 传给 vector 但 BM25 始终搜全表，RRF 融合后靠 `doc_map` 丢弃不匹配结果 | `retrieve.py:133-134` | 记 TODO：短期 doc_map 兜底够用，长期给 BM25 也加过滤 |
+| 8 | `scripts/eval.py` 直接 import retrieve，改池后需要 `init_pool()` | `scripts/eval.py:80-84` | 文件顶部加 `from core.db_pool import init_pool; init_pool()` |
+| 9 | `scripts/smoke/rag.py` 同上 | `scripts/smoke/rag.py:23` | 同上 |
+| 10 | `scripts/smoke/agent.py` 同上 | `scripts/smoke/agent.py:26` | 同上 |
+
+#### P2 — 后续优化（不阻塞，记 TODO）
+
+| # | 问题 | 说明 |
+|---|------|------|
+| 11 | `search_product` 不暴露 price/product_type 过滤 | `where` 始终 `None`，用户问"5000 以内游戏本"靠 LLM 自己从结果筛选，不如 SQL 层过滤精确 |
+| 12 | `compare_products` 同上 | `where` 始终 `None` |
+
+### 改动波及面
+
+```
+retrieve.py          ← 核心改动（懒加载 + 池 + component 分支）
+search_component.py  ← 新建（薄工具，调 hybrid_search）
+scripts/eval.py      ← 加 init_pool()
+scripts/smoke/rag.py ← 加 init_pool()
+scripts/smoke/agent.py ← 加 init_pool()
+main.py              ← 注册 SearchComponent
 ```
 
 ---

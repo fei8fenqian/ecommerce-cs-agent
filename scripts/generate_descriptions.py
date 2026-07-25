@@ -1,4 +1,4 @@
-def build_description(record: dict) -> str:
+def build_laptop_description(record: dict) -> str:
     """为每个产品生成对应自然语言描述"""
     sentences = []
 
@@ -208,5 +208,147 @@ def build_phone_description(p: dict) -> str:
         conn_parts.append(f"指纹:{p['fingerprint']}")
     if conn_parts:
         sentences.append("，".join(conn_parts))
+
+    return "。".join(sentences) + "。"
+
+
+def build_component_description(p: dict) -> str:
+    """为配件生成自然语言描述，用于向量检索"""
+    sentences = []
+
+    price_str = f"￥{p['price']}" if p.get("price") else "价格待定"
+    sentences.append(f"{p['name']}，售价{price_str}")
+
+    cat = p["category"]
+    norm = p.get("normalized", {})
+
+    if cat == "cpu":
+        parts = []
+        if norm.get("socket"):
+            parts.append(f"{norm['socket']}插槽")
+        if norm.get("usage"):
+            parts.append(norm["usage"])
+        if norm.get("cores"):
+            parts.append(f"{norm['cores']}")
+        if norm.get("threads"):
+            parts.append(f"共{norm['threads']}")
+        if norm.get("tdp"):
+            parts.append(f"TDP {norm['tdp']}")
+        if norm.get("memory_type"):
+            parts.append(f"支持{norm['memory_type']}内存")
+        if parts:
+            sentences.append("，".join(parts))
+
+    elif cat == "motherboard":
+        parts = []
+        if norm.get("socket"):
+            parts.append(f"支持{norm['socket']}接口CPU")
+        if norm.get("chipset"):
+            parts.append(f"{norm['chipset']}芯片组")
+        if norm.get("memory_type"):
+            parts.append(f"支持{norm['memory_type']}内存")
+        if norm.get("form_factor"):
+            parts.append(f"{norm['form_factor']}板型")
+        if norm.get("dimensions"):
+            parts.append(f"尺寸{norm['dimensions']}")
+        if parts:
+            sentences.append("，".join(parts))
+
+    elif cat == "vga":
+        parts = []
+        if norm.get("vram"):
+            parts.append(f"{norm['vram']}显存")
+        if norm.get("vram_type"):
+            parts.append(f"{norm['vram_type']}类型")
+        if norm.get("interface"):
+            parts.append(norm["interface"])
+        if norm.get("power_draw"):
+            parts.append(f"功耗{norm['power_draw']}")
+        if norm.get("gpu_type"):
+            parts.append(norm["gpu_type"])
+        if norm.get("dimensions"):
+            parts.append(f"尺寸{norm['dimensions']}")
+        if parts:
+            sentences.append("，".join(parts))
+
+    elif cat == "memory":
+        parts = []
+        if norm.get("memory_type"):
+            parts.append(norm["memory_type"])
+        if norm.get("capacity"):
+            parts.append(norm["capacity"])
+        if norm.get("frequency"):
+            parts.append(f"频率{norm['frequency']}")
+        if norm.get("usage"):
+            parts.append(norm["usage"])
+        if parts:
+            sentences.append("，".join(parts))
+
+    elif cat == "solid_state_drive":
+        parts = []
+        if norm.get("capacity"):
+            parts.append(f"容量{norm['capacity']}")
+        if norm.get("interface"):
+            parts.append(norm["interface"])
+        if norm.get("dimensions"):
+            parts.append(f"尺寸{norm['dimensions']}")
+        if parts:
+            sentences.append("，".join(parts))
+
+    elif cat == "hard_drives":
+        parts = []
+        if norm.get("capacity"):
+            parts.append(f"容量{norm['capacity']}")
+        if norm.get("interface"):
+            parts.append(norm["interface"])
+        if norm.get("rpm"):
+            parts.append(f"转速{norm['rpm']}")
+        if norm.get("form_factor"):
+            parts.append(f"{norm['form_factor']}盘")
+        if norm.get("dimensions"):
+            parts.append(f"尺寸{norm['dimensions']}")
+        if parts:
+            sentences.append("，".join(parts))
+
+    elif cat == "power":
+        parts = []
+        if norm.get("wattage"):
+            parts.append(f"额定{norm['wattage']}")
+        if norm.get("certification"):
+            parts.append(f"{norm['certification']}认证")
+        if norm.get("form_factor"):
+            parts.append(norm["form_factor"])
+        if norm.get("dimensions"):
+            parts.append(f"尺寸{norm['dimensions']}")
+        if parts:
+            sentences.append("，".join(parts))
+
+    elif cat == "case":
+        parts = []
+        if norm.get("case_type"):
+            parts.append(norm["case_type"])
+        if norm.get("motherboard_support"):
+            parts.append(f"支持{norm['motherboard_support']}")
+        if norm.get("gpu_length_max"):
+            parts.append(f"显卡限长{norm['gpu_length_max']}")
+        if norm.get("cooler_height_max"):
+            parts.append(f"散热器限高{norm['cooler_height_max']}")
+        if norm.get("dimensions"):
+            parts.append(f"尺寸{norm['dimensions']}")
+        if parts:
+            sentences.append("，".join(parts))
+
+    elif cat == "cooling_product":
+        parts = []
+        if norm.get("type"):
+            parts.append(norm["type"])
+        if norm.get("method"):
+            parts.append(norm["method"])
+        if norm.get("socket_support"):
+            parts.append(f"兼容{norm['socket_support']}")
+        if norm.get("dimensions"):
+            parts.append(f"尺寸{norm['dimensions']}")
+        if parts:
+            sentences.append("，".join(parts))
 
     return "。".join(sentences) + "。"

@@ -7,7 +7,7 @@ from psycopg2.extras import Json
 from sentence_transformers import SentenceTransformer
 
 from ..db import connect_db
-from ..generate_descriptions import build_description
+from ..generate_descriptions import build_laptop_description
 
 
 def create_product_table(conn: psycopg2.extensions.connection):
@@ -66,7 +66,7 @@ def ingest(
     """生成描述 → 编码 → 插入"""
     descriptions = []
     for p in products:
-        p_desc = build_description(p)
+        p_desc = build_laptop_description(p)
         descriptions.append(p_desc)
 
     # 批量编码
