@@ -17,78 +17,64 @@ scripts/eval.py — 检索方案消融实验
 
 import json
 import math
+import sys
 import time
 from pathlib import Path
 from typing import Any
 
-from .db import connect_db
-
 # ── 路径 ──────────────────────────────────────────
 ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(ROOT / "src"))  # noqa: E402
 QUESTIONS_PATH = ROOT / "data" / "test_questions.json"
 
+from config import settings  # noqa: E402
+from core.db_pool import get_connection, init_pool, put_connection  # noqa: E402
+from core.retrieve import _get_bm25, hybrid_search, vector_search  # noqa: E402
+
 # ── 连接 ──────────────────────────────────────────
-CONN = connect_db()
+init_pool()
 
 # BM25 只返回 (id, score)，需要回查 content 才能判断相关性
 _CONTENT_CACHE: dict[str, dict[str, Any]] = {}
+
+
+def _get_conn():
+    """eval 脚本专用：从池取连接（不走 retrieve.py 的 _connect）"""
+    return get_connection()
+
+
+def _put_conn(conn):
+    put_connection(conn)
 
 
 def _build_content_cache(table: str):
     """预加载某张表的 id → content/title 映射"""
     if table in _CONTENT_CACHE:
         return
-    cur = CONN.cursor()
-    if table == "laptop_products":
-        cur.execute("select id, description, product_name, brand from laptop_products")
-        cache = {}
-        for row in cur.fetchall():
-            cache[row[0]] = {"content": row[1] or "", "title": f"{row[3]} {row[2]}"}
-        _CONTENT_CACHE[table] = cache
-    elif table == "phone_products":
-        cur.execute("select id, description, product_name, brand from phone_products")
-        cache = {}
-        for row in cur.fetchall():
-            cache[row[0]] = {"content": row[1] or "", "title": f"{row[3]} {row[2]}"}
-        _CONTENT_CACHE[table] = cache
-    elif table == "knowledge_chunks":
-        cur.execute("select id, content, title, source from knowledge_chunks")
-        cache = {}
-        for row in cur.fetchall():
-            cache[row[0]] = {"content": row[1] or "", "title": row[2] or ""}
-        _CONTENT_CACHE[table] = cache
-    cur.close()
-
-
-# ── 延迟导入（避免 eval.py 被 import 时加载全部模型）────
-_vector_search = None
-_hybrid_search = None
-_rerank = None
-_bm25_products = None
-_bm25_phones = None
-_bm25_knowledge = None
-
-
-def _lazy_import():
-    """首次调用时加载模型和索引，避免 import eval 就 OOM"""
-    global _vector_search, _hybrid_search, _rerank, _bm25_products, _bm25_phones, _bm25_knowledge
-
-    if _vector_search is not None:
-        return
-
-    from core.rerank import rerank as rr
-    from core.retrieve import _bm25_knowledge as bk
-    from core.retrieve import _bm25_phones as bph
-    from core.retrieve import _bm25_products as bp
-    from core.retrieve import hybrid_search as hs
-    from core.retrieve import vector_search as vs
-
-    _vector_search = vs
-    _hybrid_search = hs
-    _bm25_products = bp
-    _bm25_phones = bph
-    _bm25_knowledge = bk
-    _rerank = rr
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        if table == "laptop_products":
+            cur.execute("select id, description, product_name, brand from laptop_products")
+            cache = {}
+            for row in cur.fetchall():
+                cache[row[0]] = {"content": row[1] or "", "title": f"{row[3]} {row[2]}"}
+            _CONTENT_CACHE[table] = cache
+        elif table == "phone_products":
+            cur.execute("select id, description, product_name, brand from phone_products")
+            cache = {}
+            for row in cur.fetchall():
+                cache[row[0]] = {"content": row[1] or "", "title": f"{row[3]} {row[2]}"}
+            _CONTENT_CACHE[table] = cache
+        elif table == "knowledge_chunks":
+            cur.execute("select id, content, title, source from knowledge_chunks")
+            cache = {}
+            for row in cur.fetchall():
+                cache[row[0]] = {"content": row[1] or "", "title": row[2] or ""}
+            _CONTENT_CACHE[table] = cache
+    finally:
+        cur.close()
+        _put_conn(conn)
 
 
 # ── 相关性判断 ────────────────────────────────────
@@ -144,16 +130,9 @@ def calc_metrics(
 # ── 方案执行 ─────────────────────────────────────
 def run_scheme_a(query: str, table: str, top_k: int = 5) -> list[dict]:
     """纯 BM25"""
-    _lazy_import()
     _build_content_cache(table)
     cache = _CONTENT_CACHE[table]
-    if table == "laptop_products":
-        bm25 = _bm25_products
-    elif table == "phone_products":
-        bm25 = _bm25_phones
-    else:
-        bm25 = _bm25_knowledge
-    assert bm25 is not None, "BM25 索引未初始化"
+    bm25 = _get_bm25(table)
     results = bm25.search(query, top_k=top_k)
     return [
         {
@@ -168,24 +147,18 @@ def run_scheme_a(query: str, table: str, top_k: int = 5) -> list[dict]:
 
 def run_scheme_b(query: str, table: str, top_k: int = 5) -> list[dict]:
     """纯向量检索"""
-    _lazy_import()
-    assert _vector_search is not None
-    return _vector_search(query, table=table, top_k=top_k)
+    return vector_search(query, table=table, top_k=top_k)
 
 
 def run_scheme_c(query: str, table: str, top_k: int = 5) -> list[dict]:
-    """BM25 + 向量 RRF 混合"""
-    _lazy_import()
-    assert _hybrid_search is not None
-    return _hybrid_search(query, table=table, top_k=top_k)
+    """BM25 + 向量 RRF 混合（无 rerank）"""
+    return hybrid_search(query, table=table, top_k=top_k, use_rerank=False)
 
 
 def run_scheme_d(query: str, table: str, top_k: int = 5) -> list[dict]:
-    """Hybrid + Rerank"""
-    _lazy_import()
-    assert _hybrid_search is not None and _rerank is not None
-    candidates = _hybrid_search(query, table=table, top_k=20)
-    return _rerank(query, candidates, top_k=top_k)
+    """Hybrid + Rerank 精排"""
+    # hybrid_search 内部已包含 rerank，传入更多粗筛候选让 rerank 有更大选择空间
+    return hybrid_search(query, table=table, top_k=settings.retrieval_top_k)
 
 
 SCHEMES = {

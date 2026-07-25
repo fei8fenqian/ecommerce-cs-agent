@@ -6,34 +6,44 @@
     # → [(id, content, score), ...]
 """
 
-import psycopg2
 from sentence_transformers import SentenceTransformer
 
 from config import settings
-
-from .bm25 import BM25Index
-from .rrf import rrf_fuse
-
-
-def _connect() -> psycopg2.extensions.connection:
-    return psycopg2.connect(
-        host=settings.pg_host,
-        port=settings.pg_port,
-        user=settings.pg_user,
-        password=settings.pg_password.get_secret_value(),
-        dbname=settings.pg_dbname,
-    )
-
+from core.bm25 import BM25Index
+from core.db_pool import get_connection, put_connection
+from core.rerank import rerank
+from core.rrf import rrf_fuse
 
 # 启动时加载一次模型（模块级，不每次请求加载）
 _model = SentenceTransformer(settings.embedding_model)
 
-# 用一个短连接建完 BM25 索引就关
-_conn = _connect()
-_bm25_products = BM25Index(_conn, table="laptop_products", text_col="description")
-_bm25_phones = BM25Index(_conn, table="phone_products", text_col="description")
-_bm25_knowledge = BM25Index(_conn, table="knowledge_chunks", text_col="content")
-_conn.close()
+# 模块级 表名:bm25
+_bm25_cache: dict[str, BM25Index] = {}
+
+# 不同表的文本列名 表名:列名
+_BM25_TABLE_TEXT = {
+    "laptop_products": "description",
+    "phone_products": "description",
+    "knowledge_chunks": "content",
+    "component_products": "description",
+}
+
+
+def _get_bm25(table: str) -> BM25Index:
+    """懒加载 BM25，首次调用建索引，后续命中缓存"""
+    if table not in _BM25_TABLE_TEXT:
+        raise ValueError(f"BM25 不支持: {table}，可选: {list(_BM25_TABLE_TEXT)}")
+
+    if table in _bm25_cache:
+        return _bm25_cache[table]
+
+    conn = get_connection()
+    try:
+        bm25 = BM25Index(conn, table=table, text_col=_BM25_TABLE_TEXT[table])
+    finally:
+        put_connection(conn)
+    _bm25_cache[table] = bm25
+    return bm25
 
 
 def vector_search(
@@ -63,6 +73,8 @@ def vector_search(
         cols = "id, product_name, brand, price, description"
     elif table == "knowledge_chunks":
         cols = "id, source, title, content"
+    elif table == "component_products":
+        cols = "id, name, category, price, description"
     else:
         raise ValueError(f"不支持的表: {table}")
 
@@ -75,10 +87,11 @@ def vector_search(
         limit %s
     """
 
-    conn = _connect()
-    cur = conn.cursor()
+    conn = get_connection()
+    cur = None
 
     try:
+        cur = conn.cursor()
         if table in ("laptop_products", "phone_products"):
             cur.execute(sql, (q_vec_str, q_vec_str, top_k))
             res = []
@@ -111,10 +124,28 @@ def vector_search(
                 )
             return res
 
+        elif table == "component_products":
+            cur.execute(sql, (q_vec_str, q_vec_str, top_k))
+            res = []
+            for row in cur.fetchall():
+                id, name, category, price, description, score = row
+                res.append(
+                    {
+                        "id": id,
+                        "content": description,
+                        "score": score,
+                        "title": name,
+                        "category": category,
+                        "price": price,
+                    }
+                )
+            return res
+
     # 兜底
     finally:
-        cur.close()
-        conn.close()
+        if cur is not None:
+            cur.close()
+        put_connection(conn)
 
     return []
 
@@ -124,28 +155,23 @@ def hybrid_search(
     *,
     table: str = "laptop_products",
     where: str | None = None,
-    top_k: int = 5,
-):
+    top_k: int = settings.retrieval_top_k,
+    use_rerank: bool = True,
+) -> list[dict]:
     """
-    混合检索：向量 + BM25 → RRF 融合 → top-k 结果。
+    混合检索：向量 + BM25 → RRF 融合 → (可选) rerank 精排。
+
+    use_rerank=False 时跳过精排直接返回 RRF 融合结果，用于消融实验。
     """
     retrieve_vector = vector_search(query, table=table, where=where, top_k=top_k)
-    if table == "laptop_products":
-        retrieve_bm25 = _bm25_products.search(query, top_k=20)
-    elif table == "phone_products":
-        retrieve_bm25 = _bm25_phones.search(query, top_k=20)
-    elif table == "knowledge_chunks":
-        retrieve_bm25 = _bm25_knowledge.search(query, top_k=20)
-    else:
-        raise ValueError(f"无法检索表{table}")
+    bm25 = _get_bm25(table)
+    retrieve_bm25 = bm25.search(query, top_k=20)
     rank_vector = [doc["id"] for doc in retrieve_vector if doc.get("id", 0)]
     rank_bm25 = [doc[0] for doc in retrieve_bm25]
-    # rank: list[tuple[doc_id, score]]
     rrf_rank = rrf_fuse(ranking_a=rank_vector, ranking_b=rank_bm25)
 
     # 根据doc_id索引完整doc
     doc_map = {doc["id"]: doc for doc in retrieve_vector}
-    # 返回[{"id": ..., "content": ..., "score": ..., "source": ..., "title": ..., ...}, ...]
     res: list[dict] = []
     for doc_id, rrf_score in rrf_rank:
         # BM25 独有的，跳过
@@ -154,4 +180,7 @@ def hybrid_search(
             continue
         doc["rrf_score"] = rrf_score
         res.append(doc)
-    return res[:top_k]
+
+    if not use_rerank:
+        return res
+    return rerank(query, res)

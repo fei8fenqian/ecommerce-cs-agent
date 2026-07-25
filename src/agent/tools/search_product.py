@@ -59,7 +59,6 @@ class SearchProduct(BaseTool):
                         "content": (c.get("content") or "")[:200]
                         + ("..." if len(c.get("content") or "") > 200 else ""),
                         "score": c.get("score"),
-                        "source": c.get("source"),
                     }
                 )
 
