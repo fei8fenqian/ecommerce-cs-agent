@@ -494,5 +494,109 @@
     "difficulty": "hard",
     "expected_source": "phone_products",
     "expected_keywords": ["华为", "荣耀", "鸿蒙", "互联"]
+  },
+  {
+    "id": 63,
+    "query": "4070显卡现在卖多少 预算紧",
+    "type": "precise",
+    "difficulty": "easy",
+    "expected_source": "component_products",
+    "expected_keywords": ["RTX", "4070"]
+  },
+  {
+    "id": 64,
+    "query": "能打黑神话的显卡 别太贵的推荐个",
+    "type": "recommendation",
+    "difficulty": "medium",
+    "expected_source": "component_products",
+    "expected_keywords": ["RTX", "GeForce"]
+  },
+  {
+    "id": 65,
+    "query": "家里电脑太老了 换内存条有用吗 怎么选",
+    "type": "recommendation",
+    "difficulty": "easy",
+    "expected_source": "component_products",
+    "expected_keywords": ["DDR", "内存"]
+  },
+  {
+    "id": 66,
+    "query": "想储存多点游戏和电影 买哪种硬盘",
+    "type": "recommendation",
+    "difficulty": "easy",
+    "expected_source": "component_products",
+    "expected_keywords": ["SSD", "机械", "硬盘"]
+  },
+  {
+    "id": 67,
+    "query": "1070老卡了换新显卡 电源550W够吗",
+    "type": "recommendation",
+    "difficulty": "medium",
+    "expected_source": "component_products",
+    "expected_keywords": ["RTX", "电源", "W"]
+  },
+  {
+    "id": 68,
+    "query": "帮我看下这个配置单合理不 i5 + 4060 + B760 电源650W",
+    "type": "comparison",
+    "difficulty": "hard",
+    "expected_source": "component_products",
+    "expected_keywords": ["CPU", "显卡", "主板", "电源"]
+  },
+  {
+    "id": 69,
+    "query": "七八千配一台主机 打游戏用 帮我看看选啥",
+    "type": "recommendation",
+    "difficulty": "hard",
+    "expected_source": "component_products",
+    "expected_keywords": ["CPU", "显卡", "主板", "内存"]
+  },
+  {
+    "id": 70,
+    "query": "电脑开机一会就关机 是不是散热不行 换什么散热器",
+    "type": "recommendation",
+    "difficulty": "medium",
+    "expected_source": "component_products",
+    "expected_keywords": ["散热", "风冷", "水冷"]
+  },
+  {
+    "id": 71,
+    "query": "想换个CPU 但是不知道主板支不支持 怎么看",
+    "type": "recommendation",
+    "difficulty": "medium",
+    "expected_source": "component_products",
+    "expected_keywords": ["CPU", "LGA", "主板", "插槽"]
+  },
+  {
+    "id": 72,
+    "query": "装机选AMD还是Intel 主要打游戏",
+    "type": "comparison",
+    "difficulty": "medium",
+    "expected_source": "component_products",
+    "expected_keywords": ["CPU", "AMD", "Intel"]
+  },
+  {
+    "id": 73,
+    "query": "双十一想装台电脑 预算一万出头 显卡想上4070 其他帮我搭配一下",
+    "type": "recommendation",
+    "difficulty": "hard",
+    "expected_source": "component_products",
+    "expected_keywords": ["CPU", "显卡", "主板", "电源", "内存"]
+  },
+  {
+    "id": 74,
+    "query": "想配台白色海景房 好看一点的 预算不超一万 主要玩游戏",
+    "type": "recommendation",
+    "difficulty": "hard",
+    "expected_source": "component_products",
+    "expected_keywords": ["机箱", "散热", "显卡", "主板"]
+  },
+  {
+    "id": 75,
+    "query": "第一次装机 什么都不懂 预算5000左右 帮我把要买的东西列一下",
+    "type": "recommendation",
+    "difficulty": "hard",
+    "expected_source": "component_products",
+    "expected_keywords": ["CPU", "显卡", "主板", "内存", "固态", "电源"]
   }
 ]

@@ -72,6 +72,12 @@ def _build_content_cache(table: str):
             for row in cur.fetchall():
                 cache[row[0]] = {"content": row[1] or "", "title": row[2] or ""}
             _CONTENT_CACHE[table] = cache
+        elif table == "component_products":
+            cur.execute("select id, description, name from component_products")
+            cache = {}
+            for row in cur.fetchall():
+                cache[row[0]] = {"content": row[1] or "", "title": row[2] or ""}
+            _CONTENT_CACHE[table] = cache
     finally:
         cur.close()
         _put_conn(conn)
@@ -218,10 +224,7 @@ def main(limit: int | None = None, skip_rerank: bool = False):
         skip_metrics = not expected
 
         print(f"\n[{idx}/{total}] {query}")
-        print(
-            f"  type={q['type']}  difficulty={difficulty}"
-            f"{' (开放题，跳过打分)' if skip_metrics else ''}"
-        )
+        print(f"  type={q['type']}  difficulty={difficulty}{' (开放题，跳过打分)' if skip_metrics else ''}")
 
         for scheme_name, scheme_fn in SCHEMES.items():
             if skip_rerank and scheme_name == "D: C+Rerank":
@@ -272,10 +275,7 @@ def main(limit: int | None = None, skip_rerank: bool = False):
 
 def print_agg(agg: dict, total: int, label: str):
     print(f"\n  [{label} — {total} 题]")
-    header = (
-        f"  {'方案':<28s} {'Hit@1':>7s} {'Hit@3':>7s} "
-        f"{'Hit@5':>7s} {'MRR':>7s} {'NDCG@5':>7s} {'延迟':>8s}"
-    )
+    header = f"  {'方案':<28s} {'Hit@1':>7s} {'Hit@3':>7s} {'Hit@5':>7s} {'MRR':>7s} {'NDCG@5':>7s} {'延迟':>8s}"
     print(header)
     print(f"  {'-' * 68}")
     for name in SCHEMES:
