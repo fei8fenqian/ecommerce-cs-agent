@@ -596,3 +596,81 @@ curl -X POST http://localhost:8000/api/v1/chat \
 
 **为什么手写 + LangGraph 共存**：
 > "不为用而用。简单查库存用手写 ReAct（轻量、可控），复杂配机用 LangGraph（需要 plan-execute-verify-replan 循环和并行执行）。面试官会问'你为什么不用 LangGraph 全部替代'——因为不同场景需要不同的编排模式。"
+
+---
+
+## 十一、SSE 流式输出
+
+### 11.1 为什么需要 SSE
+
+当前 `/api/v1/chat` 是请求-响应模式：用户发 query → 等 Agent 全部跑完 → 一次性返回结果。问题：
+
+| 场景 | 用户等待时间 | 体验 |
+|------|------------|------|
+| RAG 简单查询 | 2-3s | 可接受 |
+| Agent 多轮工具调用 | 5-15s | 焦虑，不知道在干嘛 |
+| Plan-and-Execute 配机 | 20-60s | 完全不可接受 |
+
+SSE 让前端实时看到 Agent 的每一步——思考、工具调用、中间结果——用户知道在推进，不会觉得卡死了。
+
+### 11.2 技术方案
+
+FastAPI 原生支持 `StreamingResponse`，Agent Loop 改造成 async generator：
+
+```
+POST /api/v1/chat          ← 保留，非流式（兼容）
+POST /api/v1/chat/stream   ← 新增，SSE 流式
+```
+
+**SSE 事件类型：**
+
+| event | payload | 说明 |
+|-------|---------|------|
+| `thinking` | `{"content": "..."}` | LLM 思考/推理 |
+| `tool_call` | `{"name": "search_component", "args": {...}}` | 即将调用工具 |
+| `tool_result` | `{"name": "...", "status": "success", "summary": "..."}` | 工具执行结果摘要 |
+| `answer` | `{"content": "...", "delta": true}` | 最终回答（流式 token） |
+| `error` | `{"message": "..."}` | 异常 |
+| `done` | `{"total_steps": 5, "total_tokens": 1234}` | 结束标记 |
+
+### 11.3 改造点
+
+| 模块 | 改动 |
+|------|------|
+| `AgentLoop.run()` | 新增 `run_stream()` 方法，`async yield` 每一步事件 |
+| `api/chat.py` | 新增 `/chat/stream` 端点，`StreamingResponse` + `text/event-stream` |
+| `LLMClient` | `chat()` 支持 `stream=True`，逐 token yield |
+| `PlanAndExecuteAgent` | 图节点间 yield 进度事件 |
+| 前端 | `EventSource` 接收 SSE，渲染步骤卡片 |
+
+### 11.4 LLM streaming 怎么嵌入 Agent Loop
+
+DeepSeek 兼容 OpenAI streaming API。关键：streaming 模式下 `tool_calls` 可能跨多个 chunk 累积，需要手动拼合：
+
+```python
+async def run_stream(self, query: str):
+    yield {"event": "thinking", "content": "正在分析..."}
+    
+    messages = [{"role": "user", "content": query}]
+    for step in range(self.max_steps):
+        # streaming LLM call
+        accumulated = await self._stream_chat(messages, tools)
+        
+        if accumulated.content:
+            yield {"event": "answer", "content": accumulated.content, "delta": True}
+        
+        if not accumulated.tool_calls:
+            break  # 最终回答
+        
+        for tc in accumulated.tool_calls:
+            yield {"event": "tool_call", "name": tc.name, "args": tc.args}
+            result = self.registry.execute(tc.name, **tc.args)
+            yield {"event": "tool_result", "name": tc.name, "status": result.status}
+            messages.append(...)  # 喂回 observations
+    
+    yield {"event": "done", "total_steps": step, "total_tokens": ...}
+```
+
+### 11.5 实施顺序
+
+放在 Plan-and-Execute 之后做——先把配机链路跑通，再流式化。因为 SSE 改的是 Agent Loop 的输出层，不影响核心逻辑，属于体验优化。
