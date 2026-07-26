@@ -21,9 +21,12 @@ from agent.tools.search_product import SearchProduct
 from agent.tools.track_order import TrackOrder
 from agent.tools_registry import ToolRegistry
 from config import settings
+from core.db_pool import init_pool
 from core.intent_router import IntentRouter
 from core.llm_client import LLMClient
 from core.retrieve import hybrid_search
+
+init_pool()
 
 
 def build_context(docs: list[dict]) -> str:

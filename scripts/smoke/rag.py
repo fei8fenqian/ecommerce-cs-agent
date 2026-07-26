@@ -19,8 +19,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from config import settings
+from core.db_pool import init_pool
 from core.llm_client import LLMClient
 from core.retrieve import hybrid_search
+
+init_pool()
 
 SYSTEM_PROMPT = """你是"极客数码"的 AI 客服助手。请遵守以下规则：
 
