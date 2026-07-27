@@ -1,7 +1,14 @@
+import json
+import time
+
 from fastapi import APIRouter, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from agent.loop import LoopResult
 from agent.sentiment import build_escalation_prompt, detect_sentiment
+from config import settings
+from core.retrieve import hybrid_search
 
 
 class ChatRequest(BaseModel):
@@ -19,22 +26,50 @@ class ChatResponse(BaseModel):
 router = APIRouter(prefix="/api/v1", tags=["聊天"])
 
 
+def _build_context(docs: list[dict]) -> str:
+    """把检索结果拼成上下文字符串"""
+    if not docs:
+        return "（未找到相关内容）"
+    lines = []
+    for doc in docs[: settings.rerank_top_k]:
+        title = doc.get("title", "?")
+        content = doc.get("content", "")[:300]
+        lines.append(f"[来源: {title} {content}]")
+    return "\n-----\n".join(lines)
+
+
 # 聊天管线
 @router.post("/chat", response_model=ChatResponse)
 async def chat(chat_req: ChatRequest, request: Request):
     agent = request.app.state.agent
     session = request.app.state.session
-    # 获取或创建会话
+    intent_router = request.app.state.intent_router
+
+    # 获取历史会话或创建新会话
     ctx = await session.get_or_create(chat_req.session_id)
+
     # 判断指代词对应的实体
     resolved_query = await session.resolve(chat_req.query, ctx.session_id)
+
     # 用户情感判断
     sentiment = detect_sentiment(resolved_query, history=ctx.messages)
     sentiment_ctx = build_escalation_prompt(sentiment)
-    # run agent
-    loop_result = await agent.run(
-        resolved_query, history=ctx.messages, system_prompt_extra=sentiment_ctx
-    )
+
+    # 意图路由
+    intent = await intent_router.route(resolved_query)
+
+    if intent.target == "rag":
+        docs = hybrid_search(resolved_query, table=intent.table)
+        context = _build_context(docs)
+        loop_result = await agent.run(
+            resolved_query,
+            context=context,
+            history=ctx.messages,
+            system_prompt_extra=sentiment_ctx,
+        )
+    else:
+        loop_result = await agent.run(resolved_query, history=ctx.messages, system_prompt_extra=sentiment_ctx)
+
     # 当前对话放入上下文ctx
     await session.add_turn(ctx.session_id, chat_req.query, loop_result)
     return ChatResponse(
@@ -43,3 +78,69 @@ async def chat(chat_req: ChatRequest, request: Request):
         total_steps=loop_result.total_steps,
         total_tokens=loop_result.total_tokens,
     )
+
+
+@router.post("/chat/stream")
+async def chat_stream(chat_req: ChatRequest, request: Request):
+    agent = request.app.state.agent
+    session = request.app.state.session
+    intent_router = request.app.state.intent_router
+
+    # 历史会话
+    session_ctx = await session.get_or_create(chat_req.session_id)
+    history = session_ctx.messages
+    session_id = session_ctx.session_id
+
+    # 指代消解
+    resolve_query = await session.resolve(chat_req.query, session_id)
+
+    # 用户情绪
+    sentiment = detect_sentiment(resolve_query, history=history)
+    extra_prompt = build_escalation_prompt(sentiment)
+
+    # 意图识别
+    intent = await intent_router.route(resolve_query)
+    context = ""
+    if intent.target == "rag":
+        docs = hybrid_search(resolve_query, table=intent.table)
+        context = _build_context(docs)
+
+    stream_res = {"answer": "", "total_steps": 0}
+    last_entities: dict[str, str] = {}
+    start_t = time.perf_counter()
+
+    async def generate():
+        yield f"data: {json.dumps({'event': 'start', 'session_id': session_id}, ensure_ascii=False)}\n\n"
+
+        nonlocal last_entities
+        async for event in agent.run_stream(
+            resolve_query,
+            context=context,
+            history=history,
+            system_prompt_extra=extra_prompt,
+        ):
+            if event["event"] == "tool_call":
+                args = event.get("args", {})
+                if "product_name" in args:
+                    last_entities["product"] = str(args["product_name"])
+                if "order_id" in args:
+                    last_entities["order"] = str(args["order_id"])
+
+            if event["event"] == "done":
+                stream_res["answer"] = event.get("answer", "")
+                stream_res["total_steps"] = event.get("total_steps", 0)
+
+            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+        await session.add_turn(
+            session_id,
+            resolve_query,
+            LoopResult(
+                answer=stream_res["answer"],
+                total_steps=stream_res["total_steps"],
+                total_latency_ms=(time.perf_counter() - start_t) * 1000,
+                last_entities=last_entities,
+            ),
+        )
+
+    return StreamingResponse(content=generate(), media_type="text/event-stream")

@@ -16,6 +16,7 @@ from api.chat import router
 from api.middleware import RequestIDMiddleware
 from config import settings
 from core.db_pool import close_pool, init_pool
+from core.intent_router import IntentRouter
 from core.llm_client import LLMClient
 from log_config import setup_logging
 
@@ -30,6 +31,7 @@ async def lifespan(app: FastAPI):
         base_url=settings.llm_base_url,
         model=settings.llm_model,
     )
+    intent_router = IntentRouter(llm)
     registry = ToolRegistry()
     registry.register(search_product.SearchProduct())
     registry.register(check_stock.CheckStock())
@@ -40,6 +42,7 @@ async def lifespan(app: FastAPI):
     session = SessionManager()
 
     app.state.llm_client = llm
+    app.state.intent_router = intent_router
     app.state.registry = registry
     app.state.agent = agent
     app.state.session = session

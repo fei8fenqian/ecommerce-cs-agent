@@ -183,7 +183,7 @@ class ToolRegistry:
         except Exception as e:
             return ToolResult(name=name, status="error", error=str(e))
 
-    # -- OpenAI 格式导出 ------------------------------------------------------
+    # -- OpenAI 格式导出 tool schema ------------------------------------------------------
     def to_openai_schemas(self) -> list[dict[str, Any]]:
         """
         生成 OpenAI function calling 的 tools 参数列表。

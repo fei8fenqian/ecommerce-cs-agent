@@ -237,6 +237,69 @@ class LLMClient:
             finish_reason=choice.finish_reason or "unknown",
         )
 
+    async def chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        temperature: float = 0.0,
+        max_tokens: int = 2048,
+    ):
+        logger.info(
+            "LLM SSE request start",
+            extra={
+                "model": self.model,
+                "messages_count": len(messages),
+                "has_tools": tools is not None,
+            },
+        )
+
+        response = await self._client.chat.completions.create(
+            messages=messages,
+            model=self.model,
+            tools=tools,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream=True,
+        )
+        tool_buf: dict[int, dict] = {}
+
+        async for chunk in response:
+            delta = chunk.choices[0].delta if chunk.choices else None
+            if delta is None:
+                continue
+
+            # 文本 token
+            if delta.content:
+                yield {"type": "content", "content": delta.content}
+
+            # 工具调用 → 累积
+            if delta.tool_calls:
+                for tool_call in delta.tool_calls:
+                    index = tool_call.index
+                    if index not in tool_buf:
+                        tool_buf[index] = {"id": "", "name": "", "arguments": ""}
+                    buf = tool_buf[index]
+                    if tool_call.id:
+                        buf["id"] = tool_call.id
+                    if tool_call.function:
+                        if tool_call.function.name:
+                            buf["name"] = tool_call.function.name
+                        if tool_call.function.arguments:
+                            buf["arguments"] += tool_call.function.arguments
+
+        # 流结束，解析累积的工具调用
+        if tool_buf:
+            tool_calls: list[ToolCall] = []
+            for idx in sorted(tool_buf):
+                buf = tool_buf[idx]
+                try:
+                    args = json.loads(buf["arguments"])
+                except json.JSONDecodeError:
+                    args = {}
+                tool_calls.append(ToolCall(buf["id"], buf["name"], args))
+            yield {"type": "tool_calls", "tool_calls": tool_calls}
+
 
 def _extract_status_code(exc: Exception) -> int | None:
     for attr in ("http_status", "status_code"):

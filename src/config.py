@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     temperature: float = Field(default=0.0, ge=0.0, le=2.0, description="llm输出温度")
     max_tokens: int = Field(default=1024, ge=0, le=16384, description="上下文最大tokens")
     max_same_tools: int = Field(default=5, ge=0, le=100, description="最大连续调用同一工具次数")
+    max_steps: int = Field(default=5, ge=1, le=100, description="llm最大调用轮数")
 
     class Config:
         # 从项目根目录的 .env 文件读取（环境变量优先级更高）
@@ -62,10 +63,7 @@ class Settings(BaseSettings):
             missing.append("LLM_API_KEY")
 
         if missing:
-            raise SystemExit(
-                f"缺少必要配置: {','.join(missing)}。"
-                f"当前 ENV={self.env}，请在环境变量或 .env 中设置。"
-            )
+            raise SystemExit(f"缺少必要配置: {','.join(missing)}。当前 ENV={self.env}，请在环境变量或 .env 中设置。")
 
 
 settings = Settings()
