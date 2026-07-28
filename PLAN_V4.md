@@ -2,21 +2,39 @@
 
 > **核心命题**：不是为用而用 LangGraph/MCP，而是用一个真正需要它们的业务场景来驱动架构演进。
 >
-> **场景**："5000 预算，帮我配台打 3A 的主机" — 这是约束满足 + 兼容性验证 + 并行搜索 + 回退重规划，ReAct while-loop 做不了。
+> **两大场景**：
+> 1. "5000 预算，帮我配台打 3A 的主机" — 约束满足 + 兼容性验证 + 并行搜索 + 回退重规划，ReAct while-loop 做不了
+> 2. "我要退款" — 支付/退款是独立系统，天然适合 MCP 协议分离
 
 ---
 
 ## 零、为什么 V3 不够
 
-| V3 架构 | 问题 | 配机场景体现 |
-|---------|------|------------|
+| V3 架构 | 问题 | 体现 |
+|---------|------|------|
 | while-loop ReAct | 无规划，边走边看 | 漏搜电源，配置不完整 |
 | 串行工具调用 | 独立搜索互相等待 | CPU 和显卡搜索无依赖但串行 |
 | 无验证+回退 | 答了就答了，不自检 | DDR5 内存配 B550 主板不报错 |
+| 所有工具同一进程 | 支付/退款不该跟 Agent 代码库耦合 | 支付是独立有状态服务 |
 | PG 每调 connect+close | 无连接池 | 配一次机 6-8 次 DB 连接 |
-| 5 个固定工具 | 无配件数据/兼容性工具 | 搜不到 CPU/主板/显卡 |
 
-**V4 不是重构 V3，是在 V3 基础上增加一条新链路。**
+**V4 不是重构 V3，是在 V3 基础上增加两条新链路：Plan-and-Execute 配机 + MCP 支付服务。**
+
+---
+
+## 已完成 (V3 + SSE)
+
+| 功能 | 状态 |
+|------|:----:|
+| AgentLoop (ReAct) + 5 个工具 | ✅ |
+| 意图路由 (rag/agent/ticket) | ✅ |
+| 配件数据 (9 品类 1427 条) + search_component | ✅ |
+| 检索 pipeline (Hybrid+RRF+Rerank, Hit@1 94.7%) | ✅ |
+| SSE 流式输出 + 多轮对话 + 指代消解 | ✅ |
+| Prompt injection 三层防护 | ✅ |
+| 连接池 (db_pool) | ✅ |
+| BM25 懒加载 | ✅ |
+| eval 框架 + 75 道测试题 | ✅ |
 
 ---
 
@@ -28,35 +46,39 @@
     ▼
 ┌──────────────┐
 │ IntentRouter │  ← 扩展: 新增 "plan_execute" 意图
-│ V3 版: rag/ │
-│ agent/ticket│
+│ rag/agent/   │
+│ ticket/      │
+│ plan_execute │
 └──┬───┬───┬──┘
    │   │   │
    ▼   ▼   ▼
- RAG  │  Plan-and-Execute  ← NEW
+ RAG  │  Plan-and-Execute  ← NEW: LangGraph 配机
       │       │
       │   ┌───┴────┐
-      │   │LangGraph│  StateGraph: planner → executor → verifier → (replan)
+      │   │LangGraph│  planner → executor → verifier → (replan)
       │   └───┬────┘
       │       │
       │   ┌───┴────────────────────┐
       │   │ Tool Calls             │
-      │   │ ├─ search_component    │  ← NEW: PG 本地工具
-      │   │ ├─ check_compatibility │  ← NEW: MCP 远程工具
-      │   │ ├─ search_product      │  V3 保留
-      │   │ ├─ check_stock         │  V3 保留
-      │   │ ├─ track_order         │  V3 保留
-      │   │ └─ create_ticket       │  V3 保留
+      │   │ ├─ search_component    │  NEW: PG 本地
+      │   │ ├─ check_compatibility │  NEW: 本地规则引擎
+      │   │ ├─ search_product      │  V3
+      │   │ ├─ check_stock         │  V3
+      │   │ ├─ track_order         │  V3
+      │   │ ├─ create_ticket       │  V3
+      │   │ ├─ check_payment    ◀──│── NEW: MCP 远程
+      │   │ └─ request_refund   ◀──│── NEW: MCP 远程
       │   └────────────────────────┘
       │
       ▼
-   AgentLoop (ReAct)  ← V3 保留不动，处理简单工具调用
+   AgentLoop (ReAct)  ← V3 保留不动，处理简单查询 / 支付退款
 ```
 
 **核心原则**：
 - V3 的 `AgentLoop` (ReAct) **不动**，简单查询走快路径
-- 新增 `PlanAndExecuteAgent`，复杂查询走 LangGraph
-- `IntentRouter` 加一个意图值，路由分叉
+- 新增 `PlanAndExecuteAgent`，配机走 LangGraph
+- 新增 MCP Payment Server，支付/退款独立进程
+- `IntentRouter` 加 `plan_execute` 意图，路由分叉
 
 ---
 
@@ -163,97 +185,122 @@ class SearchComponent(BaseTool):
 
 实现：PG `SELECT * FROM components WHERE category=%s AND ...` + 向量相似检索。
 
-### 3.3 `check_compatibility` (MCP 远程工具)
+### 3.3 `check_compatibility` (本地规则引擎)
 
-通过 `MCPTool(BaseTool)` 适配器包装：
+直接在 Agent 进程内跑，不需要 MCP——兼容性规则是对 PG 配件数据的校验，和 Agent 在同一代码库。
 
 ```python
-# 在 main.py lifespan 中注册
-compat_tool_def = await mcp_compat.list_tools()  # 从 MCP Server 获取工具定义
-registry.register(MCPTool(compat_tool_def, mcp_compat.session))
+class CheckCompatibility(BaseTool):
+    name = "check_compatibility"
+    description = "验证电脑配件兼容性"
+    parameters = {
+        "type": "object",
+        "properties": {
+            "components": {"type": "array", "items": {"type": "object"}}
+        },
+        "required": ["components"],
+    }
+    
+    def execute(self, components: list[dict]) -> ToolResult:
+        conflicts = []
+        for rule in COMPAT_RULES:
+            if not rule.check(components):
+                conflicts.append(rule.fail_msg)
+        return ToolResult(name=self.name, status="success",
+                          data={"ok": len(conflicts)==0, "conflicts": conflicts})
 ```
 
-Agent 侧看到的和其他工具一样：`registry.execute("check_compatibility", components=[...])`
+### 3.4 `check_payment` + `request_refund` (MCP 远程工具)
+
+见第四节 MCP 集成。
 
 ---
 
-## 四、MCP 集成
+## 四、MCP 集成 — 支付服务
 
-### 4.1 `MCPTool(BaseTool)` 适配器 (`src/agent/mcp_tool.py`)
+### 4.1 为什么支付适合 MCP
 
-关键设计：`BaseTool.execute()` 是 sync，MCP 调用需要 event loop。用 `ThreadPoolExecutor` + `asyncio.run()` 解决阻抗失配：
+支付/退款在真实公司是**独立有状态服务**——微信支付回调、退款对账、资金安全，通常由财务/支付团队维护，语言可能是 Java/Go。Agent 不应该直接操作支付数据库。
+
+| 特征 | 说明 |
+|------|------|
+| 独立团队 | 支付和客服 Agent 不在一个代码库 |
+| 跨语言 | 支付系统大概率 Java/Go，Agent 是 Python |
+| 安全隔离 | 退款操作不能直接暴露给 Agent，MCP Server 做权限校验 |
+| 标准化 | 如果微信支付官方出 MCP Server，Agent 直接接 |
+
+### 4.2 MCP Payment Server (`services/mcp_payment_server.py`)
+
+独立进程，FastMCP + stdio transport。暴露两个工具：
+
+| 工具 | 类型 | 说明 |
+|------|------|------|
+| `check_payment(order_id)` | 读 | 查 orders 表：支付方式、金额、时间、状态 |
+| `request_refund(order_id, reason)` | 写 | 校验退款资格 → update status='已取消' → 返回退款单号 |
+
+**退款资格规则**：只有 `运输中` / `已签收` 的订单可退款；`待付款` / `已完成` / 已退款 不可退。
+
+实现要点：
+- 自己 `init_pool()` 建 PG 连接（独立进程，不共享 main.py 的池）
+- `@mcp.tool()` 装饰器定义工具，`mcp.run(transport="stdio")` 启动
+- 未来替换真实 API：把 PG 查询换成 `requests.get("https://api.mch.weixin.qq.com/...")`
+
+### 4.3 `MCPTool(BaseTool)` 适配器 (`src/agent/mcp_tool.py`)
+
+核心问题：`BaseTool.execute()` 是 sync，MCP 调用是 async → `asyncio.run()` 桥接。
 
 ```python
 class MCPTool(BaseTool):
-    """包装 MCP 远程工具为本地 BaseTool"""
-    
-    def __init__(self, tool_def: dict, session):
-        self._name = tool_def["name"]
-        self._description = tool_def["description"]
-        self._input_schema = tool_def["inputSchema"]
-        self._session = session  # 预连接的 MCP ClientSession
-    
-    @property
-    def name(self): return self._name
-    @property
-    def description(self): return self._description
-    @property
-    def parameters(self): return self._input_schema
-    
+    def __init__(self, tool_def, session):
+        self._name = tool_def.name          # MCP 工具名
+        self._description = tool_def.description
+        self._parameters = tool_def.inputSchema  # JSON Schema
+        self._session = session
+
     def execute(self, **kwargs) -> ToolResult:
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(
-                asyncio.run,
+        try:
+            result = asyncio.run(
                 self._session.call_tool(self._name, arguments=kwargs)
             )
-            try:
-                result = future.result(timeout=30.0)
-                return ToolResult(name=self.name, status="success",
-                                  data={"result": str(result.content)})
-            except Exception as e:
-                return ToolResult(name=self.name, status="error", error=str(e))
+            return ToolResult(name=self.name, status="success",
+                              data={"result": result.content[0].text})
+        except Exception as e:
+            return ToolResult(name=self.name, status="error", error=str(e))
 ```
 
-`MCPClientManager` 负责连接生命周期：stdio transport，在 lifespan 里 `connect` / `disconnect`。
+`MCPClientManager` 管理连接生命周期：
+```python
+class MCPClientManager:
+    def __init__(self, server_params: StdioServerParameters):
+        self._params = server_params
+    
+    async def connect(self) -> ClientSession:
+        # stdio_client(server_params) → read_stream, write_stream
+        # ClientSession(read_stream, write_stream) → session.initialize()
+    
+    async def disconnect(self):
+        # 关闭 transport
+```
 
-### 4.2 MCP Compat Server (`examples/mcp_compat_server.py`)
-
-独立进程，纯规则引擎，无 DB 依赖。暴露一个工具 `check_compatibility`。
-
-**兼容性规则：**
+### 4.4 main.py lifespan 集成
 
 ```python
-COMPAT_RULES = [
-    # 1. CPU 插槽 == 主板插槽
-    {"check": "socket_match", "fields": ["socket"], "categories": ["cpu", "motherboard"],
-     "match_type": "equal", "fail_msg": "CPU插槽({cpu_socket})与主板插槽({mb_socket})不匹配"},
-    # 2. 主板内存类型 == 内存条类型
-    {"check": "ddr_match", "fields": ["mem_type", "ddr_type"],
-     "categories": ["motherboard", "ram"], "match_type": "equal",
-     "fail_msg": "主板支持{mb_mem}，但选了{ram_type}"},
-    # 3. CPU TDP + GPU 功耗 + 余量 <= 电源额定功率
-    {"check": "power_budget", "fields": ["tdp", "power_draw", "wattage"],
-     "categories": ["cpu", "gpu", "psu"], "match_type": "numeric",
-     "formula": "cpu.tdp + gpu.power_draw + 150 <= psu.wattage",
-     "fail_msg": "总功耗({total}W)超出电源额定({psu_wattage}W)"},
-    # 4. 显卡长度 <= 机箱限长
-    {"check": "gpu_length", "fields": ["length_mm", "gpu_max_length"],
-     "categories": ["gpu", "case"], "match_type": "numeric",
-     "fail_msg": "显卡长度({gpu_len}mm)超出机箱限长({case_max}mm)"},
-    # 5. 主板板型 ∈ 机箱支持板型
-    {"check": "form_factor", "fields": ["form_factor", "mb_form_factors"],
-     "categories": ["motherboard", "case"], "match_type": "list_contain",
-     "fail_msg": "主板板型({mb_ff})不在机箱支持列表({case_ffs})中"},
-    # 6. 散热器高度 <= 机箱散热器限高
-    {"check": "cooler_height", "fields": ["height_mm", "cooler_max_height"],
-     "categories": ["cooler", "case"], "match_type": "numeric",
-     "fail_msg": "散热器高度({cooler_h}mm)超出机箱限高({case_max_h}mm)"},
-    # 7. CPU 插槽 ∈ 散热器支持插槽
-    {"check": "cooler_socket", "fields": ["socket", "socket_support"],
-     "categories": ["cpu", "cooler"], "match_type": "list_contain",
-     "fail_msg": "CPU插槽({cpu_socket})不在散热器支持列表({cooler_sockets})中"},
-]
+# startup
+mcp_payment = MCPClientManager(StdioServerParameters(
+    command="python", args=["services/mcp_payment_server.py"]
+))
+payment_session = await mcp_payment.connect()
+
+# 自动发现工具 → 注册进 Registry
+tools_result = await payment_session.list_tools()
+for tool_def in tools_result.tools:
+    registry.register(MCPTool(tool_def, payment_session))
+
+# shutdown
+await mcp_payment.disconnect()
 ```
+
+Agent Loop 完全无感——`check_payment` / `request_refund` 跟 `check_stock` 调用方式一模一样。
 
 ---
 
@@ -463,95 +510,50 @@ def put_connection(conn):
 | 文件 | 操作 | 说明 |
 |------|------|------|
 | **数据层** | | |
-| `scripts/crawl_components.py` | 新建 | Playwright 爬 ZOL 配件频道 |
-| `scripts/clean_components.py` | 新建 | 8 品类字段标准化 |
-| `scripts/ingest_components.py` | 新建 | pgvector 入库 |
-| `scripts/generate_component_inventory.py` | 新建 | 随机库存生成 |
+| `scripts/crawl_components.py` | ✅ 已完成 | Playwright 爬 ZOL 配件频道 |
+| `scripts/clean_components.py` | ✅ 已完成 | 8 品类字段标准化 |
+| `scripts/ingest_components.py` | ✅ 已完成 | pgvector 入库 |
 | `data/knowledge/pc_build_guide.md` | 新建 | 装机选购知识文档 |
+| **MCP 服务** | | |
+| `services/mcp_payment_server.py` | 新建 | FastMCP 支付/退款服务 |
 | **工具层** | | |
-| `src/agent/tools/search_component.py` | 新建 | `SearchComponent(BaseTool)` |
+| `src/agent/tools/search_component.py` | ✅ 已完成 | `SearchComponent(BaseTool)` |
+| `src/agent/tools/check_compatibility.py` | 新建 | `CheckCompatibility(BaseTool)` — 本地规则引擎 |
 | `src/agent/mcp_tool.py` | 新建 | `MCPTool(BaseTool)` + `MCPClientManager` |
-| `src/agent/tools/check_stock.py` | 修改 | 使用连接池 |
-| `src/agent/tools/track_order.py` | 修改 | 使用连接池 |
-| `src/agent/tools/create_ticket.py` | 修改 | 使用连接池 |
 | **Agent 层** | | |
 | `src/agent/plan_execute.py` | 新建 | `PlanAndExecuteAgent` (LangGraph) |
 | `src/agent/loop.py` | **不动** | V3 AgentLoop 保留 |
 | `src/agent/session.py` | **不动** | |
 | `src/agent/sentiment.py` | **不动** | |
 | **核心层** | | |
-| `src/core/db_pool.py` | 新建 | PG 线程连接池 |
+| `src/core/db_pool.py` | ✅ 已完成 | PG 线程连接池 |
+| `src/core/retrieve.py` | ✅ 已完成 | 懒加载 + 连接池 + component 分支 |
 | `src/core/intent_router.py` | 修改 | 新增 `plan_execute` 意图 |
 | **API 层** | | |
-| `src/main.py` | 修改 | lifespan 加 MCP + PlanAndExecuteAgent |
+| `src/main.py` | 修改 | lifespan 加 MCP Payment Server + PlanAndExecuteAgent |
 | `src/api/chat.py` | 修改 | 路由 `plan_execute` → PlanAndExecuteAgent |
-| `src/config.py` | 修改 | 加 mcp_enabled, mcp_server_cmd, db_pool 配置 |
-| **MCP** | | |
-| `examples/mcp_compat_server.py` | 新建 | MCP 兼容性规则引擎 |
 | **依赖** | | |
-| `pyproject.toml` | 修改 | 加 `langgraph>=1.0`, `mcp>=1.0` |
+| `pyproject.toml` | ✅ 已完成 | `langgraph>=1.0`, `mcp>=1.0` |
 | **测试** | | |
 | `tests/test_plan_execute.py` | 新建 | PlanAndExecuteAgent 单元测试 |
 | `tests/test_mcp_tool.py` | 新建 | MCPTool 单元测试 |
-| `tests/test_session.py` | **不动** | 45 个测试全保留 |
-| `tests/test_loop.py` | **不动** | V3 测试全保留 |
 
 ---
 
-## 八、实施顺序（2026-07-25 修订）
+## 八、实施顺序（2026-07-28 修订）
 
 ```
 Step 1: 爬虫 + 数据入库             ✅ 已完成 (9 品类 1427 条)
-Step 1.5: retrieve.py 重构          ← 当前 (BM25懒加载+连接池+component分支)
-Step 2: search_component 工具        (薄封装，调 hybrid_search)
-Step 3: 上游脚本适配                 (eval/smoke 加 init_pool)
-Step 4: MCP 适配器 + Compat Server  (MCP 基础设施)
-Step 5: LangGraph PlanAndExecute    (核心编排)
-Step 6: IntentRouter 扩展           (路由接入)
-Step 7: chat.py / main.py 集成      (端到端联通)
-Step 8: 测试 + 端到端验证           (配机流程全链路)
-```
-
-> **Step 1.5 说明**: Step 2 (search_component) 依赖 retrieve.py 支持 component_products 表和连接池。原 Step 3 (PG 连接池) 在 commit e50dfc0 中已部分完成（工具层），但 retrieve.py 漏了——它仍用 `_connect()` 每次新建连接、BM25 索引在 import 时建（早于 `init_pool()`）。详见下方"检索层待修复问题"。
-
-### 检索层待修复问题（Step 1.5 详细清单）
-
-#### P0 — 阻塞 search_component
-
-| # | 问题 | 位置 | 修复 |
-|---|------|------|------|
-| 1 | BM25 索引模块级初始化，import 时执行，早于 `init_pool()` | `retrieve.py:31-36` | 懒加载：类变量初始 `None`，首次 search 时建 |
-| 2 | `_connect()` 每次新建连接，不走连接池 | `retrieve.py:18-25` | 改用 `get_connection()` / `put_connection()` |
-| 3 | `vector_search` 没有 `component_products` 分支 | `retrieve.py:62-67` | 加 `elif table == "component_products"`，列名：`id, name, category, price, url, normalized, params, description` |
-| 4 | `hybrid_search` 没有 `component_products` 分支 | `retrieve.py:133-138` | 加 `_bm25_components` + `elif` 分支 |
-| 5 | `hybrid_search` 结果不带 `normalized` 字段 | `retrieve.py:148-157` | component 分支返回时多带 `normalized`（供后续兼容性检查） |
-
-#### P1 — 顺手修（同一批改动）
-
-| # | 问题 | 位置 | 修复 |
-|---|------|------|------|
-| 6 | `where` 是 f-string 拼进 SQL，不参数化 | `retrieve.py:69-72` | 用 `%s` 占位符 + 参数列表，或至少保持内部可控 |
-| 7 | BM25 不认 WHERE——`hybrid_search` 把 `where` 传给 vector 但 BM25 始终搜全表，RRF 融合后靠 `doc_map` 丢弃不匹配结果 | `retrieve.py:133-134` | 记 TODO：短期 doc_map 兜底够用，长期给 BM25 也加过滤 |
-| 8 | `scripts/eval.py` 直接 import retrieve，改池后需要 `init_pool()` | `scripts/eval.py:80-84` | 文件顶部加 `from core.db_pool import init_pool; init_pool()` |
-| 9 | `scripts/smoke/rag.py` 同上 | `scripts/smoke/rag.py:23` | 同上 |
-| 10 | `scripts/smoke/agent.py` 同上 | `scripts/smoke/agent.py:26` | 同上 |
-
-#### P2 — 后续优化（不阻塞，记 TODO）
-
-| # | 问题 | 说明 |
-|---|------|------|
-| 11 | `search_product` 不暴露 price/product_type 过滤 | `where` 始终 `None`，用户问"5000 以内游戏本"靠 LLM 自己从结果筛选，不如 SQL 层过滤精确 |
-| 12 | `compare_products` 同上 | `where` 始终 `None` |
-
-### 改动波及面
-
-```
-retrieve.py          ← 核心改动（懒加载 + 池 + component 分支）
-search_component.py  ← 新建（薄工具，调 hybrid_search）
-scripts/eval.py      ← 加 init_pool()
-scripts/smoke/rag.py ← 加 init_pool()
-scripts/smoke/agent.py ← 加 init_pool()
-main.py              ← 注册 SearchComponent
+Step 1.5: retrieve.py 重构          ✅ 已完成 (BM25懒加载+连接池+component分支)
+Step 2: search_component 工具       ✅ 已完成 (含价格过滤)
+Step 3: 上游脚本适配                ✅ 已完成 (eval/smoke init_pool)
+Step 3.5: SSE 流式 + 多轮对话       ✅ 已完成 (LLMClient→AgentLoop→API)
+─── V4 新增 ─────────────────────────────────────────────
+Step 4: MCP Payment Server + MCPTool 适配器  ← 当前
+Step 5: check_compatibility 本地规则引擎
+Step 6: LangGraph PlanAndExecuteAgent
+Step 7: IntentRouter 扩展 + chat.py/main.py 集成
+Step 8: 测试 + 端到端验证
 ```
 
 ---
@@ -570,8 +572,8 @@ make lint
 # 3. 现有测试必须全过
 make test  # 含 test_session.py 45 tests + test_loop.py
 
-# 4. MCP Server 独立启动
-python examples/mcp_compat_server.py
+# 4. MCP Payment Server 独立启动
+python services/mcp_payment_server.py
 
 # 5. 端到端配机测试
 curl -X POST http://localhost:8000/api/v1/chat \
@@ -592,10 +594,10 @@ curl -X POST http://localhost:8000/api/v1/chat \
 > "简单查询用自研 ReAct，配机这种多步约束满足场景上了 LangGraph StateGraph。核心是 planner → executor(并行) → verifier → replanner 四个节点加条件回退。不用 `create_react_agent` 是因为配机需要定制化的 plan-then-execute 模式，不是标准 ReAct。"
 
 **MCP**：
-> "兼容性规则引擎做成独立 MCP Server，Agent 通过 MCPTool 适配器调用。这样规则可以独立更新——新 CPU 发布不用动 Agent 代码。MCPTool 继承 BaseTool，注册进同一个 Registry，Agent Loop 完全无感。"
+> "支付和退款做成独立 MCP Server。因为真实生产里支付系统是独立团队维护的（Java/Go），Agent 不应该直接操作支付数据库。我写了 MCPTool 适配器继承 BaseTool，Agent 侧通过 MCP 协议自动发现工具、调用工具，跟本地工具一模一样。以后换成真实微信支付 API，Agent 一行代码不用改——这就是 MCP 的价值：统一工具发现和调用协议。"
 
 **为什么手写 + LangGraph 共存**：
-> "不为用而用。简单查库存用手写 ReAct（轻量、可控），复杂配机用 LangGraph（需要 plan-execute-verify-replan 循环和并行执行）。面试官会问'你为什么不用 LangGraph 全部替代'——因为不同场景需要不同的编排模式。"
+> "不为用而用。简单查库存用手写 ReAct（轻量、可控），复杂配机用 LangGraph（需要 plan-execute-verify-replan 循环和并行执行）。支付退款走 MCP 因为它是独立有状态服务。三种编排模式各司其职——面试官会问'你为什么不用 LangGraph 全部替代'——因为不同场景需要不同的编排模式。"
 
 ---
 
@@ -671,6 +673,6 @@ async def run_stream(self, query: str):
     yield {"event": "done", "total_steps": step, "total_tokens": ...}
 ```
 
-### 11.5 实施顺序
+### 11.5 实施状态
 
-放在 Plan-and-Execute 之后做——先把配机链路跑通，再流式化。因为 SSE 改的是 Agent Loop 的输出层，不影响核心逻辑，属于体验优化。
+✅ 已完成。放在 Plan-and-Execute 之前做了，因为非流式配机 20-60s 的等待体验不可接受。

@@ -8,6 +8,7 @@ from agent.tools import (
     check_stock,
     compare_products,
     create_ticket,
+    search_component,
     search_product,
     track_order,
 )
@@ -38,6 +39,7 @@ async def lifespan(app: FastAPI):
     registry.register(track_order.TrackOrder())
     registry.register(create_ticket.CreateTicket())
     registry.register(compare_products.CompareProducts())
+    registry.register(search_component.SearchComponent())
     agent = AgentLoop(llm, registry, max_steps=10)
     session = SessionManager()
 
