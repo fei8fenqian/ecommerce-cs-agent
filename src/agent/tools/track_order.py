@@ -39,6 +39,7 @@ class TrackOrder(BaseTool):
     _SQL = (
         "SELECT o.order_id, o.status, o.tracking_company, o.tracking_number, "
         "o.total_amount, o.paid_amount, o.payment_method, o.order_date, "
+        "o.delivered_at, "
         "oi.product_name, oi.brand, oi.price, oi.quantity "
         "FROM orders o "
         "LEFT JOIN order_items oi ON o.order_id = oi.order_id "
@@ -77,15 +78,16 @@ class TrackOrder(BaseTool):
                         "paid_amount": float(row[5]) if row[5] else 0.0,
                         "payment_method": row[6],
                         "order_date": str(row[7]),
+                        "delivered_at": str(row[8]) if row[8] else None,
                         "items": [],
                     }
-                if row[8] is not None:  # LEFT JOIN 有商品
+                if row[9] is not None:  # product_name (LEFT JOIN)
                     orders[oid]["items"].append(
                         {
-                            "product_name": row[8],
-                            "brand": row[9],
-                            "price": float(row[10]) if row[10] else 0.0,
-                            "quantity": row[11],
+                            "product_name": row[9],
+                            "brand": row[10],
+                            "price": float(row[11]) if row[11] else 0.0,
+                            "quantity": row[12],
                         }
                     )
 

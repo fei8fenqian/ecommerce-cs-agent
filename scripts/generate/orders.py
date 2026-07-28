@@ -59,6 +59,7 @@ def _ensure_orders_tables(conn):
             customer_id VARCHAR(10),
             customer_name VARCHAR(20),
             order_date DATE,
+            delivered_at DATE,
             status VARCHAR(10),
             total_amount NUMERIC(12, 2),
             paid_amount NUMERIC(12, 2),
@@ -71,6 +72,10 @@ def _ensure_orders_tables(conn):
             phone VARCHAR(11),
             created_at TIMESTAMP DEFAULT NOW()
         )
+    """)
+    # 兼容已有库：加 delivered_at 列（幂等）
+    cur.execute("""
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivered_at DATE
     """)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS order_items (
@@ -380,9 +385,7 @@ def _build_address_pool(n: int = 80) -> list[str]:
         building = random.randint(1, 30)
         unit = random.randint(1, 4)
         room = random.randint(101, 2804)
-        addr = (
-            f"{city}市{district}{landmark}{community}{road_num}号{building}号楼{unit}单元{room}室"
-        )
+        addr = f"{city}市{district}{landmark}{community}{road_num}号{building}号楼{unit}单元{room}室"
         addresses.append(addr)
     return addresses
 
@@ -444,9 +447,7 @@ def _load_products() -> list[dict[str, Any]]:
     return products
 
 
-def _weighted_product_pool(
-    products: list[dict], brand_weights: dict[str, int], category: str
-) -> list[dict]:
+def _weighted_product_pool(products: list[dict], brand_weights: dict[str, int], category: str) -> list[dict]:
     """按品牌权重展开产品池"""
     pool = [p for p in products if p["category"] == category]
     weighted: list[dict] = []
@@ -564,9 +565,7 @@ def generate(n: int = 5000, seed: int = 42) -> list[dict]:
 
         paid_amount = round(total_amount - discount, 2) if is_paid else 0.0
         payment_method = (
-            random.choices(
-                [pm for pm, _ in PAYMENT_METHODS], weights=[w for _, w in PAYMENT_METHODS], k=1
-            )[0]
+            random.choices([pm for pm, _ in PAYMENT_METHODS], weights=[w for _, w in PAYMENT_METHODS], k=1)[0]
             if is_paid
             else None
         )
@@ -600,6 +599,13 @@ def generate(n: int = 5000, seed: int = 42) -> list[dict]:
                 tracking_number = f"{prefix}{random.randint(100000000000, 999999999999)}"
             used_tracking_nums.add(tracking_number)
 
+        # -- 签收日期（已签收/已完成状态的才有）----------------------------------
+        delivered_at: str | None = None
+        if status in ("已签收", "已完成"):
+            order_date_dt = datetime.strptime(order_date, "%Y-%m-%d")
+            delivered_dt = order_date_dt + timedelta(days=random.randint(1, 5))
+            delivered_at = delivered_dt.strftime("%Y-%m-%d")
+
         order = {
             "order_id": f"ORD{2026070100001 + i:013d}",
             "items": items,
@@ -611,6 +617,7 @@ def generate(n: int = 5000, seed: int = 42) -> list[dict]:
             "customer_name": customer["name"],
             "customer_id": customer["customer_id"],
             "order_date": order_date,
+            "delivered_at": delivered_at,
             "status": status,
             "tracking_company": tracking_company,
             "tracking_number": tracking_number,
@@ -643,22 +650,17 @@ def generate(n: int = 5000, seed: int = 42) -> list[dict]:
             it["quantity"] = 1
 
     # 4. 待付款但已经过了 48 小时（可能自动取消）
-    for idx in random.sample(
-        [i for i, o in enumerate(orders) if o["status"] == "待付款"], min(3, len(orders))
-    ):
+    for idx in random.sample([i for i, o in enumerate(orders) if o["status"] == "待付款"], min(3, len(orders))):
         # 把订单日期改到 3 天前
         old_date = datetime.strptime(orders[idx]["order_date"], "%Y-%m-%d")
         orders[idx]["order_date"] = (old_date - timedelta(days=3)).strftime("%Y-%m-%d")
 
     # 5. 已取消但有支付记录（退款中）
-    for idx in random.sample(
-        [i for i, o in enumerate(orders) if o["status"] == "已取消"], min(2, len(orders))
-    ):
+    for idx in random.sample([i for i, o in enumerate(orders) if o["status"] == "已取消"], min(2, len(orders))):
         orders[idx]["paid_amount"] = orders[idx]["total_amount"]
         orders[idx]["payment_method"] = "微信支付"
         orders[idx]["payment_time"] = (
-            datetime.strptime(orders[idx]["order_date"], "%Y-%m-%d")
-            + timedelta(minutes=random.randint(5, 30))
+            datetime.strptime(orders[idx]["order_date"], "%Y-%m-%d") + timedelta(minutes=random.randint(5, 30))
         ).strftime("%Y-%m-%d %H:%M:%S")
 
     # =========================================================================
@@ -679,15 +681,16 @@ def generate(n: int = 5000, seed: int = 42) -> list[dict]:
         ptime = o["payment_time"] if o["payment_time"] else None
         cur.execute(
             """INSERT INTO orders
-               (order_id, customer_id, customer_name, order_date, status,
+               (order_id, customer_id, customer_name, order_date, delivered_at, status,
                 total_amount, paid_amount, discount, payment_method, payment_time,
                 tracking_company, tracking_number, shipping_address, phone)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
             (
                 o["order_id"],
                 o["customer_id"],
                 o["customer_name"],
                 o["order_date"],
+                o["delivered_at"],
                 o["status"],
                 o["total_amount"],
                 o["paid_amount"],
