@@ -61,7 +61,7 @@ class SearchComponent(BaseTool):
             "required": ["query", "component"],
         }
 
-    def execute(
+    async def execute(
         self,
         query: str,
         component: str,

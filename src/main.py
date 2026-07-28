@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from agent.loop import AgentLoop
+from agent.mcp_tool import MCPClientManager, MCPTool
 from agent.session import SessionManager
 from agent.tools import (
     check_stock,
@@ -40,19 +41,30 @@ async def lifespan(app: FastAPI):
     registry.register(create_ticket.CreateTicket())
     registry.register(compare_products.CompareProducts())
     registry.register(search_component.SearchComponent())
-    agent = AgentLoop(llm, registry, max_steps=10)
+    agent = AgentLoop(llm, registry, max_steps=settings.max_steps)
     session = SessionManager()
+
+    mcp_managers: list[MCPClientManager] = []
+    for url in settings.mcp_servers:
+        manager = MCPClientManager(url)
+        await manager.connect()
+        for tool_info in await manager.list_tools():
+            registry.register(MCPTool(manager, tool_info))
+        mcp_managers.append(manager)
 
     app.state.llm_client = llm
     app.state.intent_router = intent_router
     app.state.registry = registry
     app.state.agent = agent
     app.state.session = session
+    app.state.mcp_managers = mcp_managers
 
     yield
 
     # shutdown
     close_pool()
+    for manager in mcp_managers:
+        await manager.disconnect()
 
 
 app = FastAPI(title="极客数码 AI 客服", version="0.1.0", lifespan=lifespan)

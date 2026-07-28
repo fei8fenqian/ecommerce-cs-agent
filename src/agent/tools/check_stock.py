@@ -36,7 +36,7 @@ class CheckStock(BaseTool):
             "required": ["product_name"],
         }
 
-    def execute(self, product_name: str, table: str = "laptop_products") -> ToolResult:
+    async def execute(self, product_name: str, table: str = "laptop_products") -> ToolResult:
         # 表名白名单，防注入
         if table not in ("laptop_products", "phone_products"):
             return ToolResult(name=self.name, status="error", error=f"不支持的表: {table}")

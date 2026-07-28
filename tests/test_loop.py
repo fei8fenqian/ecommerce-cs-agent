@@ -52,7 +52,7 @@ class _EchoTool(BaseTool):
             "required": ["text"],
         }
 
-    def execute(self, **kwargs):
+    async def execute(self, **kwargs):
         return ToolResult(name=self.name, status="success", data={"echo": kwargs.get("text", "")})
 
 
@@ -71,7 +71,7 @@ class _FailingTool(BaseTool):
     def parameters(self) -> dict:
         return {"type": "object", "properties": {}, "required": []}
 
-    def execute(self, **kwargs):
+    async def execute(self, **kwargs):
         return ToolResult(name=self.name, status="success", data={"result": "done"})
 
 
@@ -102,9 +102,7 @@ class TestLoopResult:
 
     def test_full(self):
         steps = [StepResult(step=1, thought="thinking")]
-        r = LoopResult(
-            answer="答案", steps=steps, total_steps=1, total_tokens=100, total_latency_ms=500.0
-        )
+        r = LoopResult(answer="答案", steps=steps, total_steps=1, total_tokens=100, total_latency_ms=500.0)
         assert r.answer == "答案"
         assert r.total_steps == 1
         assert r.total_tokens == 100
@@ -120,9 +118,7 @@ class TestStepResult:
 
     def test_with_tool_call(self):
         tc = _tool_call("echo", text="hello")
-        s = StepResult(
-            step=2, thought="先查一下", tool_calls=[tc], observation="结果", latency_ms=100.0
-        )
+        s = StepResult(step=2, thought="先查一下", tool_calls=[tc], observation="结果", latency_ms=100.0)
         assert s.tool_calls is not None
         assert s.tool_calls[0].name == "echo"
         assert s.observation == "结果"
@@ -195,9 +191,7 @@ class TestAgentLoopRun:
 
             async def chat(self, messages, *, tools=None, temperature=0.0, max_tokens=2048):
                 captured_messages.extend(messages)
-                return LLMResponse(
-                    content="收到", model="mock", usage=TokenUsage(), finish_reason="stop"
-                )
+                return LLMResponse(content="收到", model="mock", usage=TokenUsage(), finish_reason="stop")
 
         loop = AgentLoop(llm=_CaptureLLM(), registry=ToolRegistry())
         await loop.run("推荐笔记本", context="参考: ThinkPad X1")
@@ -330,9 +324,7 @@ class TestAgentLoopDeadloop:
                     usage=TokenUsage(),
                     finish_reason="tool_calls",
                 ),
-                LLMResponse(
-                    content="交替完成", model="mock", usage=TokenUsage(), finish_reason="stop"
-                ),
+                LLMResponse(content="交替完成", model="mock", usage=TokenUsage(), finish_reason="stop"),
             ]
         )
         registry = _make_registry(_EchoTool(), _FailingTool())

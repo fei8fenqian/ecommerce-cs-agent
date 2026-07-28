@@ -41,7 +41,7 @@ class SearchProduct(BaseTool):
             "required": ["query"],
         }
 
-    def execute(
+    async def execute(
         self,
         query: str,
         table: str = "laptop_products",

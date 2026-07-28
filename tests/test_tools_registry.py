@@ -27,7 +27,7 @@ class _FakeSuccess(BaseTool):
             "required": ["input"],
         }
 
-    def execute(self, **kwargs):
+    async def execute(self, **kwargs):
         return ToolResult(name=self.name, status="success", data={"echo": kwargs})
 
 
@@ -46,7 +46,7 @@ class _FakeFail(BaseTool):
     def parameters(self) -> dict:
         return {"type": "object", "properties": {}, "required": []}
 
-    def execute(self, **kwargs):
+    async def execute(self, **kwargs):
         raise RuntimeError("boom")
 
 
@@ -65,7 +65,7 @@ class _FakeNoResult(BaseTool):
     def parameters(self) -> dict:
         return {"type": "object", "properties": {}, "required": []}
 
-    def execute(self, **kwargs):
+    async def execute(self, **kwargs):
         return "raw string"
 
 
@@ -144,28 +144,32 @@ class TestToolRegistry:
         assert registry.get("nobody") is None
 
     # -- execute --------------------------------------------------------------
-    def test_execute_success(self, registry):
-        result = registry.execute("fake_success", input="hello")
+    @pytest.mark.asyncio
+    async def test_execute_success(self, registry):
+        result = await registry.execute("fake_success", input="hello")
         assert result.is_success is True
         assert result.data["echo"]["input"] == "hello"
 
-    def test_execute_missing_tool(self):
+    @pytest.mark.asyncio
+    async def test_execute_missing_tool(self):
         registry = ToolRegistry()
-        result = registry.execute("nobody")
+        result = await registry.execute("nobody")
         assert result.is_success is False
         assert "未知工具" in result.error
 
-    def test_execute_tool_raises(self):
+    @pytest.mark.asyncio
+    async def test_execute_tool_raises(self):
         registry = ToolRegistry()
         registry.register(_FakeFail())
-        result = registry.execute("fake_fail")
+        result = await registry.execute("fake_fail")
         assert result.is_success is False
         assert "boom" in result.error
 
-    def test_execute_non_toolresult_wrapped(self):
+    @pytest.mark.asyncio
+    async def test_execute_non_toolresult_wrapped(self):
         registry = ToolRegistry()
         registry.register(_FakeNoResult())
-        result = registry.execute("fake_no_result")
+        result = await registry.execute("fake_no_result")
         assert result.is_success is True
         assert result.data["result"] == "raw string"
 

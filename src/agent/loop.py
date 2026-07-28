@@ -145,7 +145,7 @@ class AgentLoop:
                         )
 
                 # 执行工具
-                tool_result = self.registry.execute(tool_call.name, **tool_call.arguments)
+                tool_result = await self.registry.execute(tool_call.name, **tool_call.arguments)
                 observation = tool_result.to_observation()
                 observations.append(observation)
 
@@ -287,7 +287,7 @@ class AgentLoop:
                         "args": tool_call.arguments,
                     }
 
-                    tool_result = self.registry.execute(tool_call.name, **tool_call.arguments)
+                    tool_result = await self.registry.execute(tool_call.name, **tool_call.arguments)
                     observation = tool_result.to_observation()
 
                     messages.append(

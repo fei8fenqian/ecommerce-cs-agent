@@ -109,7 +109,7 @@ class BaseTool(ABC):
         ...
 
     @abstractmethod
-    def execute(self, **kwargs: Any) -> ToolResult:
+    async def execute(self, **kwargs: Any) -> ToolResult:
         """真正执行工具的代码。参数从 kwargs 里取，必须返回 ToolResult"""
         ...
 
@@ -161,7 +161,7 @@ class ToolRegistry:
         return list(self._tools.values())
 
     # -- 执行 ----------------------------------------------------------------
-    def execute(self, name: str, **kwargs: Any) -> ToolResult:
+    async def execute(self, name: str, **kwargs: Any) -> ToolResult:
         """
         Agent Loop 唯一需要调的执行入口。
 
@@ -176,7 +176,7 @@ class ToolRegistry:
                 error=f"未知工具: {name}。可用: {list(self._tools.keys())}",
             )
         try:
-            result = tool.execute(**kwargs)
+            result = await tool.execute(**kwargs)
             if isinstance(result, ToolResult):
                 return result
             return ToolResult(name=name, status="success", data={"result": result})

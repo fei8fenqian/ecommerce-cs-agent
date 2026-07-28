@@ -55,7 +55,7 @@ class CreateTicket(BaseTool):
             "required": ["issue"],
         }
 
-    def execute(
+    async def execute(
         self,
         issue: str,
         customer_name: str = "",
@@ -86,8 +86,7 @@ class CreateTicket(BaseTool):
             """)
 
             cur.execute(
-                "INSERT INTO tickets (ticket_id, customer_name, phone, issue, urgency) "
-                "VALUES (%s, %s, %s, %s, %s)",
+                "INSERT INTO tickets (ticket_id, customer_name, phone, issue, urgency) VALUES (%s, %s, %s, %s, %s)",
                 (ticket_id, customer_name, phone, issue, urgency),
             )
             conn.commit()

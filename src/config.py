@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     max_same_tools: int = Field(default=5, ge=0, le=100, description="最大连续调用同一工具次数")
     max_steps: int = Field(default=5, ge=1, le=100, description="llm最大调用轮数")
 
+    # ---- MCP Server 端点 ----
+    mcp_servers: list[str] = []  # 如 ["http://localhost:8081/sse"]
+
     class Config:
         # 从项目根目录的 .env 文件读取（环境变量优先级更高）
         env_file = str(Path(__file__).parent.parent / ".env")

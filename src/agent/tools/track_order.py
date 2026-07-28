@@ -46,7 +46,7 @@ class TrackOrder(BaseTool):
         "ORDER BY o.order_date DESC"
     )
 
-    def execute(self, order_id: str = "", phone: str = "") -> ToolResult:  # noqa: C901
+    async def execute(self, order_id: str = "", phone: str = "") -> ToolResult:  # noqa: C901
         if not order_id and not phone:
             return ToolResult(name=self.name, status="error", error="请提供订单号或手机号")
 

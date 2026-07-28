@@ -38,9 +38,7 @@ class CompareProducts(BaseTool):
             "required": ["product_a", "product_b"],
         }
 
-    def execute(
-        self, product_a: str = "", product_b: str = "", table: str = "laptop_products"
-    ) -> ToolResult:
+    async def execute(self, product_a: str = "", product_b: str = "", table: str = "laptop_products") -> ToolResult:
         if not product_a or not product_b:
             return ToolResult(name=self.name, status="error", error="需要提供两款产品的名称")
 
