@@ -1,10 +1,13 @@
-# PLAN V4 — 配机助手 + Plan-and-Execute + MCP 集成
+# PLAN V4 — Plan-and-Execute + MCP + 多场景 Agent
 
-> **核心命题**：不是为用而用 LangGraph/MCP，而是用一个真正需要它们的业务场景来驱动架构演进。
+> **核心命题**：不是为用而用 LangGraph/MCP，而是用真正需要它们的业务场景来驱动架构演进。
 >
-> **两大场景**：
-> 1. "5000 预算，帮我配台打 3A 的主机" — 约束满足 + 兼容性验证 + 并行搜索 + 回退重规划，ReAct while-loop 做不了
-> 2. "我要退款" — 支付/退款是独立系统，天然适合 MCP 协议分离
+> **三大场景**：
+> 1. "5000 预算，帮我配台打 3A 的主机" — 约束满足 + 兼容性验证 + 并行搜索，ReAct while-loop 做不了
+> 2. "我的笔记本开不了机了" — 多步串行诊断（查订单→判在保→查知识库→建工单），需要 plan-then-execute
+> 3. "我要退款" — 支付/退款是独立系统，天然适合 MCP 协议分离
+
+> **最后更新**: 2026-07-29
 
 ---
 
@@ -216,227 +219,297 @@ class CheckCompatibility(BaseTool):
 
 ---
 
-## 四、MCP 集成 — 支付服务
+## 四、MCP 集成 — 支付服务 ✅ 已完成
 
 ### 4.1 为什么支付适合 MCP
 
 支付/退款在真实公司是**独立有状态服务**——微信支付回调、退款对账、资金安全，通常由财务/支付团队维护，语言可能是 Java/Go。Agent 不应该直接操作支付数据库。
 
-| 特征 | 说明 |
-|------|------|
-| 独立团队 | 支付和客服 Agent 不在一个代码库 |
-| 跨语言 | 支付系统大概率 Java/Go，Agent 是 Python |
-| 安全隔离 | 退款操作不能直接暴露给 Agent，MCP Server 做权限校验 |
-| 标准化 | 如果微信支付官方出 MCP Server，Agent 直接接 |
+### 4.2 实际实现
 
-### 4.2 MCP Payment Server (`services/mcp_payment_server.py`)
-
-独立进程，FastMCP + stdio transport。暴露两个工具：
-
-| 工具 | 类型 | 说明 |
-|------|------|------|
-| `check_payment(order_id)` | 读 | 查 orders 表：支付方式、金额、时间、状态 |
-| `request_refund(order_id, reason)` | 写 | 校验退款资格 → update status='已取消' → 返回退款单号 |
-
-**退款资格规则**：只有 `运输中` / `已签收` 的订单可退款；`待付款` / `已完成` / 已退款 不可退。
-
-实现要点：
+**MCP Payment Server** (`src/service/mcp_payment_server.py`)：
+- FastMCP 独立进程，**SSE transport**（非 stdio），监听 `0.0.0.0:8081`
+- 为什么 SSE 非 stdio：stdio 是父子进程模式，不适合生产（支付服务应独立部署、独立扩缩容）；SSE 走 HTTP，可以放 Nginx 后面、做负载均衡
+- 两个工具：`check_payment(order_id)` + `request_refund(order_id, reason)`
 - 自己 `init_pool()` 建 PG 连接（独立进程，不共享 main.py 的池）
-- `@mcp.tool()` 装饰器定义工具，`mcp.run(transport="stdio")` 启动
-- 未来替换真实 API：把 PG 查询换成 `requests.get("https://api.mch.weixin.qq.com/...")`
+- 退款校验：状态不能是 已退款/退款中/已取消，paid_amount > 0
 
-### 4.3 `MCPTool(BaseTool)` 适配器 (`src/agent/mcp_tool.py`)
+**MCP Client** (`src/agent/mcp_tool.py`)：
+- `MCPClientManager`: 封装 `sse_client(url)` → `ClientSession` → `initialize()` → `list_tools()` / `call_tool()` → `disconnect()`
+- `MCPTool(BaseTool)`: 适配器，`name/description/parameters` 来自 `list_tools()` 自动发现，`execute()` 直接 `await call_tool()`
 
-核心问题：`BaseTool.execute()` 是 sync，MCP 调用是 async → `asyncio.run()` 桥接。
+**BaseTool async 重构**：
+- `BaseTool.execute()` 从 `def` 改为 `async def`，消除 `asyncio.run()` + `asyncio.to_thread()` 双重桥接
+- 6 个本地工具 + `ToolRegistry.execute()` + `loop.py` 两处调用点全部适配
 
+**配置驱动注册** (`main.py` lifespan)：
 ```python
-class MCPTool(BaseTool):
-    def __init__(self, tool_def, session):
-        self._name = tool_def.name          # MCP 工具名
-        self._description = tool_def.description
-        self._parameters = tool_def.inputSchema  # JSON Schema
-        self._session = session
-
-    def execute(self, **kwargs) -> ToolResult:
-        try:
-            result = asyncio.run(
-                self._session.call_tool(self._name, arguments=kwargs)
-            )
-            return ToolResult(name=self.name, status="success",
-                              data={"result": result.content[0].text})
-        except Exception as e:
-            return ToolResult(name=self.name, status="error", error=str(e))
+# .env: MCP_SERVERS='["http://localhost:8081/sse"]'
+for url in settings.mcp_servers:
+    manager = MCPClientManager(url)
+    await manager.connect()
+    for tool_info in await manager.list_tools():
+        registry.register(MCPTool(manager, tool_info))
 ```
+未来加物流 MCP Server、库存 MCP Server 只需在 `.env` 里加 URL，Agent 代码零改动。
 
-`MCPClientManager` 管理连接生命周期：
-```python
-class MCPClientManager:
-    def __init__(self, server_params: StdioServerParameters):
-        self._params = server_params
-    
-    async def connect(self) -> ClientSession:
-        # stdio_client(server_params) → read_stream, write_stream
-        # ClientSession(read_stream, write_stream) → session.initialize()
-    
-    async def disconnect(self):
-        # 关闭 transport
-```
+### 4.3 实施状态
 
-### 4.4 main.py lifespan 集成
-
-```python
-# startup
-mcp_payment = MCPClientManager(StdioServerParameters(
-    command="python", args=["services/mcp_payment_server.py"]
-))
-payment_session = await mcp_payment.connect()
-
-# 自动发现工具 → 注册进 Registry
-tools_result = await payment_session.list_tools()
-for tool_def in tools_result.tools:
-    registry.register(MCPTool(tool_def, payment_session))
-
-# shutdown
-await mcp_payment.disconnect()
-```
-
-Agent Loop 完全无感——`check_payment` / `request_refund` 跟 `check_stock` 调用方式一模一样。
+| 组件 | 状态 |
+|------|:---:|
+| MCP Payment Server (FastMCP + SSE, port 8081) | ✅ |
+| MCPClientManager + MCPTool 适配器 | ✅ |
+| BaseTool.execute() async 重构 | ✅ |
+| Config-driven 注册 (main.py lifespan) | ✅ |
+| check_compatibility → 降级为本地 BaseTool（不需要 MCP） | ✅ |
 
 ---
 
-## 五、LangGraph Plan-and-Execute Agent
+## 五、LangGraph Plan-and-Execute Agent ← 当前 Step
 
-### 5.1 为什么不替换 `AgentLoop`
+### 5.0 前置数据准备 ✅
 
-- 简单查询（"查库存""退货流程"）不需要 Plan-and-Execute，反而会变慢
-- `AgentLoop` 已经稳定、有测试覆盖
-- 新增 `PlanAndExecuteAgent` 类，两个 Agent 共存，`IntentRouter` 选路
+在开始 Plan-and-Execute 之前，完成了故障诊断场景所需的数据基础：
 
-### 5.2 图结构
+**故障排查知识库** (8 文件，`data/knowledge/troubleshooting_*.md`)：
+
+| 文件 | 内容 |
+|------|------|
+| `troubleshooting_laptop_general.md` | 品牌无关排查树：第零步在保判断 → 6 种故障现象(A-F) → software vs hardware 速查 |
+| `troubleshooting_laptop_apple.md` | Mac 特有：SMC/NVRAM 重置、Touch Bar、电池健康 |
+| `troubleshooting_laptop_huawei.md` | MateBook 特有：运输模式、F10 智能还原、BIOS 更新黑屏 |
+| `troubleshooting_laptop_lenovo.md` | ThinkPad 特有：POST 报错码表(0175-0251)、PC Doctor、S.M.A.R.T. |
+| `troubleshooting_phone_apple.md` | iPhone 特有：强制重启按键表、恢复模式、DFU 模式对比 |
+| `troubleshooting_phone_android.md` | Android 通用：Recovery 按键表（各品牌）、双清、fastboot |
+| `troubleshooting_phone_huawei.md` | 华为手机：eRecovery 在线修复、安全模式、HarmonyOS 升级 |
+| `troubleshooting_phone_xiaomi.md` | 小米/Redmi：MIUI Recovery 5.0、线刷 MiFlash、电池老化 |
+
+每个知识库的第一步都是**"第零步：判断在保状态"**——Agent 必须先 `track_order` 查 delivered_at，再决定走官方售后还是 DIY 排查。这个"先查在保"的模式就是 Plan-and-Execute 的 plan 来源。
+
+**`delivered_at` 列**：orders 表新增 `delivered_at DATE`，只有"已签收""已完成"状态有值，用于计算保修期。
+
+### 5.1 为什么需要两个场景
+
+Plan-and-Execute 的核心价值是**先规划再执行**，但不同业务的"执行"模式完全不同：
+
+| 维度 | 配机选品 | 故障诊断 |
+|------|---------|---------|
+| 执行模式 | **并行** — CPU 和显卡无依赖 | **串行** — 每步依赖上一步结果 |
+| 步骤数 | 6-8 步（8 个品类） | 3-5 步（查单→判保→查库→建工单） |
+| 验证方式 | 兼容性规则引擎 + 预算 | 在保状态判断（分支正确？） |
+| 重规划 | 换不兼容部件 | 换排查路径（软件→硬件 或 换品牌知识库） |
+| 最终输出 | 配置清单 + 价格 | 诊断结论 + 操作建议 + 工单号 |
+| LLM 角色 | planner 生成搜索计划，executor 调 tool | planner 生成诊断步骤，executor 串行执行，judge 判断是否找到根因 |
+
+一个 LangGraph StateGraph，planner 根据意图生成不同形状的 plan，executor 根据 plan 的依赖关系决定并行还是串行。
+
+### 5.2 为什么不替换 AgentLoop
+
+- 简单查询（"查库存""退货流程"）不需要 Plan-and-Execute，反而变慢
+- `AgentLoop` 已稳定、有测试覆盖，SSE 流式也工作正常
+- 新增 `PlanAndExecuteAgent` 类，两个 Agent 共存，`IntentRouter` 加 `plan_execute` 意图分叉
+
+### 5.3 图结构
 
 ```
                     ┌──────────────────────┐
                     │      planner          │
-                    │  LLM: 需求 → 结构化计划 │
+                    │  LLM: query → 结构化计划 │
                     └──────────┬───────────┘
                                │
                     ┌──────────▼───────────┐
                     │      executor         │
-                    │  并行执行无依赖步骤    │
-                    │  ┌────┐ ┌────┐       │
-                    │  │CPU │ │GPU │  ...  │
-                    │  └──┬─┘ └──┬─┘       │
-                    │     │      │          │
-                    │  ┌──▼──────▼──┐       │
-                    │  │ 依赖步骤    │       │
-                    │  │ 主板(等CPU) │       │
-                    │  └────────────┘       │
+                    │  配机: 并行执行无依赖步骤│
+                    │  诊断: 串行逐步执行     │
                     └──────────┬───────────┘
                                │
                     ┌──────────▼───────────┐
-                    │      verifier         │
-                    │  check_compatibility  │
-                    │  + 预算检查           │
+                    │       judge           │
+                    │  配机: 兼容性+预算检查  │
+                    │  诊断: 根因是否找到?    │
                     └──────┬──────┬────────┘
                            │      │
-                    ┌──────▼─┐ ┌──▼──────┐
-                    │ 通过    │ │ 未通过  │
-                    └──────┬─┘ └──┬──────┘
+                    ┌──────▼─┐ ┌──▼──────────┐
+                    │ 通过    │ │ 未通过       │
+                    └──────┬─┘ └──┬──────────┘
                            │      │
                     ┌──────▼─┐ ┌──▼──────────┐
                     │formatter│ │  replanner   │
-                    │ 格式输出│ │ 分析冲突原因  │
-                    └────────┘ │ 调整方案      │
-                               └──┬───────────┘
-                                  │
-                                  ▼
-                              executor (重新执行)
+                    │ 格式化  │ │ 分析失败原因  │
+                    │ 最终输出│ │ 调整方案     │
+                    └────────┘ └──┬──────────┘
+                                 │
+                                 ▼
+                            executor (重新执行)
+                            (最多 3 次循环)
 ```
 
-### 5.3 State 定义
+### 5.4 统一 State
 
 ```python
-class BuildState(TypedDict, total=False):
-    messages: list[dict[str, Any]]     # 对话历史
-    requirements: str                  # 用户需求原文
-    budget: int                        # 预算上限（从 requirements 提取）
-    plan: list[dict]                   # 结构化计划步骤
-    selected_parts: dict[str, dict]    # {category: component} 已选配件
-    compatibility_result: dict         # 兼容性检查结果
-    iteration: int                     # 重试次数
-    answer: str                        # 最终输出
+class PlanExecuteState(TypedDict, total=False):
+    # 输入
+    messages: list[dict[str, Any]]        # 对话历史
+    query: str                            # 用户原始问题
+    scenario: str                         # "build_pc" | "troubleshoot"
+    
+    # Planner 产出
+    plan: list[dict]                      # 结构化计划步骤
+    #   配机 plan step: {"id": 1, "category": "cpu", "filters": {...}, "depends_on": []}
+    #   诊断 plan step: {"id": 1, "action": "track_order", "args": {...}, "depends_on": [], "purpose": "查订单在保状态"}
+    budget: int | None                    # 配机场景的预算
+    
+    # Executor 产出
+    step_results: dict[int, dict]         # {step_id: tool_result}
+    selected_parts: dict[str, dict]       # 配机: {category: component}
+    diagnosis_path: list[str]             # 诊断: 已执行的诊断路径 ["查单→在保→查知识库", ...]
+    
+    # Judge 产出
+    judge_passed: bool
+    judge_reason: str                     # 未通过原因
+    
+    # 循环控制
+    iteration: int                        # 当前重试次数
+    max_iterations: int                   # 最大重试次数 (默认 3)
+    
+    # 最终输出
+    answer: str
     total_tokens: int
 ```
 
-### 5.4 四个节点
+### 5.5 四种节点
 
 #### planner 节点
-- 输入：`requirements`（用户原文）
-- LLM 生成结构化计划 JSON：
-  ```json
-  {
-    "budget": 5000,
-    "strategy": "游戏为主，CPU 和 GPU 占总预算 60%",
-    "steps": [
-      {"id": 1, "category": "cpu", "filters": {"price_max": 1200}, "depends_on": []},
-      {"id": 2, "category": "gpu", "filters": {"price_max": 2000}, "depends_on": []},
-      {"id": 3, "category": "motherboard", "filters": {}, "depends_on": [1]},
-      {"id": 4, "category": "ram", "filters": {}, "depends_on": [3]},
-      {"id": 5, "category": "ssd", "filters": {}, "depends_on": []},
-      {"id": 6, "category": "psu", "filters": {}, "depends_on": [1, 2]},
-      {"id": 7, "category": "case", "filters": {}, "depends_on": [2, 3, 6]},
-      {"id": 8, "category": "cooler", "filters": {}, "depends_on": [1, 7]}
-    ]
-  }
-  ```
-- 输出：存入 `state["plan"]`, `state["budget"]`
+
+输入：`query` + `scenario`
+输出：结构化 `plan`
+
+配机场景 LLM 生成：
+```json
+{
+  "scenario": "build_pc",
+  "budget": 5000,
+  "strategy": "游戏为主，CPU 和 GPU 占总预算 60%",
+  "steps": [
+    {"id": 1, "category": "cpu", "filters": {"price_max": 1200}, "depends_on": []},
+    {"id": 2, "category": "gpu", "filters": {"price_max": 2000}, "depends_on": []},
+    {"id": 3, "category": "motherboard", "filters": {}, "depends_on": [1]},
+    {"id": 4, "category": "ram", "filters": {}, "depends_on": [3]},
+    {"id": 5, "category": "ssd", "filters": {}, "depends_on": []},
+    {"id": 6, "category": "psu", "filters": {}, "depends_on": [1, 2]},
+    {"id": 7, "category": "case", "filters": {}, "depends_on": [2, 3, 6]},
+    {"id": 8, "category": "cooler", "filters": {}, "depends_on": [1, 7]}
+  ]
+}
+```
+
+故障诊断场景 LLM 生成：
+```json
+{
+  "scenario": "troubleshoot",
+  "device_type": "laptop",
+  "brand": "联想",
+  "symptom": "开不了机，电源灯不亮",
+  "steps": [
+    {"id": 1, "action": "track_order", "args": {"order_id": "..."}, "depends_on": [], "purpose": "查订单确认在保状态"},
+    {"id": 2, "action": "search_knowledge", "args": {"query": "联想笔记本 无法开机 电源灯不亮", "brand": "lenovo", "device_type": "laptop"}, "depends_on": [1], "purpose": "根据在保状态查对应知识库"},
+    {"id": 3, "action": "create_ticket", "args": {}, "depends_on": [2], "purpose": "如果无法自助解决，创建工单", "conditional": "仅在无法自助解决时执行"}
+  ]
+}
+```
+
+关键设计决策：
+- **planner 不直接调工具**——它只生成计划，不接触数据库。计划是指令，不是执行
+- **plan 中的 filter 是 planner 根据用户需求推导的**，不是从数据库查的（例：预算 5000 → CPU 不超过 1200）
+- executor 拿到 plan 后，用 filter 调 `search_component`，这才是真正查数据库
 
 #### executor 节点
-- 读 `plan`，拓扑排序确定执行批次
-- 同一批次（无依赖关系）并行调用 `search_component`
-- 依赖步骤等前置完成后执行（用上一步返回的 socket/ddr_type 做 filter）
-- 每步结果存入 `state["selected_parts"]`
-- **关键**：不直接用 LLM 选品，而是用 LLM 的 plan + Tool 的搜索结果，保证数据真实
 
-#### verifier 节点
-- 调 `check_compatibility(components=selected_parts)` → 兼容性报告
+核心逻辑：**拓扑排序 plan → 分批执行**。
+
+```
+1. 拓扑排序 plan.steps（根据 depends_on）
+2. 同一批次（无依赖步骤）并行执行
+3. 每个 step 执行完后，把结果写入 state["step_results"][step_id]
+4. 后续步骤可以用前置步骤的结果做 filter（如 CPU 的 socket → 主板的 socket filter）
+5. 全部执行完 → 进入 judge
+```
+
+对于配机：CPU 和 GPU 并行，主板等 CPU 返回后再搜（用 CPU 的 socket 做 filter）。
+对于诊断：每步 `depends_on: [上一步]` → 自然串行。
+
+```python
+async def executor_node(state: PlanExecuteState) -> PlanExecuteState:
+    plan = state["plan"]
+    step_results = {}
+    
+    # 拓扑排序 → 按批次执行
+    batches = topological_sort(plan["steps"])
+    for batch in batches:
+        # 同批次并行
+        tasks = [execute_step(step, step_results) for step in batch]
+        batch_results = await asyncio.gather(*tasks)
+        for step_id, result in batch_results:
+            step_results[step_id] = result
+    
+    state["step_results"] = step_results
+    return state
+```
+
+#### judge 节点
+
+**配机场景**：
+- 调 `check_compatibility(selected_parts)` → 兼容性报告
 - 检查预算：`sum(price) <= budget`
-- 如果全部通过 → `state["answer"]` 留空（进入 formatter）
-- 如果失败 → 记录冲突原因（进入 replanner）
+- 通过 → 进入 formatter
+- 未通过 → 记录冲突原因，进入 replanner
+
+**故障诊断场景**：
+- 判断是否找到了根因（从 knowledge search 结果中判断）
+- 判断是否需要创建工单（用户能自助解决？）
+- 判断诊断路径是否合理（在保却走了 DIY 路径？）
+- 通过 → 进入 formatter（生成诊断报告 + 操作建议）
+- 未通过 → replanner（换个方向，如从软件问题换到硬件问题）
+
+#### replanner 节点
+
+LLM 分析 judge 的失败原因，生成新的 plan（不是微调旧 plan，是重新生成）：
+
+```
+输入：原 plan + judge 失败原因 + 已执行的 step_results
+输出：新 plan（替换不兼容/超预算的部件，或换诊断路径）
+```
+
+最多重试 3 次，3 次后强制进 formatter 输出"部分结果 + 冲突说明"。
 
 #### formatter 节点
-- LLM 将 `selected_parts` 格式化为美观的配置单
-- 含兼容性说明、预算分配分析
-- 输出 `state["answer"]`
 
-#### replanner 节点（循环回到 executor）
-- LLM 分析 verifier 的冲突报告
-- 生成新 plan：替换不兼容/超预算的部件
-- 最多重试 3 次，3 次失败给出"部分完成 + 冲突说明"
+LLM 将执行结果格式化为用户友好的回答：
+- 配机：配置清单表格 + 兼容性说明 + 预算分配 + 装机提示
+- 诊断：诊断结论 + 操作步骤（按优先级排列）+ 工单信息（如有）
 
-### 5.5 条件边逻辑
+### 5.6 条件边
 
 ```python
 def after_planner(state) -> str:
     return "executor"
 
 def after_executor(state) -> str:
-    return "verifier"
+    return "judge"
 
-def after_verifier(state) -> str:
-    compat = state.get("compatibility_result", {})
-    if compat.get("ok") and state["iteration"] == 0:
+def after_judge(state) -> str:
+    if state.get("judge_passed"):
         return "formatter"
-    elif state["iteration"] >= 3:
+    if state.get("iteration", 0) >= state.get("max_iterations", 3):
         return "formatter"  # 超过重试 → 输出部分结果
-    else:
-        return "replanner"
+    return "replanner"
 
 def after_replanner(state) -> str:
-    return "executor"  # 循环
+    state["iteration"] = state.get("iteration", 0) + 1
+    return "executor"
 ```
 
-### 5.6 `PlanAndExecuteAgent` 类
+### 5.7 `PlanAndExecuteAgent` 类
 
 ```python
 class PlanAndExecuteAgent:
@@ -446,115 +519,120 @@ class PlanAndExecuteAgent:
         self.max_iterations = max_iterations
         self._graph = self._build_graph()
     
-    async def run(self, query: str, *, history=None) -> BuildResult:
-        initial_state = BuildState(
+    async def run(self, query: str, *, history=None, scenario: str = "") -> PlanExecuteResult:
+        initial_state = PlanExecuteState(
             messages=history or [],
-            requirements=query,
-            selected_parts={},
+            query=query,
+            scenario=scenario,
+            step_results={},
             iteration=0,
-            total_tokens=0,
+            max_iterations=self.max_iterations,
         )
-        config = {"configurable": {"thread_id": str(uuid.uuid4())}}
-        final = await self._graph.ainvoke(initial_state, config)
-        return BuildResult(answer=final["answer"], parts=final["selected_parts"], ...)
+        final = await self._graph.ainvoke(initial_state)
+        return PlanExecuteResult(answer=final["answer"], ...)
+    
+    async def run_stream(self, query: str, *, history=None, scenario: str = ""):
+        """SSE 流式 — 图节点间 yield 进度事件"""
+        # async for event in self._graph.astream_events(initial_state):
+        #     yield {"event": "node_start", "node": event["name"]}
+        #     yield {"event": "node_end", "node": event["name"], "summary": ...}
 ```
 
-### 5.7 `IntentRouter` 扩展
+### 5.8 设计要点
 
-```python
-# 新增意图
-- plan_execute: 配机、装机、DIY（复杂多步约束满足）
+**1. Plan 是 LLM 生成的，但执行是确定性的**
 
-# 判断逻辑（在 system prompt 中加规则）
-plan_execute: 用户要配一台电脑/主机/整机、DIY装机、组装清单
-```
+planner 节点用 LLM 做"语义理解 → 结构化计划"，这一步需要推理能力。但 executor 不做 LLM 调用——它只是照计划执行工具调用，保证数据来自数据库而非 LLM 幻觉。judge 中的兼容性检查也是规则引擎而非 LLM。
 
-路由结果：
-- `rag` → 现有 RAG pipeline
-- `agent` → 现有 `AgentLoop` (ReAct)
-- `ticket` → 现有 AgentLoop + create_ticket
-- `plan_execute` → **新 `PlanAndExecuteAgent`**
+**2. 拓扑排序决定并行度**
+
+不需要在 plan 里标"这个可以并行"——`depends_on` 表达了依赖关系，拓扑排序自动算出哪些步骤可以并行。诊断场景全部 `depends_on: [上一步]` → 自然串行。
+
+**3. Replanner 做减法不做加法**
+
+replanner 不需要重排所有步骤。对于配机，只替换出问题的品类（兼容性冲突的部件）；对于诊断，只替换走不通的分支（如软件排查无效 → 换硬件排查）。
+
+**4. MCP 工具对 Plan-and-Execute 透明**
+
+`check_payment` 和 `request_refund` 对 Plan-and-Execute 而言只是两个普通的 tool。plan 里可以包含 `{"action": "check_payment", ...}`，executor 照常调 `registry.execute()`。MCP 的远程调用对编排层完全透明。
 
 ---
 
-## 六、连接池修复（搭车修 PLAN_V3 已知差距 #3）
+## 六、连接池 ✅ 已完成
 
-在加 MCP 的同时，把现有 DB 工具的连接问题修了：
-
-```python
-# src/core/db_pool.py (新文件)
-import psycopg2
-from psycopg2 import pool
-
-_pool: pool.ThreadedConnectionPool | None = None
-
-def init_pool(minconn=2, maxconn=10):
-    global _pool
-    _pool = pool.ThreadedConnectionPool(minconn, maxconn, ...)
-
-def get_connection():
-    return _pool.getconn()
-
-def put_connection(conn):
-    _pool.putconn(conn)
-```
-
-`check_stock` / `track_order` / `create_ticket` 改用 `get_connection()` / `put_connection()` 替代 `connect()` / `close()`。
-
-这是独立的改进，和 MCP 不绑定但同期做。
+`src/core/db_pool.py` — `psycopg2.pool.ThreadedConnectionPool`:
+- `init_pool(minconn=2, maxconn=10)` → `get_connection()` → `put_connection(conn)` → `close_pool()`
+- 所有 DB 工具（check_stock / track_order / create_ticket / search_product / search_component）已切换
+- MCP Payment Server 独立进程有自己的 pool
 
 ---
 
 ## 七、文件变更清单
 
-| 文件 | 操作 | 说明 |
-|------|------|------|
+| 文件 | 状态 | 说明 |
+|------|:---:|------|
 | **数据层** | | |
-| `scripts/crawl_components.py` | ✅ 已完成 | Playwright 爬 ZOL 配件频道 |
-| `scripts/clean_components.py` | ✅ 已完成 | 8 品类字段标准化 |
-| `scripts/ingest_components.py` | ✅ 已完成 | pgvector 入库 |
-| `data/knowledge/pc_build_guide.md` | 新建 | 装机选购知识文档 |
+| `scripts/crawl/crawl_components.py` | ✅ | Playwright 爬 ZOL 配件频道 |
+| `scripts/clean/clean_components.py` | ✅ | 8 品类字段标准化 |
+| `scripts/ingest/ingest_components.py` | ✅ | pgvector 入库 |
+| `scripts/generate/orders.py` | ✅ | 新增 `delivered_at` 列生成逻辑 |
+| `scripts/crawl/crawl_troubleshooting.py` | ✅ | 爬取官方支持页面 (3品牌 9URL) |
+| `data/knowledge/troubleshooting_*.md` | ✅ | 8 个故障排查知识库文件 |
+| `data/knowledge/pc_build_guide.md` | 🔜 | 装机选购知识文档 |
 | **MCP 服务** | | |
-| `services/mcp_payment_server.py` | 新建 | FastMCP 支付/退款服务 |
+| `src/service/mcp_payment_server.py` | ✅ | FastMCP 支付/退款服务 (SSE, port 8081) |
 | **工具层** | | |
-| `src/agent/tools/search_component.py` | ✅ 已完成 | `SearchComponent(BaseTool)` |
-| `src/agent/tools/check_compatibility.py` | 新建 | `CheckCompatibility(BaseTool)` — 本地规则引擎 |
-| `src/agent/mcp_tool.py` | 新建 | `MCPTool(BaseTool)` + `MCPClientManager` |
+| `src/agent/tools/search_component.py` | ✅ | `SearchComponent(BaseTool)` |
+| `src/agent/tools/check_compatibility.py` | 🔜 | `CheckCompatibility(BaseTool)` — 本地规则引擎 |
+| `src/agent/mcp_tool.py` | ✅ | `MCPTool(BaseTool)` + `MCPClientManager` |
+| `src/agent/tools_registry.py` | ✅ | `BaseTool.execute()` async 重构 |
 | **Agent 层** | | |
-| `src/agent/plan_execute.py` | 新建 | `PlanAndExecuteAgent` (LangGraph) |
-| `src/agent/loop.py` | **不动** | V3 AgentLoop 保留 |
-| `src/agent/session.py` | **不动** | |
-| `src/agent/sentiment.py` | **不动** | |
+| `src/agent/plan_execute.py` | 🔜 | `PlanAndExecuteAgent` (LangGraph StateGraph) |
+| `src/agent/loop.py` | ✅ | V3 AgentLoop 保留，async 适配 |
+| `src/agent/session.py` | ✅ | 不变 |
+| `src/agent/sentiment.py` | ✅ | 不变 |
 | **核心层** | | |
-| `src/core/db_pool.py` | ✅ 已完成 | PG 线程连接池 |
-| `src/core/retrieve.py` | ✅ 已完成 | 懒加载 + 连接池 + component 分支 |
-| `src/core/intent_router.py` | 修改 | 新增 `plan_execute` 意图 |
+| `src/core/db_pool.py` | ✅ | PG 线程连接池 |
+| `src/core/retrieve.py` | ✅ | 懒加载 + component 分支 |
+| `src/core/intent_router.py` | 🔜 | 新增 `plan_execute` 意图 |
 | **API 层** | | |
-| `src/main.py` | 修改 | lifespan 加 MCP Payment Server + PlanAndExecuteAgent |
-| `src/api/chat.py` | 修改 | 路由 `plan_execute` → PlanAndExecuteAgent |
-| **依赖** | | |
-| `pyproject.toml` | ✅ 已完成 | `langgraph>=1.0`, `mcp>=1.0` |
+| `src/main.py` | ✅ | lifespan: MCP config-driven 注册 + Agent 初始化 |
+| `src/api/chat.py` | 🔜 | 路由 `plan_execute` → PlanAndExecuteAgent |
+| `src/config.py` | ✅ | 新增 `mcp_servers: list[str]` |
 | **测试** | | |
-| `tests/test_plan_execute.py` | 新建 | PlanAndExecuteAgent 单元测试 |
-| `tests/test_mcp_tool.py` | 新建 | MCPTool 单元测试 |
+| `tests/test_plan_execute.py` | 🔜 | PlanAndExecuteAgent 单元测试 |
+| `tests/test_mcp_tool.py` | 🔜 | MCPTool 单元测试 |
 
 ---
 
-## 八、实施顺序（2026-07-28 修订）
+## 八、实施顺序（2026-07-29 更新）
 
 ```
-Step 1: 爬虫 + 数据入库             ✅ 已完成 (9 品类 1427 条)
-Step 1.5: retrieve.py 重构          ✅ 已完成 (BM25懒加载+连接池+component分支)
-Step 2: search_component 工具       ✅ 已完成 (含价格过滤)
-Step 3: 上游脚本适配                ✅ 已完成 (eval/smoke init_pool)
-Step 3.5: SSE 流式 + 多轮对话       ✅ 已完成 (LLMClient→AgentLoop→API)
+Step 1: 爬虫 + 数据入库             ✅ (9 品类 1427 条)
+Step 1.5: retrieve.py 重构          ✅ (BM25懒加载+连接池+component分支)
+Step 2: search_component 工具       ✅ (含价格过滤)
+Step 3: 上游脚本适配                ✅ (eval/smoke init_pool)
+Step 3.5: SSE 流式 + 多轮对话       ✅ (LLMClient→AgentLoop→API)
 ─── V4 新增 ─────────────────────────────────────────────
-Step 4: MCP Payment Server + MCPTool 适配器  ← 当前
-Step 5: check_compatibility 本地规则引擎
-Step 6: LangGraph PlanAndExecuteAgent
-Step 7: IntentRouter 扩展 + chat.py/main.py 集成
-Step 8: 测试 + 端到端验证
+Step 4: MCP Payment Server          ✅ (FastMCP SSE + MCPTool + async重构 + config-driven)
+Step 4.5: 故障排查知识库            ✅ (8 files + delivered_at + crawl脚本)
+Step 5: Plan-and-Execute Agent      🔜 当前 (LangGraph, 双场景)
+Step 6: check_compatibility         🔜 (本地规则引擎)
+Step 7: IntentRouter 扩展           🔜 (新增 plan_execute)
+Step 8: chat.py/main.py 集成        🔜 (路由分叉 + SSE 流式)
+Step 9: 测试 + 端到端验证           🔜
 ```
+
+**当前 commit**: `abeb276 feat(knowledge): 故障排查知识库 + delivered_at 列 + 爬取脚本`
+
+**Step 5 拆分**（按实现顺序）：
+1. `PlanExecuteState` + `PlanAndExecuteAgent` 类骨架 + StateGraph 构建
+2. planner 节点：LLM 生成结构化 plan（支持两种 scenario 的 prompt）
+3. executor 节点：拓扑排序 + 分批执行（并行/串行自动判断）
+4. judge 节点：配机兼容性检查 + 诊断根因判断
+5. replanner 节点：LLM 分析失败原因 + 重新生成 plan
+6. formatter 节点：LLM 格式化最终输出
+7. `run_stream()` SSE 流式：图节点间 yield 进度事件
 
 ---
 
@@ -590,14 +668,17 @@ curl -X POST http://localhost:8000/api/v1/chat \
 
 ## 十、面试叙事
 
-**LangGraph**：
-> "简单查询用自研 ReAct，配机这种多步约束满足场景上了 LangGraph StateGraph。核心是 planner → executor(并行) → verifier → replanner 四个节点加条件回退。不用 `create_react_agent` 是因为配机需要定制化的 plan-then-execute 模式，不是标准 ReAct。"
+**LangGraph Plan-and-Execute**：
+> "简单查询用自研 ReAct AgentLoop，配机和故障诊断这种需要多步规划的场景上了 LangGraph StateGraph。核心是 planner → executor → judge → replanner 四个节点加条件回退。一个 StateGraph 支持两种场景：配机是并行搜索（CPU 和显卡同时搜），故障诊断是串行（查订单→判在保→查知识库→建工单），拓扑排序根据 `depends_on` 自动决定并行度。不用 `create_react_agent` 是因为配机需要定制化的 plan-then-execute 模式，不是标准 ReAct。"
 
 **MCP**：
-> "支付和退款做成独立 MCP Server。因为真实生产里支付系统是独立团队维护的（Java/Go），Agent 不应该直接操作支付数据库。我写了 MCPTool 适配器继承 BaseTool，Agent 侧通过 MCP 协议自动发现工具、调用工具，跟本地工具一模一样。以后换成真实微信支付 API，Agent 一行代码不用改——这就是 MCP 的价值：统一工具发现和调用协议。"
+> "支付和退款做成独立 MCP Server（SSE transport，独立进程监听 8081）。真实生产里支付系统是独立团队维护的（Java/Go），Agent 不应该直接操作支付数据库。我写了 MCPTool 适配器继承 BaseTool，BaseTool 整个重构成了 async。Agent 侧通过 config-driven 自动发现 MCP 工具、注册进 ToolRegistry，跟本地工具调用方式一模一样。以后换成真实微信支付 API，Agent 一行代码不用改——这就是 MCP 的价值：统一工具发现和调用协议。"
 
 **为什么手写 + LangGraph 共存**：
-> "不为用而用。简单查库存用手写 ReAct（轻量、可控），复杂配机用 LangGraph（需要 plan-execute-verify-replan 循环和并行执行）。支付退款走 MCP 因为它是独立有状态服务。三种编排模式各司其职——面试官会问'你为什么不用 LangGraph 全部替代'——因为不同场景需要不同的编排模式。"
+> "不为用而用。简单查库存用手写 ReAct（轻量、可控），复杂配机和诊断用 LangGraph（需要 plan-execute-verify-replan 循环和依赖管理），支付退款走 MCP（独立有状态服务）。三种编排模式各司其职——面试官会问'你为什么不用 LangGraph 全部替代'——因为不同场景需要不同的编排模式，简单场景用 ReAct 更直接，没有 over-engineering。"
+
+**故障诊断知识库设计**：
+> "8 个文件按 device_type × brand 拆分，每个文件第一步都是'第零步：判断在保状态'。这不是内容要求，是 Plan-and-Execute 的 planner 用到的结构——plan 里第一步永远是 track_order，然后根据在保/过保走不同分支。知识库的拆分粒度直接决定了 planner 能生成多精准的 plan。"
 
 ---
 
@@ -675,4 +756,6 @@ async def run_stream(self, query: str):
 
 ### 11.5 实施状态
 
-✅ 已完成。放在 Plan-and-Execute 之前做了，因为非流式配机 20-60s 的等待体验不可接受。
+✅ 已完成。AgentLoop.run_stream() 已实现，`/api/v1/chat/stream` 端点可用。
+
+Plan-and-Execute 也需要流式——PlanAndExecuteAgent.run_stream() 在图节点间 yield 进度事件（`plan_generated` → `step_executing` → `step_complete` → `judging` → `formatting`），让用户看到配机/诊断的每一步进展。
