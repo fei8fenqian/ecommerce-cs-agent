@@ -22,6 +22,10 @@ from log_config import get_request_id
 
 The `src/logging.py` was renamed to `src/log_config.py` because it shadowed Python stdlib `logging`.
 
+## Memory
+
+像人一样，重要的事情自然记住。遇到关键决策、用户偏好、tricky bug、阶段性进展时，写到 `memory/` 目录。不用频繁，只记真正重要的。详见 `memory/MEMORY.md`。
+
 ## Commands
 
 ```
