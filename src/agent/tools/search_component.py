@@ -87,6 +87,7 @@ class SearchComponent(BaseTool):
                         "title": r.get("title"),
                         "content": r.get("content", "")[:200] + ("..." if len(r.get("content", "")) > 200 else ""),
                         "score": r.get("score"),
+                        "normalized": r.get("normalized"),
                     }
                 )
 

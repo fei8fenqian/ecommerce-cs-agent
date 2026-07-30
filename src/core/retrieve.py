@@ -74,7 +74,7 @@ def vector_search(
     elif table == "knowledge_chunks":
         cols = "id, source, title, content"
     elif table == "component_products":
-        cols = "id, name, category, price, description"
+        cols = "id, name, category, price, description, normalized"
     else:
         raise ValueError(f"不支持的表: {table}")
 
@@ -128,7 +128,7 @@ def vector_search(
             cur.execute(sql, (q_vec_str, q_vec_str, top_k))
             res = []
             for row in cur.fetchall():
-                id, name, category, price, description, score = row
+                id, name, category, price, description, normalized, score = row
                 res.append(
                     {
                         "id": id,
@@ -137,6 +137,7 @@ def vector_search(
                         "title": name,
                         "category": category,
                         "price": price,
+                        "normalized": normalized,
                     }
                 )
             return res
