@@ -79,10 +79,10 @@ PLANNER_TROUBLESHOOT_PROMPT = """你是设备故障诊断专家。根据用户�
 [
   {{"id": 1, "action": "track_order", "keyword": "Y9000P",
     "depends_on": [], "purpose": "查询订单确认在保状态"}},
-  {{"id": 2, "action": "search_knowledge", "depends_on": [1],
-    "query": "联想笔记本 无法开机 电源灯不亮",
-    "device_type": "laptop", "brand": "lenovo",
-    "purpose": "根据在保状态查对应知识库"}},
+  {{"id": 2, "action": "search_product", "depends_on": [1],
+    "query": "联想笔记本 无法开机",
+    "table": "knowledge_chunks",
+    "purpose": "搜索相关故障排查知识"}},
   {{"id": 3, "action": "create_ticket", "depends_on": [2],
     "issue": "笔记本无法开机，已尝试充电2小时仍无反应",
     "purpose": "无法自助解决则建工单"}}
@@ -562,7 +562,7 @@ class PlanAndExecuteAgent:
                     ts_lines.append(f"订单状态：{data.get('status', '未知')}")
                     ts_lines.append(f"在保状态：{data.get('warranty', '未知')}")
 
-                elif action == "search_knowledge":
+                elif action == "search_product":
                     results = ts_res.data.get("results", [])
                     if results:
                         for r in results[:3]:

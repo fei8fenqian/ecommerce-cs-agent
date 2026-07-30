@@ -15,9 +15,11 @@ async def main():
     init_pool()
     registry = ToolRegistry()
     registry.register(SearchComponent())
-    from agent.tools.create_ticket import CreateTicket
+    from agent.tools.search_product import SearchProduct
     from agent.tools.track_order import TrackOrder
+    from agent.tools.create_ticket import CreateTicket
 
+    registry.register(SearchProduct())
     registry.register(TrackOrder())
     registry.register(CreateTicket())
 
@@ -47,7 +49,7 @@ async def main():
     print("\n" + "=" * 60)
     print("测试: troubleshoot — 笔记本无法开机")
     print("=" * 60)
-    result2 = await agent.run("我的联想笔记本无法开机", scenario="troubleshoot")
+    result2 = await agent.run("我的联想 Y9000P 无法开机，电源灯不亮", scenario="troubleshoot")
     print(f"\nPlan ({len(result2.get('plan', []))} 步骤):")
     for step in result2.get("plan", []):
         print(f"  {step['id']}. {step.get('action', '?')}: {step.get('purpose', '?')}")
