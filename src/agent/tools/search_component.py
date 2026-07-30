@@ -85,6 +85,8 @@ class SearchComponent(BaseTool):
                 results.append(
                     {
                         "title": r.get("title"),
+                        "category": r.get("category"),
+                        "price": r.get("price"),
                         "content": r.get("content", "")[:200] + ("..." if len(r.get("content", "")) > 200 else ""),
                         "score": r.get("score"),
                         "normalized": r.get("normalized"),
