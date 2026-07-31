@@ -15,9 +15,9 @@ async def main():
     init_pool()
     registry = ToolRegistry()
     registry.register(SearchComponent())
+    from agent.tools.create_ticket import CreateTicket
     from agent.tools.search_product import SearchProduct
     from agent.tools.track_order import TrackOrder
-    from agent.tools.create_ticket import CreateTicket
 
     registry.register(SearchProduct())
     registry.register(TrackOrder())

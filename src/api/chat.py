@@ -58,7 +58,20 @@ async def chat(chat_req: ChatRequest, request: Request):
     # 意图路由
     intent = await intent_router.route(resolved_query)
 
-    if intent.target == "rag":
+    if intent.target == "plan_execute":
+        plan_agent = request.app.state.plan_execute_agent
+        plan_state = await plan_agent.run(
+            resolved_query,
+            history=ctx.messages,
+            scenario=intent.scenario,
+        )
+        return ChatResponse(
+            answer=plan_state.get("answer", ""),
+            session_id=ctx.session_id,
+            total_steps=len(plan_state.get("plan", [])),
+            total_tokens=0,  # TODO: token 统计从 state 里拿
+        )
+    elif intent.target == "rag":
         docs = hybrid_search(resolved_query, table=intent.table)
         context = _build_context(docs)
         loop_result = await agent.run(
@@ -113,8 +126,32 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
         # 先推一个 start 事件给前端，带 session_id
         yield f"data: {json.dumps({'event': 'start', 'session_id': session_id}, ensure_ascii=False)}\n\n"
 
-        # 声明要改外层变量
         nonlocal last_entities
+
+        if intent.target == "plan_execute":
+            plan_agent = request.app.state.plan_execute_agent
+            async for chunk in plan_agent.run_stream(
+                resolve_query,
+                history=history,
+                scenario=intent.scenario,
+            ):
+                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+                if chunk.get("event") == "done":
+                    data = chunk.get("data", {})
+                    stream_res["answer"] = data.get("answer", "")
+                    stream_res["total_steps"] = len(data.get("plan", []))
+
+            await session.add_turn(
+                session_id,
+                resolve_query,
+                LoopResult(
+                    answer=stream_res["answer"],
+                    total_steps=stream_res["total_steps"],
+                    total_latency_ms=(time.perf_counter() - start_t) * 1000,
+                    last_entities=last_entities,
+                ),
+            )
+            return
 
         # 消费 agent 的消息流，逐个处理事件
         async for event in agent.run_stream(

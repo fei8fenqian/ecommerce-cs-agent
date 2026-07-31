@@ -4,6 +4,7 @@ from fastapi import FastAPI
 
 from agent.loop import AgentLoop
 from agent.mcp_tool import MCPClientManager, MCPTool
+from agent.plan_execute import PlanAndExecuteAgent
 from agent.session import SessionManager
 from agent.tools import (
     check_stock,
@@ -41,6 +42,11 @@ async def lifespan(app: FastAPI):
     registry.register(create_ticket.CreateTicket())
     registry.register(compare_products.CompareProducts())
     registry.register(search_component.SearchComponent())
+    plan_execute_agent = PlanAndExecuteAgent(
+        llm,
+        registry,
+        max_iterations=settings.max_iterations,
+    )
     agent = AgentLoop(llm, registry, max_steps=settings.max_steps)
     session = SessionManager()
 
@@ -55,6 +61,7 @@ async def lifespan(app: FastAPI):
     app.state.llm_client = llm
     app.state.intent_router = intent_router
     app.state.registry = registry
+    app.state.plan_execute_agent = plan_execute_agent
     app.state.agent = agent
     app.state.session = session
     app.state.mcp_managers = mcp_managers
