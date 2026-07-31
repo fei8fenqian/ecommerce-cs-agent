@@ -598,5 +598,528 @@
     "difficulty": "hard",
     "expected_source": "component_products",
     "expected_keywords": ["CPU", "显卡", "主板", "内存", "固态", "电源"]
+  },
+  {
+    "id": 76,
+    "query": "5000左右 打游戏的 帮我配台电脑呗 我不太懂",
+    "type": "plan_build_pc",
+    "difficulty": "easy",
+    "expected_source": "component_products",
+    "expected_intent": "plan_execute",
+    "expected_scenario": "build_pc",
+    "expected_keywords": ["CPU", "显卡", "主板", "内存", "固态"]
+  },
+  {
+    "id": 77,
+    "query": "就玩LOL和吃鸡 主机预算3000够不够",
+    "type": "plan_build_pc",
+    "difficulty": "easy",
+    "expected_source": "component_products",
+    "expected_intent": "plan_execute",
+    "expected_scenario": "build_pc",
+    "expected_keywords": ["CPU", "显卡", "主板"]
+  },
+  {
+    "id": 78,
+    "query": "能跑黑神话悟空的配置 别太贵 帮我看看用啥",
+    "type": "plan_build_pc",
+    "difficulty": "medium",
+    "expected_source": "component_products",
+    "expected_intent": "plan_execute",
+    "expected_scenario": "build_pc",
+    "expected_keywords": ["CPU", "RTX", "显卡"]
+  },
+  {
+    "id": 79,
+    "query": "一万二预算 要4K显示器打3A 显卡最好4080以上 其他你帮我搭",
+    "type": "plan_build_pc",
+    "difficulty": "hard",
+    "expected_source": "component_products",
+    "expected_intent": "plan_execute",
+    "expected_scenario": "build_pc",
+    "expected_keywords": ["RTX", "显卡", "CPU", "电源"]
+  },
+  {
+    "id": 80,
+    "query": "想装个ITX小主机 桌子太小了 预算六七千 能玩3A",
+    "type": "plan_build_pc",
+    "difficulty": "hard",
+    "expected_source": "component_products",
+    "expected_intent": "plan_execute",
+    "expected_scenario": "build_pc",
+    "expected_keywords": ["ITX", "机箱", "显卡", "CPU"]
+  },
+  {
+    "id": 81,
+    "query": "我想把现在的旧电脑升级一下 显卡是1060 CPU是i5 8400 不知道该换啥",
+    "type": "plan_build_pc",
+    "difficulty": "hard",
+    "expected_source": "component_products",
+    "expected_intent": "plan_execute",
+    "expected_scenario": "build_pc",
+    "expected_keywords": ["CPU", "显卡", "主板"]
+  },
+  {
+    "id": 82,
+    "query": "给公司配几台办公电脑 不需要独显 稳定就行 预算一台3000",
+    "type": "plan_build_pc",
+    "difficulty": "easy",
+    "expected_source": "component_products",
+    "expected_intent": "plan_execute",
+    "expected_scenario": "build_pc",
+    "expected_keywords": ["CPU", "主板", "内存", "固态"]
+  },
+  {
+    "id": 83,
+    "query": "纯白主题 海景房 灯效拉满 预算一万一",
+    "type": "plan_build_pc",
+    "difficulty": "hard",
+    "expected_source": "component_products",
+    "expected_intent": "plan_execute",
+    "expected_scenario": "build_pc",
+    "expected_keywords": ["机箱", "散热", "显卡", "风扇"]
+  },
+  {
+    "id": 84,
+    "query": "8000块 主要做视频剪辑和渲染 偶尔玩玩原神 配什么好",
+    "type": "plan_build_pc",
+    "difficulty": "medium",
+    "expected_source": "component_products",
+    "expected_intent": "plan_execute",
+    "expected_scenario": "build_pc",
+    "expected_keywords": ["CPU", "显卡", "内存", "固态"]
+  },
+  {
+    "id": 85,
+    "query": "第一次装机 啥都不懂 预算6000 帮我把要买的都列出来 从头教我怎么装",
+    "type": "plan_build_pc",
+    "difficulty": "medium",
+    "expected_source": "component_products",
+    "expected_intent": "plan_execute",
+    "expected_scenario": "build_pc",
+    "expected_keywords": ["CPU", "显卡", "主板", "内存", "固态", "电源", "机箱"]
+  },
+  {
+    "id": 86,
+    "query": "想用AMD平台 听说性价比高 预算7000 玩游戏用",
+    "type": "plan_build_pc",
+    "difficulty": "medium",
+    "expected_source": "component_products",
+    "expected_intent": "plan_execute",
+    "expected_scenario": "build_pc",
+    "expected_keywords": ["AMD", "锐龙", "显卡", "主板"]
+  },
+  {
+    "id": 87,
+    "query": "我电脑开不了机了 按电源键完全没反应 灯也不亮",
+    "type": "plan_troubleshoot",
+    "difficulty": "easy",
+    "expected_source": "knowledge_chunks",
+    "expected_intent": "plan_execute",
+    "expected_scenario": "troubleshoot",
+    "expected_keywords": ["开机", "电源", "故障"]
+  },
+  {
+    "id": 88,
+    "query": "笔记本花屏 但是外接显示器正常 这是啥问题",
+    "type": "plan_troubleshoot",
+    "difficulty": "medium",
+    "expected_source": "knowledge_chunks",
+    "expected_intent": "plan_execute",
+    "expected_scenario": "troubleshoot",
+    "expected_keywords": ["花屏", "显示器", "排线", "显卡"]
+  },
+  {
+    "id": 89,
+    "query": "联想小新pro16用了半年 最近总是蓝屏 代码是memory_management 咋整啊 在保吗",
+    "type": "plan_troubleshoot",
+    "difficulty": "medium",
+    "expected_source": "knowledge_chunks",
+    "expected_intent": "plan_execute",
+    "expected_scenario": "troubleshoot",
+    "expected_keywords": ["蓝屏", "内存", "保修", "联想"]
+  },
+  {
+    "id": 90,
+    "query": "手机连不上wifi 别的设备都正常 重启过了还是不行",
+    "type": "plan_troubleshoot",
+    "difficulty": "easy",
+    "expected_source": "knowledge_chunks",
+    "expected_intent": "plan_execute",
+    "expected_scenario": "troubleshoot",
+    "expected_keywords": ["wifi", "网络", "故障"]
+  },
+  {
+    "id": 91,
+    "query": "我的y9000p这几天打游戏突然掉帧 以前能稳144现在60都不到 温度倒是正常",
+    "type": "plan_troubleshoot",
+    "difficulty": "hard",
+    "expected_source": "knowledge_chunks",
+    "expected_intent": "plan_execute",
+    "expected_scenario": "troubleshoot",
+    "expected_keywords": ["掉帧", "游戏", "显卡", "驱动"]
+  },
+  {
+    "id": 92,
+    "query": "手机掉水里了 马上捞出来了 现在还能开机 但屏幕有水印 咋办",
+    "type": "plan_troubleshoot",
+    "difficulty": "medium",
+    "expected_source": "knowledge_chunks",
+    "expected_intent": "plan_execute",
+    "expected_scenario": "troubleshoot",
+    "expected_keywords": ["进水", "防水", "保修"]
+  },
+  {
+    "id": 93,
+    "query": "电脑风扇狂转 声音跟飞机起飞一样 啥都没开就这样",
+    "type": "plan_troubleshoot",
+    "difficulty": "easy",
+    "expected_source": "knowledge_chunks",
+    "expected_intent": "plan_execute",
+    "expected_scenario": "troubleshoot",
+    "expected_keywords": ["风扇", "散热", "温度"]
+  },
+  {
+    "id": 94,
+    "query": "我这台暗影精灵9 玩游戏的时候突然黑屏然后自动重启 连续好几次了",
+    "type": "plan_troubleshoot",
+    "difficulty": "hard",
+    "expected_source": "knowledge_chunks",
+    "expected_intent": "plan_execute",
+    "expected_scenario": "troubleshoot",
+    "expected_keywords": ["黑屏", "重启", "电源", "散热"]
+  },
+  {
+    "id": 95,
+    "query": "iPhone面容ID突然不行了 没摔没进水 设置里也重置过了",
+    "type": "plan_troubleshoot",
+    "difficulty": "medium",
+    "expected_source": "knowledge_chunks",
+    "expected_intent": "plan_execute",
+    "expected_scenario": "troubleshoot",
+    "expected_keywords": ["面容", "Face ID", "iPhone", "维修"]
+  },
+  {
+    "id": 96,
+    "query": "电脑开机滴滴滴响三声 屏幕不亮 听说是内存问题？",
+    "type": "plan_troubleshoot",
+    "difficulty": "medium",
+    "expected_source": "knowledge_chunks",
+    "expected_intent": "plan_execute",
+    "expected_scenario": "troubleshoot",
+    "expected_keywords": ["内存", "开机", "报警"]
+  },
+  {
+    "id": 97,
+    "query": "耳机一边不响了 能修吗 还在保修期内",
+    "type": "plan_troubleshoot",
+    "difficulty": "easy",
+    "expected_source": "knowledge_chunks",
+    "expected_intent": "plan_execute",
+    "expected_scenario": "troubleshoot",
+    "expected_keywords": ["保修", "耳机", "维修"]
+  },
+  {
+    "id": 98,
+    "query": "我要退款 刚买的笔记本屏幕有坏点",
+    "type": "ticket",
+    "difficulty": "easy",
+    "expected_source": "knowledge_chunks",
+    "expected_intent": "ticket",
+    "expected_keywords": ["退款", "坏点", "退货"]
+  },
+  {
+    "id": 99,
+    "query": "你们卖的什么破电脑 才买三天就死机 退货退货！",
+    "type": "ticket_angry",
+    "difficulty": "easy",
+    "expected_source": "knowledge_chunks",
+    "expected_intent": "ticket",
+    "expected_keywords": ["退货", "退款", "质量问题"]
+  },
+  {
+    "id": 100,
+    "query": "我买的手机颜色发错了 我要换 你们客服电话打不通 气死",
+    "type": "ticket_angry",
+    "difficulty": "easy",
+    "expected_source": "knowledge_chunks",
+    "expected_intent": "ticket",
+    "expected_keywords": ["换货", "发错", "客服"]
+  },
+  {
+    "id": 101,
+    "query": "等了快一个礼拜了还没发货 你们效率也太低了吧 到底啥时候发",
+    "type": "agent",
+    "difficulty": "easy",
+    "expected_source": "knowledge_chunks",
+    "expected_intent": "agent",
+    "expected_keywords": ["订单", "发货", "物流"]
+  },
+  {
+    "id": 102,
+    "query": "订单号13876543 帮我查下到哪了 都三天了",
+    "type": "agent",
+    "difficulty": "easy",
+    "expected_source": "knowledge_chunks",
+    "expected_intent": "agent",
+    "expected_keywords": ["订单", "物流", "快递"]
+  },
+  {
+    "id": 103,
+    "query": "这个RTX 4070有货吗 什么时候能发",
+    "type": "agent",
+    "difficulty": "easy",
+    "expected_source": "component_products",
+    "expected_intent": "agent",
+    "expected_keywords": ["库存", "RTX", "4070"]
+  },
+  {
+    "id": 104,
+    "query": "退款怎么还没到账 都5个工作日了 你们是不是在拖",
+    "type": "ticket_angry",
+    "difficulty": "medium",
+    "expected_source": "knowledge_chunks",
+    "expected_intent": "ticket",
+    "expected_keywords": ["退款", "到账", "工作日"]
+  },
+  {
+    "id": 105,
+    "query": "我能把旧手机抵掉换新手机吗 小米的 屏幕有一条裂痕",
+    "type": "rag",
+    "difficulty": "medium",
+    "expected_source": "knowledge_chunks",
+    "expected_intent": "rag",
+    "expected_keywords": ["以旧换新", "手机", "屏幕"]
+  },
+  {
+    "id": 106,
+    "query": "买了两台笔记本能一起以旧换新吗 家里还有个旧的iPad",
+    "type": "rag",
+    "difficulty": "hard",
+    "expected_source": "knowledge_chunks",
+    "expected_intent": "rag",
+    "expected_keywords": ["以旧换新", "多台", "抵扣"]
+  },
+  {
+    "id": 107,
+    "query": "物流显示已签收但我没收到啊 怎么回事",
+    "type": "ticket",
+    "difficulty": "medium",
+    "expected_source": "knowledge_chunks",
+    "expected_intent": "ticket",
+    "expected_keywords": ["物流", "签收", "丢件"]
+  },
+  {
+    "id": 108,
+    "query": "我刚收到的显卡盒子被压扁了 金手指也有划痕 这不会是二手的吧",
+    "type": "ticket",
+    "difficulty": "medium",
+    "expected_source": "knowledge_chunks",
+    "expected_intent": "ticket",
+    "expected_keywords": ["二手", "退货", "显卡", "开箱"]
+  },
+  {
+    "id": 109,
+    "query": "我昨天刚激活系统 今天发现比官网降了500 能保价吗",
+    "type": "rag",
+    "difficulty": "medium",
+    "expected_source": "knowledge_chunks",
+    "expected_intent": "rag",
+    "expected_keywords": ["保价", "差价", "降价"]
+  },
+  {
+    "id": 110,
+    "query": "不想要了 就是想退 别跟我废话 快点处理",
+    "type": "ticket_angry",
+    "difficulty": "hard",
+    "expected_source": "knowledge_chunks",
+    "expected_intent": "ticket",
+    "expected_keywords": ["退款", "退货", "无理由"]
+  },
+  {
+    "id": 111,
+    "query": "macbook air和pro差在哪 我就平时上上网做做ppt",
+    "type": "comparison",
+    "difficulty": "easy",
+    "expected_source": "laptop_products",
+    "expected_intent": "rag",
+    "expected_keywords": ["MacBook", "Air", "Pro", "轻薄"]
+  },
+  {
+    "id": 112,
+    "query": "我电脑蓝牙连不上耳机 搜不到设备 驱动也重装了 怎么办",
+    "type": "plan_troubleshoot",
+    "difficulty": "medium",
+    "expected_source": "knowledge_chunks",
+    "expected_intent": "plan_execute",
+    "expected_scenario": "troubleshoot",
+    "expected_keywords": ["蓝牙", "耳机", "驱动", "连接"]
+  },
+  {
+    "id": 113,
+    "query": "手机充电口松了 要特定角度才能充上电 修一下多少钱",
+    "type": "plan_troubleshoot",
+    "difficulty": "easy",
+    "expected_source": "knowledge_chunks",
+    "expected_intent": "plan_execute",
+    "expected_scenario": "troubleshoot",
+    "expected_keywords": ["充电", "维修", "接口"]
+  },
+  {
+    "id": 114,
+    "query": "4000以内 办公用 不玩游戏 稳定安静就行 帮我配一下",
+    "type": "plan_build_pc",
+    "difficulty": "easy",
+    "expected_source": "component_products",
+    "expected_intent": "plan_execute",
+    "expected_scenario": "build_pc",
+    "expected_keywords": ["CPU", "主板", "内存", "固态"]
+  },
+  {
+    "id": 115,
+    "query": "想学AI画图 stable diffusion 求一套配置 预算9000",
+    "type": "plan_build_pc",
+    "difficulty": "hard",
+    "expected_source": "component_products",
+    "expected_intent": "plan_execute",
+    "expected_scenario": "build_pc",
+    "expected_keywords": ["RTX", "显存", "显卡", "内存"]
+  },
+  {
+    "id": 116,
+    "query": "我要投诉 你们的配送员态度极其恶劣 直接把包裹扔快递柜就走了",
+    "type": "ticket_angry",
+    "difficulty": "medium",
+    "expected_source": "knowledge_chunks",
+    "expected_intent": "ticket",
+    "expected_keywords": ["投诉", "配送", "快递"]
+  },
+  {
+    "id": 117,
+    "query": "同一型号 京东上比你们便宜300 能退差价吗",
+    "type": "rag",
+    "difficulty": "easy",
+    "expected_source": "knowledge_chunks",
+    "expected_intent": "rag",
+    "expected_keywords": ["保价", "差价", "价格"]
+  },
+  {
+    "id": 118,
+    "query": "我买的手机到手发现包装就开了 怀疑是别人退货的 我要换个全新的",
+    "type": "ticket",
+    "difficulty": "medium",
+    "expected_source": "knowledge_chunks",
+    "expected_intent": "ticket",
+    "expected_keywords": ["退货", "换货", "换新"]
+  },
+  {
+    "id": 119,
+    "query": "能帮我跟踪一下退款进度吗 单号TK20260715001",
+    "type": "agent",
+    "difficulty": "easy",
+    "expected_source": "knowledge_chunks",
+    "expected_intent": "agent",
+    "expected_keywords": ["退款", "工单", "进度"]
+  },
+  {
+    "id": 120,
+    "query": "家里小孩把手机屏幕摔碎了 换屏要多少钱 是小米15",
+    "type": "plan_troubleshoot",
+    "difficulty": "medium",
+    "expected_source": "knowledge_chunks",
+    "expected_intent": "plan_execute",
+    "expected_scenario": "troubleshoot",
+    "expected_keywords": ["碎屏", "维修", "换屏", "小米"]
+  },
+  {
+    "id": 121,
+    "query": "amd的7000系和9000系选哪个 差价有点大 玩游戏用",
+    "type": "comparison",
+    "difficulty": "medium",
+    "expected_source": "component_products",
+    "expected_intent": "rag",
+    "expected_keywords": ["AMD", "锐龙", "CPU", "游戏"]
+  },
+  {
+    "id": 122,
+    "query": "有没有便宜的3060整机 或者二手的也行 就玩玩网游",
+    "type": "plan_build_pc",
+    "difficulty": "easy",
+    "expected_source": "component_products",
+    "expected_intent": "plan_execute",
+    "expected_scenario": "build_pc",
+    "expected_keywords": ["RTX", "3060", "显卡"]
+  },
+  {
+    "id": 123,
+    "query": "啥也不懂 就想买个打游戏的电脑 5000-6000 台式还是笔记本好",
+    "type": "recommendation",
+    "difficulty": "medium",
+    "expected_source": "knowledge_chunks",
+    "expected_intent": "rag",
+    "expected_keywords": ["台式", "笔记本", "游戏", "选购"]
+  },
+  {
+    "id": 124,
+    "query": "维修要发票吗 我找不到了 才买两个月 有电子支付记录",
+    "type": "rag",
+    "difficulty": "easy",
+    "expected_source": "knowledge_chunks",
+    "expected_intent": "rag",
+    "expected_keywords": ["保修", "发票", "购买记录"]
+  },
+  {
+    "id": 125,
+    "query": "你们这个平台靠谱吗 不会是翻新机吧 网上搜你们都搜不到几个评价",
+    "type": "ticket_angry",
+    "difficulty": "hard",
+    "expected_source": "knowledge_chunks",
+    "expected_intent": "ticket",
+    "expected_keywords": ["正品", "翻新", "售后"]
+  },
+  {
+    "id": 126,
+    "query": "我想买两台 有企业优惠吗 用途是公司设计部用",
+    "type": "rag",
+    "difficulty": "medium",
+    "expected_source": "knowledge_chunks",
+    "expected_intent": "rag",
+    "expected_keywords": ["企业", "批量", "优惠"]
+  },
+  {
+    "id": 127,
+    "query": "退货地址是什么 我自己寄回去行不行",
+    "type": "rag",
+    "difficulty": "easy",
+    "expected_source": "knowledge_chunks",
+    "expected_intent": "rag",
+    "expected_keywords": ["退货", "地址", "退货流程"]
+  },
+  {
+    "id": 128,
+    "query": "我这配置玩黑神话能开什么画质 i5 13400 + RTX 4060 + 16G",
+    "type": "recommendation",
+    "difficulty": "medium",
+    "expected_source": "knowledge_chunks",
+    "expected_intent": "rag",
+    "expected_keywords": ["RTX", "4060", "游戏", "画质"]
+  },
+  {
+    "id": 129,
+    "query": "内存条插两根和一根有什么区别 8Gx2还是16G一根好",
+    "type": "recommendation",
+    "difficulty": "easy",
+    "expected_source": "knowledge_chunks",
+    "expected_intent": "rag",
+    "expected_keywords": ["双通道", "内存", "性能"]
+  },
+  {
+    "id": 130,
+    "query": "想换个2K高刷显示器 顺便显卡也想升级 老的1050ti带不动2K 预算5000",
+    "type": "recommendation",
+    "difficulty": "hard",
+    "expected_source": "component_products",
+    "expected_intent": "rag",
+    "expected_keywords": ["显示器", "2K", "RTX", "显卡"]
   }
 ]
