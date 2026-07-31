@@ -195,7 +195,7 @@ class SessionManager:
 
     async def list_sessions(self) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
-        async for key in self._redis.scan_iter(match="session:*"):
+        async for key in self._redis.scan_iter(match="session:*"):  # type: ignore[attr-defined]
             # 只取主 key，跳过 messages 子 key
             if b":messages" in key:
                 continue
