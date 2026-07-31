@@ -203,6 +203,16 @@ class SessionManager:
         ctx.messages = _trim_history(ctx.messages, max_tokens=settings.history_max_tokens)
         ctx.last_active = time.time()
 
+    async def add_turn_simple(self, session_id: str, query: str, answer: str) -> None:
+        """plan_execute 等不回 LoopResult 的场景，只追加 user+assistant 两条。"""
+        ctx = self._sessions.get(session_id)
+        if ctx is None:
+            return
+        ctx.messages.append({"role": "user", "content": query})
+        ctx.messages.append({"role": "assistant", "content": answer})
+        ctx.messages = _trim_history(ctx.messages, max_tokens=settings.history_max_tokens)
+        ctx.last_active = time.time()
+
     async def resolve(self, query: str, session_id: str | None = None) -> str:
         """对当前 query 做指代消解。"""
 

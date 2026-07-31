@@ -54,7 +54,7 @@ class Settings(BaseSettings):
 
     # ---- PLAN and EXECUTE 参数 ----
     max_iterations: int = Field(default=3, ge=1, le=20, description="judge失败重试的最大次数")
-    history_max_tokens: int = Field(default=30000, ge=1000, le=60000, description="对话历史截断阈值(token)")
+    history_max_tokens: int = Field(default=100000, ge=1000, le=500000, description="对话历史截断阈值(token)")
 
     class Config:
         # 从项目根目录的 .env 文件读取（环境变量优先级更高）

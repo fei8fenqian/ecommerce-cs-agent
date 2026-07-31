@@ -65,6 +65,8 @@ async def chat(chat_req: ChatRequest, request: Request):
             history=ctx.messages,
             scenario=intent.scenario,
         )
+        # plan_execute 不走 AgentLoop，手动记录到 session
+        await session.add_turn_simple(ctx.session_id, chat_req.query, plan_state.get("answer", ""))
         return ChatResponse(
             answer=plan_state.get("answer", ""),
             session_id=ctx.session_id,
