@@ -155,6 +155,7 @@ class PlanExecuteState(TypedDict, total=False):
 
     # ---- 最终输出 ----
     answer: str  # formatter 生成的用户可读回答
+    total_tokens: int  # 所有 LLM 调用的 token 消耗合计
 
 
 # =============================================================================
@@ -252,6 +253,8 @@ class PlanAndExecuteAgent:
         else:
             prompt = PLANNER_TROUBLESHOOT_PROMPT.format(user_query=query, tool_schema=tool_schema)
 
+        total_tokens: int = state.get("total_tokens", 0)
+
         # 最多 2 次尝试：LLM 可能输出格式错误
         for _ in range(2):
             response = await self.llm.chat(
@@ -259,12 +262,13 @@ class PlanAndExecuteAgent:
                 temperature=settings.temperature,
                 max_tokens=settings.max_tokens,
             )
+            total_tokens += response.usage.total_tokens
             plan: list[dict] | None = self._extract_json(response.content or "")
             if plan and self._validate_plan(plan):
-                return {"plan": plan}
+                return {"plan": plan, "total_tokens": total_tokens}
 
         # 两次都失败 → 空 plan，executor 会跳过
-        return {"prompt": prompt, "plan": []}
+        return {"prompt": prompt, "plan": [], "total_tokens": total_tokens}
 
     # =========================================================================
     # executor 节点 — 按拓扑顺序执行 plan 里的每一步
@@ -490,18 +494,21 @@ class PlanAndExecuteAgent:
 
 请更换排查思路（尝试不同关键词、不同知识库），重新输出 JSON 数组。"""
 
+        total_tokens = state.get("total_tokens", 0)
+
         for _ in range(2):
             response = await self.llm.chat(
                 [{"role": "user", "content": re_prompt}],
                 temperature=settings.temperature,
                 max_tokens=settings.max_tokens,
             )
+            total_tokens += response.usage.total_tokens
             new_plan: list[dict] | None = self._extract_json(response.content or "")
             if new_plan and self._validate_plan(new_plan):
-                return {"plan": new_plan, "iteration": iteration + 1}
+                return {"plan": new_plan, "iteration": iteration + 1, "total_tokens": total_tokens}
 
         # LLM 实在是生成不了合法 plan，放弃重试，让 formatter 用现有结果输出
-        return {"judge_passed": True, "iteration": iteration + 1}
+        return {"judge_passed": True, "iteration": iteration + 1, "total_tokens": total_tokens}
 
     # =========================================================================
     # formatter 节点 — 将执行结果格式化为用户可读回答

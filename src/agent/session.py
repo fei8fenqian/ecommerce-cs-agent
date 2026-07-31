@@ -15,9 +15,14 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+import tiktoken
+
 from .loop import LoopResult
 
 logger = logging.getLogger(__name__)
+
+# DeepSeek tokenizer 和 GPT-4 的 cl100k_base 接近，用作截断估算
+_ENCODER = tiktoken.get_encoding("cl100k_base")
 
 # 指代词 → entity key 映射
 PRONOUN_MAP: dict[str, str] = {
@@ -61,6 +66,68 @@ class SessionContext:
 
 
 # SessionManager
+def _trim_history(
+    messages: list[dict[str, Any]],
+    max_tokens: int = 8000,
+    keep_head_turns: int = 1,
+) -> list[dict[str, Any]]:
+    """按 token 截断对话历史，不拆散完整轮次。
+
+    1. 用 tiktoken 算每条消息的 token 数
+    2. 按 role=="user" 把 messages 切分成轮次列表
+    3. 从最后一轮往前累加 token，超出 max_tokens 停
+    4. 保留 开头 keep_head_turns 轮 + 最近能装下的轮次
+    5. 没超出则不裁
+    """
+    if not messages:
+        return messages
+
+    # ---- 切分轮次：每个 user 消息是一轮起点 ----
+    turns: list[list[dict[str, Any]]] = []
+    current_turn: list[dict[str, Any]] = []
+    for msg in messages:
+        if msg.get("role") == "user" and current_turn:
+            turns.append(current_turn)
+            current_turn = []
+        current_turn.append(msg)
+    if current_turn:
+        turns.append(current_turn)
+
+    if len(turns) <= keep_head_turns + 1:
+        return messages  # 轮次还不多，不裁
+
+    # ---- 计算每轮 token 数 ----
+    def _count_tokens(msgs: list[dict[str, Any]]) -> int:
+        total = 0
+        for m in msgs:
+            total += len(_ENCODER.encode(json.dumps(m, ensure_ascii=False)))
+        return total
+
+    head = turns[:keep_head_turns]
+    tail_candidates = turns[keep_head_turns:]
+    head_tokens = sum(_count_tokens(t) for t in head)
+
+    # ---- 倒序累计，装得下的保留 ----
+    kept_tail: list[list[dict[str, Any]]] = []
+    tail_tokens = 0
+    for turn in reversed(tail_candidates):
+        t = _count_tokens(turn)
+        if head_tokens + tail_tokens + t > max_tokens:
+            break
+        kept_tail.insert(0, turn)
+        tail_tokens += t
+
+    if not kept_tail:
+        # 连一轮都装不下 → 至少保留最后一轮（兜底）
+        kept_tail = [tail_candidates[-1]]
+
+    result = [m for t in head for m in t] + [m for t in kept_tail for m in t]
+    trimmed = len(messages) - len(result)
+    if trimmed > 0:
+        logger.info("trimmed %d messages (%d tokens), kept %d turns", trimmed, head_tokens + tail_tokens, len(head) + len(kept_tail))
+    return result
+
+
 class SessionManager:
     """管理所有会话的创建、更新、过期清理。Phase 4 用内存 dict，后续换
     Redis。"""
@@ -132,6 +199,7 @@ class SessionManager:
         if result.last_entities:
             ctx.last_entities.update(result.last_entities)
 
+        ctx.messages = _trim_history(ctx.messages)
         ctx.last_active = time.time()
 
     async def resolve(self, query: str, session_id: str | None = None) -> str:

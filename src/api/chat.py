@@ -69,7 +69,7 @@ async def chat(chat_req: ChatRequest, request: Request):
             answer=plan_state.get("answer", ""),
             session_id=ctx.session_id,
             total_steps=len(plan_state.get("plan", [])),
-            total_tokens=0,  # TODO: token 统计从 state 里拿
+            total_tokens=plan_state.get("total_tokens", 0),
         )
     elif intent.target == "rag":
         docs = hybrid_search(resolved_query, table=intent.table)
@@ -118,7 +118,7 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
         docs = hybrid_search(resolve_query, table=intent.table)
         context = _build_context(docs)
 
-    stream_res = {"answer": "", "total_steps": 0}
+    stream_res = {"answer": "", "total_steps": 0, "total_tokens": 0}
     last_entities: dict[str, str] = {}
     start_t = time.perf_counter()
 
@@ -140,6 +140,7 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                     data = chunk.get("data", {})
                     stream_res["answer"] = data.get("answer", "")
                     stream_res["total_steps"] = len(data.get("plan", []))
+                    stream_res["total_tokens"] = data.get("total_tokens", 0)
 
             await session.add_turn(
                 session_id,
