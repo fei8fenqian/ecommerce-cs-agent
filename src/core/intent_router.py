@@ -60,55 +60,62 @@ class IntentRouter:
         messages: list[dict[str, Any]] = [{"role": "system", "content": self.system_prompt}]
         messages.append({"role": "user", "content": query})
 
-        try:
-            response: LLMResponse = await self.llm.chat(messages, temperature=0.0, max_tokens=256)
+        # 最多 3 次重试（LLM 偶尔返回空内容或非法 JSON）
+        for attempt in range(3):
+            try:
+                response: LLMResponse = await self.llm.chat(
+                    messages, temperature=0.0, max_tokens=256,
+                )
 
-            answer: str = response.content or ""
+                answer: str = response.content or ""
+                if not answer:
+                    if attempt < 2:
+                        continue
+                    raise ValueError("LLM 3次返回空内容")
 
-            # 提取 LLM 返回的 JSON（可能被 markdown 包裹）
-            answer = answer.strip()
-            if answer.startswith("```"):
-                # 去掉 ```json 和结尾 ```
-                lines = answer.split("\n")
-                answer = "\n".join(lines[1:-1]) if len(lines) >= 3 else answer
+                # 提取 LLM 返回的 JSON（可能被 markdown 包裹）
+                answer = answer.strip()
+                if answer.startswith("```"):
+                    lines = answer.split("\n")
+                    answer = "\n".join(lines[1:-1]) if len(lines) >= 3 else answer
 
-            result = json.loads(answer)
-            target = result.get("target", "rag").strip().lower()
-            table = result.get("table", "").strip()
-            scenario = result.get("scenario", "").strip()
-            confidence = float(result.get("confidence", 0.0))
+                result = json.loads(answer)
+                target = result.get("target", "rag").strip().lower()
+                table = result.get("table", "").strip()
+                scenario = result.get("scenario", "").strip()
+                confidence = float(result.get("confidence", 0.0))
 
-            # 校验 target
-            if target not in ("rag", "agent", "ticket", "plan_execute"):
-                target = "rag"
+                # 校验 target
+                if target not in ("rag", "agent", "ticket", "plan_execute"):
+                    target = "rag"
 
-            # 校验 table：仅 rag 需要
-            if target != "rag":
-                table = ""
-            elif table not in ("laptop_products", "phone_products", "knowledge_chunks"):
-                table = "knowledge_chunks"
+                # 校验 table：仅 rag 需要
+                if target != "rag":
+                    table = ""
+                elif table not in ("laptop_products", "phone_products", "knowledge_chunks"):
+                    table = "knowledge_chunks"
 
-            # 校验 scenario：仅 plan_execute 需要
-            if target != "plan_execute":
-                scenario = ""
-            elif scenario not in ("build_pc", "troubleshoot"):
-                scenario = "troubleshoot"
+                # 校验 scenario：仅 plan_execute 需要
+                if target != "plan_execute":
+                    scenario = ""
+                elif scenario not in ("build_pc", "troubleshoot"):
+                    scenario = "troubleshoot"
 
-            # 低置信度 → 降级走 RAG
-            if confidence < 0.5:
-                logger.info("意图分类置信度低 (%.2f)，降级为 RAG", confidence)
-                target = "rag"
-                table = "knowledge_chunks"
-                scenario = ""
+                # 低置信度 → 降级走 RAG
+                if confidence < 0.5:
+                    logger.info("意图分类置信度低 (%.2f)，降级为 RAG", confidence)
+                    target = "rag"
+                    table = "knowledge_chunks"
+                    scenario = ""
 
-            return Intent(
-                target=target,
-                table=table,
-                scenario=scenario,
-                query=query,
-                confidence=confidence,
-            )
+                return Intent(
+                    target=target, table=table, scenario=scenario,
+                    query=query, confidence=confidence,
+                )
 
-        except (json.JSONDecodeError, ValueError, KeyError) as e:
-            logger.warning("意图分类解析失败: %s，降级为 RAG", str(e))
-            return Intent(target="rag", table="knowledge_chunks", query=query, confidence=0.0)
+            except (json.JSONDecodeError, ValueError, KeyError) as e:
+                if attempt < 2:
+                    continue
+                logger.warning("意图分类 3 次重试均失败: %s，降级为 RAG", str(e))
+
+        return Intent(target="rag", table="knowledge_chunks", query=query, confidence=0.0)
