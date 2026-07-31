@@ -17,6 +17,7 @@ from typing import Any
 
 import tiktoken
 
+from config import settings
 from .loop import LoopResult
 
 logger = logging.getLogger(__name__)
@@ -199,7 +200,7 @@ class SessionManager:
         if result.last_entities:
             ctx.last_entities.update(result.last_entities)
 
-        ctx.messages = _trim_history(ctx.messages)
+        ctx.messages = _trim_history(ctx.messages, max_tokens=settings.history_max_tokens)
         ctx.last_active = time.time()
 
     async def resolve(self, query: str, session_id: str | None = None) -> str:
