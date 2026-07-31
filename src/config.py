@@ -56,6 +56,10 @@ class Settings(BaseSettings):
     max_iterations: int = Field(default=3, ge=1, le=20, description="judge失败重试的最大次数")
     history_max_tokens: int = Field(default=100000, ge=1000, le=500000, description="对话历史截断阈值(token)")
 
+    # ---- Redis ----
+    redis_url: str = "redis://localhost:6379/0"
+    session_ttl: int = Field(default=86400, ge=3600, le=2592000, description="会话过期时间(秒)，默认24小时")
+
     class Config:
         # 从项目根目录的 .env 文件读取（环境变量优先级更高）
         env_file = str(Path(__file__).parent.parent / ".env")
