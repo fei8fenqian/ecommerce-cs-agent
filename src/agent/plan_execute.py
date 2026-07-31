@@ -18,7 +18,7 @@ Plan-and-Execute Agent — 基于 LangGraph StateGraph 的多步规划执行引�
 import asyncio
 import inspect
 import json
-from typing import Any, TypedDict
+from typing import Any, AsyncGenerator, TypedDict
 
 from langgraph.graph import StateGraph
 
@@ -616,6 +616,31 @@ class PlanAndExecuteAgent:
         )
         final_state: dict = await self._graph.ainvoke(initial_state)
         return final_state
+
+    async def run_stream(
+        self,
+        query: str,
+        *,
+        history: list[dict[str, Any]] | None = None,
+        scenario: str = "build_pc",
+    ) -> AsyncGenerator[dict, None]:
+        """SSE 流式执行 Plan-and-Execute"""
+        initial_state = PlanExecuteState(
+            messages=history or [],
+            query=query,
+            scenario=scenario,
+            max_iterations=self.max_iterations,
+        )
+
+        full_state = None
+
+        async for chunk in self._graph.astream(initial_state, stream_mode=["updates", "values"]):
+            # chunk 是 tuple: ({"planner": {"plan": [...]}}, {*完整state*})
+            node_delta, full_state = chunk
+            node_name = list(node_delta.keys())[0]
+            yield {"event": "node_complete", "name": node_name, "data": node_delta}
+
+        yield {"event": "done", "data": full_state}
 
     # =========================================================================
     # JSON 解析 — 从 LLM 返回中提取 JSON 数组

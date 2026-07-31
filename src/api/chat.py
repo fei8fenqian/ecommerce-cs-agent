@@ -110,15 +110,26 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
     start_t = time.perf_counter()
 
     async def generate():
+        # 先推一个 start 事件给前端，带 session_id
         yield f"data: {json.dumps({'event': 'start', 'session_id': session_id}, ensure_ascii=False)}\n\n"
 
+        # 声明要改外层变量
         nonlocal last_entities
+
+        # 消费 agent 的消息流，逐个处理事件
         async for event in agent.run_stream(
             resolve_query,
             context=context,
             history=history,
             system_prompt_extra=extra_prompt,
         ):
+            # event 可能的值：
+            #   {"event": "thinking", ...}
+            #   {"event": "tool_call", "name": "search_product", "args": {...}}
+            #   {"event": "tool_result", ...}
+            #   {"event": "token", "content": "..."}
+            #   {"event": "error", "message": "..."}
+            #   {"event": "done", "answer": "...", ...}
             if event["event"] == "tool_call":
                 args = event.get("args", {})
                 if "product_name" in args:
@@ -130,6 +141,7 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                 stream_res["answer"] = event.get("answer", "")
                 stream_res["total_steps"] = event.get("total_steps", 0)
 
+            # 把事件序列化成 SSE 格式推给前端
             yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
         await session.add_turn(
