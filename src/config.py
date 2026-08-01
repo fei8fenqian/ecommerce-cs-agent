@@ -34,7 +34,7 @@ class Settings(BaseSettings):
         description="bge-large-zh-v1.5 输出 1024 维，换模型需重建索引",
     )
 
-    # ---- LLM API（Phase 3 才用，先占位）----
+    # ---- LLM API ----
     llm_api_key: SecretStr = SecretStr("")
     llm_base_url: str = "https://api.deepseek.com/v1"
     llm_model: str = "deepseek-chat"

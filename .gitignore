@@ -18,3 +18,18 @@ src/3c_cs_agent.egg-info/
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
+
+# 设计草稿
+PLAN.md
+PLAN_V*.md
+
+# 离线脚本（非 Agent 运行所需）
+scripts/crawl/
+scripts/clean/
+scripts/generate/
+scripts/collect_params.py
+scripts/generate_descriptions.py
+scripts/verify_knowledge.py
+scripts/verify_retrieval.py
+scripts/eval.py
+scripts/db.py

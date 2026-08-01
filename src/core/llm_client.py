@@ -36,11 +36,7 @@ class TokenUsage:
 
 @dataclass
 class ToolCall:
-    """LLM 请求调用工具。
-
-    Phase 3 Agent Loop 里，LLM 返回这个而不是文本时，
-    Loop 就知道该调工具了。
-    """
+    """LLM 返回的工具调用请求。"""
 
     id: str  # 工具调用的唯一 ID
     name: str  # 工具名

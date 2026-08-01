@@ -791,9 +791,6 @@ def _build_component_map(
     3. 取 ToolResult.data.results[0].normalized（第一个/最佳匹配）
     4. 以 component 名为 key 放入返回 dict
     5. 搜索失败/无结果的品类跳过（不存在 dict 里）
-
-    Hint: ToolResult.data 结构是 {"count": N, "results": [{"normalized": {...}},
-    ...]}
     """
     component_map: dict[str, dict] = {}
     for step in plan:
@@ -822,7 +819,7 @@ def _check_socket_match(comp: dict[str, dict]) -> tuple[bool, str]:
 
         返回: (True, "") 或 (False, "CPU 插槽 AM4 与主板插槽 LGA1700 不兼容")
 
-        Hint:
+        检查逻辑：
         - 需要 cpu 和 motherboard 两个 key 都存在才检查
         - 只要有一个不存在 → 跳过，返回 True（不误判）
         - 比对 comp["cpu"].get("socket") 和 comp["motherboard"].get("socket")

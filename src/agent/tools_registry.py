@@ -1,11 +1,10 @@
 """
 src/agent/tools_registry.py — 工具注册中心
 
-Agent 的所有"手"都在这里：注册、发现、执行。
-Phase 3 写 Agent Loop 之前必须先有这个文件。
+Agent 的所有工具都在这里：注册、发现、执行。
 
 积木：
-  ToolResult  — 工具跑完的结果（成功/失败）
+  ToolResult  — 工具执行结果（成功/失败）
   BaseTool    — 工具抽象基类（ABC），新增工具只需写子类
   ToolRegistry — 工具箱（注册/查找/执行）
 
@@ -76,7 +75,7 @@ class ToolResult:
 # BaseTool —— 工具抽象基类
 # =============================================================================
 # 所有工具必须继承 BaseTool，实现 name/description/parameters/execute。
-# 面试点：面向接口编程，新增工具只需加一个子类，不改 Registry 和 Loop。
+# 新增工具只需加一个子类，不改 Registry 和 Loop。
 # 以后接 MCP：写 MCPTool(BaseTool) 包装远程工具，注册到同一个 Registry。
 # =============================================================================
 class BaseTool(ABC):
@@ -188,7 +187,7 @@ class ToolRegistry:
         """
         生成 OpenAI function calling 的 tools 参数列表。
 
-        Phase 3 里调 LLM 时直接：
+        调用方式：
           response = client.chat.completions.create(
               model="deepseek-chat",
               messages=messages,

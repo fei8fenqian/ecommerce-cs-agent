@@ -4,7 +4,7 @@
 1. 对话历史管理 — 每轮 messages 存入 SessionContext，下一轮传给 AgentLoop
 2. 指代消解 — 规则替换 "它/这个/那台" 为上一轮识别的实体名
 
-企业场景用规则做指代消解，比 LLM 快且确定。
+规则做指代消解，比 LLM 快且确定。
 存储后端：Redis（带 TTL 自动过期），async 非阻塞。
 """
 
@@ -19,6 +19,7 @@ import redis.asyncio as redis
 import tiktoken
 
 from config import settings
+
 from .loop import LoopResult
 
 logger = logging.getLogger(__name__)
@@ -26,9 +27,17 @@ logger = logging.getLogger(__name__)
 _ENCODER = tiktoken.get_encoding("cl100k_base")
 
 PRONOUN_MAP: dict[str, str] = {
-    "它": "product", "他": "product", "这个": "product", "这台": "product",
-    "那台": "product", "这款": "product", "该商品": "product", "该产品": "product",
-    "这单": "order", "那个订单": "order", "该订单": "order",
+    "它": "product",
+    "他": "product",
+    "这个": "product",
+    "这台": "product",
+    "那台": "product",
+    "这款": "product",
+    "该商品": "product",
+    "该产品": "product",
+    "这单": "order",
+    "那个订单": "order",
+    "该订单": "order",
 }
 
 
@@ -145,22 +154,31 @@ class SessionManager:
 
         for step in result.steps:
             if step.tool_calls:
-                ctx.messages.append({
-                    "role": "assistant",
-                    "content": step.thought,
-                    "tool_calls": [{
-                        "id": tc.id, "type": "function",
-                        "function": {
-                            "name": tc.name,
-                            "arguments": json.dumps(tc.arguments, ensure_ascii=False),
-                        },
-                    } for tc in step.tool_calls],
-                })
+                ctx.messages.append(
+                    {
+                        "role": "assistant",
+                        "content": step.thought,
+                        "tool_calls": [
+                            {
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.name,
+                                    "arguments": json.dumps(tc.arguments, ensure_ascii=False),
+                                },
+                            }
+                            for tc in step.tool_calls
+                        ],
+                    }
+                )
                 for tc in step.tool_calls:
-                    ctx.messages.append({
-                        "role": "tool", "tool_call_id": tc.id,
-                        "content": step.observation or "",
-                    })
+                    ctx.messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": step.observation or "",
+                        }
+                    )
 
         ctx.messages.append({"role": "assistant", "content": result.answer})
 
@@ -202,13 +220,15 @@ class SessionManager:
             sid = key.decode().split(":", 1)[1]
             data = await self._redis.hgetall(key)
             msg_count = await self._redis.llen(self._key(sid, "messages"))
-            result.append({
-                "session_id": sid,
-                "title": _decode(data.get(b"title")),
-                "created_at": float(data.get(b"created_at", 0)),
-                "last_active": float(data.get(b"last_active", 0)),
-                "message_count": msg_count,
-            })
+            result.append(
+                {
+                    "session_id": sid,
+                    "title": _decode(data.get(b"title")),
+                    "created_at": float(data.get(b"created_at", 0)),
+                    "last_active": float(data.get(b"last_active", 0)),
+                    "message_count": msg_count,
+                }
+            )
         result.sort(key=lambda s: s["last_active"], reverse=True)
         return result
 
@@ -241,12 +261,15 @@ class SessionManager:
     async def _save(self, session_id: str, ctx: SessionContext) -> None:
         key = self._key(session_id)
         pipe = self._redis.pipeline()
-        pipe.hset(key, mapping={
-            "title": ctx.title,
-            "created_at": str(ctx.created_at),
-            "last_active": str(ctx.last_active),
-            "last_entities": json.dumps(ctx.last_entities, ensure_ascii=False),
-        })
+        pipe.hset(
+            key,
+            mapping={
+                "title": ctx.title,
+                "created_at": str(ctx.created_at),
+                "last_active": str(ctx.last_active),
+                "last_entities": json.dumps(ctx.last_entities, ensure_ascii=False),
+            },
+        )
         pipe.expire(key, self._ttl)
         msg_key = self._key(session_id, "messages")
         pipe.delete(msg_key)
