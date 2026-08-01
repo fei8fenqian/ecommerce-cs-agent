@@ -28,6 +28,7 @@ SYSTEM_PROMPT = """你是一个意图分类器。分析用户问题，返回 JSO
 table 规则（仅 rag 有效，其他 target 填空字符串即可）：
 - 笔记本参数/选购 → laptop_products
 - 手机参数/选购 → phone_products
+- 配件/组件参数（CPU/GPU/主板/内存等） → component_products
 - 政策/指南/使用说明 → knowledge_chunks
 
 scenario 规则（仅 plan_execute 有效，其他 target 填空字符串即可）：
@@ -64,7 +65,9 @@ class IntentRouter:
         for attempt in range(3):
             try:
                 response: LLMResponse = await self.llm.chat(
-                    messages, temperature=0.0, max_tokens=256,
+                    messages,
+                    temperature=0.0,
+                    max_tokens=256,
                 )
 
                 answer: str = response.content or ""
@@ -92,7 +95,7 @@ class IntentRouter:
                 # 校验 table：仅 rag 需要
                 if target != "rag":
                     table = ""
-                elif table not in ("laptop_products", "phone_products", "knowledge_chunks"):
+                elif table not in ("laptop_products", "phone_products", "component_products", "knowledge_chunks"):
                     table = "knowledge_chunks"
 
                 # 校验 scenario：仅 plan_execute 需要
@@ -109,8 +112,11 @@ class IntentRouter:
                     scenario = ""
 
                 return Intent(
-                    target=target, table=table, scenario=scenario,
-                    query=query, confidence=confidence,
+                    target=target,
+                    table=table,
+                    scenario=scenario,
+                    query=query,
+                    confidence=confidence,
                 )
 
             except (json.JSONDecodeError, ValueError, KeyError) as e:
