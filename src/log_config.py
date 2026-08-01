@@ -10,7 +10,7 @@ import json
 import logging
 import sys
 from datetime import datetime, timezone
-from logging.handlers import RotatingFileHandler
+from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
 # ContextVar：每个 asyncio Task 有独立的副本，请求间互不干扰
@@ -67,13 +67,14 @@ def setup_logging(level: int = logging.INFO) -> None:
     handler.addFilter(_RequestIDFilter())
     root.addHandler(handler)
 
-    # 文件：持久化，10MB × 5 个滚动
+    # 文件：持久化，每天一个文件，保留 30 天
     log_dir = Path("logs")
     log_dir.mkdir(exist_ok=True)
-    file_handler = RotatingFileHandler(
+    file_handler = TimedRotatingFileHandler(
         log_dir / "app.log",
-        maxBytes=10 * 1024 * 1024,  # 10MB
-        backupCount=5,
+        when="midnight",
+        interval=1,
+        backupCount=30,
         encoding="utf-8",
     )
     file_handler.setFormatter(JSONFormatter())
