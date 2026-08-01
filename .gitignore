@@ -10,3 +10,11 @@ data/products/raw/
 
 # PostgreSQL 持久化
 pgdata/
+
+# 构建产物
+src/3c_cs_agent.egg-info/
+
+# 工具缓存
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
