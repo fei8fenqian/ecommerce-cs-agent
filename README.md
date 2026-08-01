@@ -36,7 +36,7 @@
 ### 安装
 
 ```bash
-git clone https://github.com/你的用户名/ecommerce-cs-agent.git
+git clone https://github.com/fei8fenqian/ecommerce-cs-agent.git
 cd ecommerce-cs-agent
 pip install -e ".[dev]"
 cp .env.example .env  # 编辑 .env 填入 API Key 和数据库密码
