@@ -49,6 +49,7 @@ async def lifespan(app: FastAPI):
     )
     agent = AgentLoop(llm, registry, max_steps=settings.max_steps)
     session = SessionManager()
+    await session.health_check()
 
     mcp_managers: list[MCPClientManager] = []
     for url in settings.mcp_servers:
@@ -69,6 +70,7 @@ async def lifespan(app: FastAPI):
     yield
 
     # shutdown
+    await session.close()
     close_pool()
     for manager in mcp_managers:
         await manager.disconnect()

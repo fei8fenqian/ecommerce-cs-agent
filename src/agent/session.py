@@ -127,6 +127,20 @@ class SessionManager:
         self._redis = redis.from_url(redis_url or settings.redis_url)
         self._ttl = ttl or settings.session_ttl
 
+    async def health_check(self) -> bool:
+        """启动时检查 Redis 连通性。失败不阻塞启动，只打日志。"""
+        try:
+            await self._redis.ping()
+            logger.info("Redis 连接成功: %s", self._redis.connection_pool.connection_kwargs.get("host", "?"))
+            return True
+        except Exception as e:
+            logger.warning("Redis 连接失败: %s，会话功能将不可用", e)
+            return False
+
+    async def close(self) -> None:
+        """关闭 Redis 连接池。"""
+        await self._redis.aclose()
+
     # -- Public API --
 
     async def get_or_create(self, session_id: str | None = None) -> SessionContext:
