@@ -10,6 +10,8 @@ import json
 import logging
 import sys
 from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 # ContextVar：每个 asyncio Task 有独立的副本，请求间互不干扰
 _request_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="-")
@@ -59,10 +61,24 @@ def setup_logging(level: int = logging.INFO) -> None:
     for h in root.handlers[:]:
         root.removeHandler(h)
 
+    # stdout：终端实时查看
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(JSONFormatter())
     handler.addFilter(_RequestIDFilter())
     root.addHandler(handler)
+
+    # 文件：持久化，10MB × 5 个滚动
+    log_dir = Path("logs")
+    log_dir.mkdir(exist_ok=True)
+    file_handler = RotatingFileHandler(
+        log_dir / "app.log",
+        maxBytes=10 * 1024 * 1024,  # 10MB
+        backupCount=5,
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(JSONFormatter())
+    file_handler.addFilter(_RequestIDFilter())
+    root.addHandler(file_handler)
 
     # 抑制第三方库的 DEBUG 日志噪音
     for noisy in (

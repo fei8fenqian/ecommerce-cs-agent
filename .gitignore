@@ -33,3 +33,9 @@ scripts/verify_knowledge.py
 scripts/verify_retrieval.py
 scripts/eval.py
 scripts/db.py
+
+# 日志文件
+logs/
+
+# 面试准备文档
+PROJECT_WALKTHROUGH.md
