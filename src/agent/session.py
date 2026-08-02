@@ -54,12 +54,19 @@ def resolve_pronouns(query: str, entities: dict[str, str]) -> str:
 
 @dataclass
 class SessionContext:
-    session_id: str
-    title: str = ""
-    messages: list[dict[str, Any]] = field(default_factory=list)
-    last_entities: dict[str, str] = field(default_factory=dict)
-    created_at: float = 0.0
-    last_active: float = 0.0
+    """单个会话的完整上下文。
+
+    Redis 持久化策略：
+    - 元数据（除 messages 外）→ session:{id} hash
+    - messages                → session:{id}:messages list（每条 JSON 序列化）
+    """
+
+    session_id: str  # UUID4 唯一标识
+    title: str = ""  # 会话标题，取自首条 query 前 50 字符
+    messages: list[dict[str, Any]] = field(default_factory=list)  # OpenAI 格式对话历史
+    last_entities: dict[str, str] = field(default_factory=dict)  # {"product": "拯救者Y9000P", "order": "xxx"}
+    created_at: float = 0.0  # 创建时间戳
+    last_active: float = 0.0  # 最后活跃时间戳
 
 
 def _trim_history(
@@ -121,9 +128,22 @@ def _decode(val: str | bytes | None) -> str:
 
 
 class SessionManager:
-    """Redis 后端会话管理，async 非阻塞，TTL 自动过期。"""
+    """Redis 后端会话管理，async 非阻塞，TTL 自动过期。
+
+    Redis 数据结构：
+      session:{id}          → hash   (title, created_at, last_active, last_entities)
+      session:{id}:messages → list   (每条消息 JSON 序列化后 push 到尾部)
+    两个 key 都设 TTL（session_ttl），过期自动清理，无需手动 GC。
+    """
 
     def __init__(self, redis_url: str | None = None, ttl: int | None = None):
+        """
+        Args:
+            redis_url: Redis 连接串，默认取 settings.redis_url
+                      格式 redis://host:port/db
+            ttl: 会话过期时间（秒），默认取 settings.session_ttl
+                 过期后 Redis 自动删除，无需手动清理
+        """
         self._redis = redis.from_url(redis_url or settings.redis_url)
         self._ttl = ttl or settings.session_ttl
 
@@ -144,6 +164,17 @@ class SessionManager:
     # -- Public API --
 
     async def get_or_create(self, session_id: str | None = None) -> SessionContext:
+        """获取已有会话或创建新会话。
+
+        逻辑：
+        1. 传了 session_id → 查 Redis session:{id} hash
+           - 存在 → 反序列化返回（恢复历史对话）
+           - 不存在 → 当新会话处理
+        2. 没传 session_id → 生成 UUID4 新 ID，写 Redis
+
+        Returns:
+            SessionContext: 包含完整 messages 列表的会话对象
+        """
         now = time.time()
         if session_id:
             data = await self._redis.hgetall(self._key(session_id))
@@ -157,6 +188,19 @@ class SessionManager:
         return ctx
 
     async def add_turn(self, session_id: str, query: str, result: LoopResult) -> None:
+        """把一轮 Agent ReAct 对话写入 Redis。
+
+        写入顺序（和 OpenAI API 多轮格式一致）：
+        1. user message       — 用户原始 query
+        2. assistant message  — LLM 的 thought + tool_calls 数组（如果有）
+        3. tool result messages — 每个工具调用一条，role="tool"
+        4. assistant message  — 最终给用户的文本回答
+
+        写完后：
+        - 更新 last_entities（供下一轮的指代消解使用）
+        - 调 _trim_history 截断超过 max_tokens 的历史
+        - 重新设 TTL（续期）
+        """
         ctx = await self._load(session_id)
         if ctx is None:
             return
@@ -204,6 +248,11 @@ class SessionManager:
         await self._save(session_id, ctx)
 
     async def add_turn_simple(self, session_id: str, query: str, answer: str) -> None:
+        """轻量版 add_turn — 只存 user + assistant 两条消息。
+
+        用于 Plan-and-Execute 场景：中间步骤复杂（多个子任务、依赖传参），
+        展开存储会极大膨胀 messages 体积，只存最终问答对即可。
+        """
         ctx = await self._load(session_id)
         if ctx is None:
             return
@@ -218,6 +267,11 @@ class SessionManager:
         await self._save(session_id, ctx)
 
     async def resolve(self, query: str, session_id: str | None = None) -> str:
+        """对 query 做指代消解后返回。
+
+        从对话上下文中取出上一轮识别到的实体（产品名/订单号），
+        替换 query 中的指代词（"它""这单"等）。没有历史则原样返回。
+        """
         if session_id is None:
             return query
         ctx = await self._load(session_id)
@@ -226,9 +280,17 @@ class SessionManager:
         return resolve_pronouns(query=query, entities=ctx.last_entities)
 
     async def list_sessions(self) -> list[dict[str, Any]]:
+        """列出 Redis 中所有活跃会话（供中台列表页使用）。
+
+        用 SCAN 遍历 session:* 前缀的 key，跳过 :messages 子 key，
+        读取每个会话的元数据 hash，按 last_active 倒序排列。
+
+        Returns:
+            [{"session_id", "title", "created_at", "last_active", "message_count"}, ...]
+        """
         result: list[dict[str, Any]] = []
         async for key in self._redis.scan_iter(match="session:*"):  # type: ignore[attr-defined]
-            # 只取主 key，跳过 messages 子 key
+            # 只取主 hash key（session:{id}），跳过 messages list 子 key
             if b":messages" in key:
                 continue
             sid = key.decode().split(":", 1)[1]
@@ -250,16 +312,27 @@ class SessionManager:
 
     @staticmethod
     def _key(session_id: str, suffix: str = "") -> str:
+        """生成 Redis key。
+
+        - 主 key: session:{id}             → hash (元数据)
+        - 子 key: session:{id}:messages    → list (对话历史)
+        """
         key = f"session:{session_id}"
         return f"{key}:{suffix}" if suffix else key
 
     async def _load(self, session_id: str) -> SessionContext | None:
+        """从 Redis 加载单个会话。不存在返回 None。"""
         data = await self._redis.hgetall(self._key(session_id))
         if not data:
             return None
         return await self._from_hash(session_id, data)
 
     async def _from_hash(self, session_id: str, data: dict[str | bytes, str | bytes]) -> SessionContext:
+        """将 Redis 原始 bytes/str 数据反序列化为 SessionContext。
+
+        Redis hash 字段都是 bytes/str，时间戳存的是 float 的字符串表示，
+        last_entities 是 JSON 字符串，messages 从独立的 list key 读取。
+        """
         msgs_raw = await self._redis.lrange(self._key(session_id, "messages"), 0, -1)
         messages = [json.loads(m) for m in msgs_raw] if msgs_raw else []
         entities_raw = data.get(b"last_entities", b"{}")
@@ -273,6 +346,15 @@ class SessionManager:
         )
 
     async def _save(self, session_id: str, ctx: SessionContext) -> None:
+        """将 SessionContext 全量写入 Redis。
+
+        使用 pipeline 批量执行，减少网络往返：
+        1. HSET session:{id}      — 元数据 hash
+        2. EXPIRE session:{id}    — 续 TTL
+        3. DEL session:{id}:messages — 清空旧消息列表
+        4. RPUSH messages 逐条写入 — 顺序追加
+        5. EXPIRE session:{id}:messages — 续 TTL
+        """
         key = self._key(session_id)
         pipe = self._redis.pipeline()
         pipe.hset(
