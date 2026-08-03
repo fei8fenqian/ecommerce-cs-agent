@@ -151,7 +151,10 @@ class SessionManager:
         """启动时检查 Redis 连通性。失败不阻塞启动，只打日志。"""
         try:
             await self._redis.ping()
-            logger.info("Redis 连接成功: %s", self._redis.connection_pool.connection_kwargs.get("host", "?"))
+            logger.info(
+                "Redis 连接成功: %s",
+                self._redis.connection_pool.connection_kwargs.get("host", "?"),
+            )
             return True
         except Exception as e:
             logger.warning("Redis 连接失败: %s，会话功能将不可用", e)
@@ -307,6 +310,19 @@ class SessionManager:
             )
         result.sort(key=lambda s: s["last_active"], reverse=True)
         return result
+
+    async def get(self, session_id: str) -> SessionContext | None:
+        """从 Redis 加载单个会话"""
+        return await self._load(session_id)
+
+    async def delete(self, session_id: str) -> bool:
+        """删除单个会话"""
+        exists: int = await self._redis.exists(self._key(session_id))
+        if not exists:
+            return False
+        await self._redis.delete(self._key(session_id))
+        await self._redis.delete(self._key(session_id, "messages"))
+        return True
 
     # -- Internal --
 

@@ -46,7 +46,7 @@ class Intent:
     target: str = ""  # "rag" | "agent" | "ticket" | "plan_execute"
     table: str = ""  # 仅 RAG 需要
     scenario: str = ""  # 仅 plan_execute: "build_pc" | "troubleshoot"
-    query: str = ""  # 透传原始问题
+    query: str = ""
     confidence: float = 0.0
 
 

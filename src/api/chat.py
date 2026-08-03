@@ -23,7 +23,7 @@ class ChatResponse(BaseModel):
     total_tokens: int
 
 
-router = APIRouter(prefix="/api/v1", tags=["聊天"])
+chat_router = APIRouter(prefix="/api/v1", tags=["聊天"])
 
 
 def _build_context(docs: list[dict]) -> str:
@@ -39,7 +39,7 @@ def _build_context(docs: list[dict]) -> str:
 
 
 # 聊天管线
-@router.post("/chat", response_model=ChatResponse)
+@chat_router.post("/chat", response_model=ChatResponse)
 async def chat(chat_req: ChatRequest, request: Request):
     agent = request.app.state.agent
     session = request.app.state.session
@@ -95,7 +95,7 @@ async def chat(chat_req: ChatRequest, request: Request):
     )
 
 
-@router.post("/chat/stream")
+@chat_router.post("/chat/stream")
 async def chat_stream(chat_req: ChatRequest, request: Request):
     agent = request.app.state.agent
     session = request.app.state.session

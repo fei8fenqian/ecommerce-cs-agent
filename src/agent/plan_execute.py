@@ -169,7 +169,7 @@ class PlanAndExecuteAgent:
     用法:
         agent = PlanAndExecuteAgent(llm_client, tool_registry)
         result = await agent.run("5000 预算打 3A 游戏", scenario="build_pc")
-        # result["answer"] 是最终的用户可读回答
+        result["answer"] 是最终的用户可读回答
     """
 
     def __init__(

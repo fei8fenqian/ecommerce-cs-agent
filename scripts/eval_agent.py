@@ -41,6 +41,7 @@ def load_questions(intent_only: bool = False) -> list[dict]:
 
 # ── L1: 意图分类准确率 ────────────────────────────
 
+
 async def eval_intent_router(questions: list[dict], limit: int | None = None):
     """评估 IntentRouter 的分类准确率。"""
     llm = LLMClient(
@@ -79,12 +80,14 @@ async def eval_intent_router(questions: list[dict], limit: int | None = None):
         if predicted == expected:
             correct += 1
         else:
-            errors.append({
-                "query": query[:60],
-                "expected": expected,
-                "predicted": predicted,
-                "confidence": intent.confidence,
-            })
+            errors.append(
+                {
+                    "query": query[:60],
+                    "expected": expected,
+                    "predicted": predicted,
+                    "confidence": intent.confidence,
+                }
+            )
 
         marker = "✓" if predicted == expected else "✗"
         scenario_ok = ""
@@ -93,7 +96,7 @@ async def eval_intent_router(questions: list[dict], limit: int | None = None):
             if exp_scenario and intent.scenario != exp_scenario:
                 scenario_ok = f" [scenario: got={intent.scenario} want={exp_scenario}]"
 
-        print(f"  [{idx+1:3d}] {marker} {query[:55]:55s} → {predicted:15s} {elapsed:6.0f}ms{scenario_ok}")
+        print(f"  [{idx + 1:3d}] {marker} {query[:55]:55s} → {predicted:15s} {elapsed:6.0f}ms{scenario_ok}")
 
     accuracy = correct / total if total > 0 else 0
     print(f"\n{'─' * 70}")
@@ -132,14 +135,15 @@ async def eval_intent_router(questions: list[dict], limit: int | None = None):
 
 # ── L2: Plan 结构校验（仅 plan_execute 题目）────────
 
+
 async def eval_plan_structure(questions: list[dict], limit: int | None = None):
     """测试 planner 生成的 plan 结构是否合法。"""
     from agent.plan_execute import PlanAndExecuteAgent
-    from agent.tools_registry import ToolRegistry
+    from agent.tools.create_ticket import CreateTicket
     from agent.tools.search_component import SearchComponent
     from agent.tools.search_product import SearchProduct
     from agent.tools.track_order import TrackOrder
-    from agent.tools.create_ticket import CreateTicket
+    from agent.tools_registry import ToolRegistry
 
     llm = LLMClient(
         api_key=settings.llm_api_key.get_secret_value(),
@@ -198,8 +202,8 @@ async def eval_plan_structure(questions: list[dict], limit: int | None = None):
             valid_count += 1
 
         status = "✓" if valid else "✗"
-        steps_preview = [f"{s['id']}.{s.get('component', s.get('action','?'))}" for s in plan[:5]]
-        print(f"  [{idx+1:2d}] {status} {query[:50]:50s} → {len(plan)}步 {steps_preview}")
+        steps_preview = [f"{s['id']}.{s.get('component', s.get('action', '?'))}" for s in plan[:5]]
+        print(f"  [{idx + 1:2d}] {status} {query[:50]:50s} → {len(plan)}步 {steps_preview}")
         if issues:
             for issue in issues:
                 print(f"      {issue}")
@@ -210,6 +214,7 @@ async def eval_plan_structure(questions: list[dict], limit: int | None = None):
 
 
 # ── CLI ───────────────────────────────────────────
+
 
 async def main(level: int = 1, limit: int | None = None, intent_only: bool = False):
     init_pool()

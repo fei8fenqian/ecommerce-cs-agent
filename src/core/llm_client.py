@@ -207,7 +207,7 @@ class LLMClient:
         choice = response.choices[0]
         message = choice.message
 
-        tool_calls = None
+        tool_calls: list[ToolCall] | None = None
         if message.tool_calls:
             tool_calls = []
             for tool_call in message.tool_calls:

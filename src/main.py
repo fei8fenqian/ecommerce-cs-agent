@@ -15,12 +15,15 @@ from agent.tools import (
     track_order,
 )
 from agent.tools_registry import ToolRegistry
-from api.chat import router
+from api.chat import chat_router
 from api.middleware import RequestIDMiddleware
+from api.session import session_router
+from api.tickets import ticket_router
 from config import settings
 from core.db_pool import close_pool, init_pool
 from core.intent_router import IntentRouter
 from core.llm_client import LLMClient
+from core.ticket_store import init_table
 from log_config import setup_logging
 
 
@@ -29,6 +32,7 @@ async def lifespan(app: FastAPI):
     # startup
     setup_logging()
     init_pool()
+    await init_table()
     llm = LLMClient(
         api_key=settings.llm_api_key.get_secret_value(),
         base_url=settings.llm_base_url,
@@ -77,7 +81,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="极客数码 AI 客服", version="0.1.0", lifespan=lifespan)
-app.include_router(router)
+app.include_router(chat_router)
+app.include_router(session_router)
+app.include_router(ticket_router)
 
 app.add_middleware(RequestIDMiddleware)
 

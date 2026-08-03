@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any
 
 from agent.tools_registry import BaseTool, ToolResult
-from core.db_pool import get_connection, put_connection
+from core.ticket_store import create_ticket as store_create_ticket
 
 logger = logging.getLogger(__name__)
 
@@ -68,30 +68,13 @@ class CreateTicket(BaseTool):
         ticket_id = f"TK{datetime.now().strftime('%Y%m%d%H%M%S')}{random.randint(100, 999)}"
 
         try:
-            conn = get_connection()
-            cur = conn.cursor()
-
-            # 幂等建表
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS tickets (
-                    id SERIAL PRIMARY KEY,
-                    ticket_id VARCHAR(20) UNIQUE NOT NULL,
-                    customer_name VARCHAR(50) DEFAULT '',
-                    phone VARCHAR(20) DEFAULT '',
-                    issue TEXT NOT NULL,
-                    urgency VARCHAR(10) DEFAULT 'medium',
-                    status VARCHAR(10) DEFAULT '待处理',
-                    created_at TIMESTAMP DEFAULT NOW()
-                )
-            """)
-
-            cur.execute(
-                "INSERT INTO tickets (ticket_id, customer_name, phone, issue, urgency) VALUES (%s, %s, %s, %s, %s)",
-                (ticket_id, customer_name, phone, issue, urgency),
+            await store_create_ticket(
+                ticket_id=ticket_id,
+                customer_name=customer_name,
+                phone=phone,
+                issue=issue,
+                urgency=urgency,
             )
-            conn.commit()
-
-            logger.info("工单创建: %s urgency=%s", ticket_id, urgency)
 
             return ToolResult(
                 name=self.name,
@@ -107,9 +90,3 @@ class CreateTicket(BaseTool):
         except Exception as e:
             logger.error("工单创建失败: %s", str(e))
             return ToolResult(name=self.name, status="error", error=f"工单创建失败: {str(e)}")
-
-        finally:
-            if "cur" in locals():
-                cur.close()
-            if "conn" in locals():
-                put_connection(conn)
