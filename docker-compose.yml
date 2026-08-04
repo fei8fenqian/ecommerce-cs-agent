@@ -1,0 +1,64 @@
+# =============================================================================
+# docker-compose.yml — 一键启动全部服务
+#
+# 用法:
+#   1. cp .env.example .env   # 填入真实密钥
+#   2. docker-compose up -d   # 启动
+#   3. docker-compose down    # 停止
+# =============================================================================
+
+services:
+  # ---- FastAPI 应用 ----
+  app:
+    build: .
+    container_name: cs-agent
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - PG_HOST=db
+      - PG_PORT=5432
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ---- PostgreSQL + pgvector ----
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: cs-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "5433:5432"        # 宿主机 5433 → 容器 5432，和本地开发保持一致
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # ---- Redis ----
+  redis:
+    image: redis:7-alpine
+    container_name: cs-redis
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:

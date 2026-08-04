@@ -1,0 +1,50 @@
+# =============================================================================
+# .dockerignore — 构建镜像时排除的文件
+# 原则：只 COPY 运行时需要的，其他全部排除，缩小镜像体积
+# =============================================================================
+
+# Python 缓存
+__pycache__/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+*.pyc
+*.pyo
+
+# Git
+.git/
+.gitignore
+
+# 日志（运行时生成，不进镜像）
+logs/
+
+# 环境变量（含真实密钥，通过 docker-compose 注入）
+.env
+
+# 开发工具
+tests/
+scripts/
+
+# 原始数据（已经在数据库里）
+data/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 文档
+*.md
+!CLAUDE.md
+memory/
+
+# 虚拟环境
+venv/
+.venv/
+
+# Docker 自己
+Dockerfile
+docker-compose.yml
+.dockerignore
