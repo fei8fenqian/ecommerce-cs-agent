@@ -5,21 +5,23 @@ from pathlib import Path
 import psycopg2
 from sentence_transformers import SentenceTransformer
 
-from ..db import connect_db
+from core.db_pool import close_pool, get_connection, init_pool, put_connection
 
 
 def create_knowledge_table(conn: psycopg2.extensions.connection):
     cur = conn.cursor()
-    cur.execute("drop table if exists knowledge_chunks")
 
-    # 最后一行不加逗号
-    cur.execute("""create table knowledge_chunks (
+    cur.execute("""create table if not exists knowledge_chunks (
                 id VARCHAR(128) PRIMARY KEY,
                 source VARCHAR(128),
                 title VARCHAR(256),
                 content TEXT,
                 embedding VECTOR(1024)
                 )""")
+    cur.execute(
+        """create index if not exists idx_knowledge_embedding
+           on knowledge_chunks using hnsw (embedding vector_cosine_ops)"""
+    )
 
     conn.commit()
     cur.close()
@@ -32,27 +34,48 @@ def load_model() -> SentenceTransformer:
 
 
 def ingest(conn: psycopg2.extensions.connection, model: SentenceTransformer, chunks: list):
-    inputs = [f"{s} {t}: {c}" for s, t, c in chunks]
-    # 批量编码 model.encode 需要 list[str]
-    print("正在编码向量...")
-    embeddings = model.encode(inputs=inputs, normalize_embeddings=True, show_progress_bar=True)
-
-    # 逐行插入
     cur = conn.cursor()
-    for i, embedding in enumerate(embeddings):
-        chunk = chunks[i]
+
+    # ---- 1. 读 DB 已有 id ----
+    db_ids: set[str] = set()
+    cur.execute("select id from knowledge_chunks")
+    for row in cur.fetchall():
+        db_ids.add(row[0])
+
+    # ---- 2. 算新 chunks 的 id，建映射 ----
+    new_ids: set[str] = set()
+    chunk_map: dict[str, tuple] = {}  # {rid: (source, title, content)}
+    for chunk in chunks:
         rid = hashlib.md5(f"{chunk[0]} {chunk[1]} {chunk[2]}".encode()).hexdigest()
-        sql = """
-            insert into knowledge_chunks
-            (id, source, title, content, embedding)
-            values (%s, %s, %s, %s, %s)
-        """
-        # tensor要转回去list
-        cur.execute(sql, (rid, chunk[0], chunk[1], chunk[2], embedding.tolist()))
+        new_ids.add(rid)
+        chunk_map[rid] = chunk
+
+    insert_ids = new_ids - db_ids
+    delete_ids = db_ids - new_ids
+    skip_count = len(db_ids & new_ids)
+
+    # ---- 3. 只编码新增的 ----
+    if insert_ids:
+        insert_chunks = [chunk_map[rid] for rid in insert_ids]
+        inputs = [f"{s} {t}: {c}" for s, t, c in insert_chunks]
+        print(f"新增 {len(insert_ids)} 条，正在编码向量...")
+        embeddings = model.encode(inputs=inputs, normalize_embeddings=True, show_progress_bar=True)
+
+        emb_map = dict(zip(insert_ids, embeddings))
+        for rid in insert_ids:
+            s, t, c = chunk_map[rid]
+            cur.execute(
+                "insert into knowledge_chunks (id, source, title, content, embedding) values (%s, %s, %s, %s, %s)",
+                (rid, s, t, c, emb_map[rid].tolist()),
+            )
+
+    # ---- 4. 删除过期的 ----
+    for rid in delete_ids:
+        cur.execute("delete from knowledge_chunks where id = %s", (rid,))
 
     conn.commit()
     cur.close()
-    print(f"插入完成，共 {len(chunks)} 条")
+    print(f"新增 {len(insert_ids)} 条，删除 {len(delete_ids)} 条，跳过 {skip_count} 条（未变）")
 
 
 MAX_CHARS = 400
@@ -123,10 +146,11 @@ def _split_long(source, title, content):
 
 
 if __name__ == "__main__":
-    conn = connect_db()
+    init_pool()
+    conn = get_connection()
     create_knowledge_table(conn)
     model = load_model()
-    print("加载完成")
+    print("模型加载完成")
 
     all_chunks = []
     root = Path(__file__).parent.parent.parent
@@ -139,4 +163,5 @@ if __name__ == "__main__":
             all_chunks.extend(chunks)
 
     ingest(conn, model, all_chunks)
-    conn.close()
+    put_connection(conn)
+    close_pool()
