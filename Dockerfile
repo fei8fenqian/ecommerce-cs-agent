@@ -14,17 +14,14 @@ FROM python:3.12-slim
 WORKDIR /app
 
 # ---- 1. 系统依赖 ----
-# psycopg2-binary 需要 libpq，用 --no-install-recommends 减小体积
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends libpq-dev \
-    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && rm -rf /var/lib/apt/lists/*
 
 # ---- 2. pip 依赖（这层缓存住，改了代码不会重装）----
 COPY pyproject.toml .
 RUN pip install --no-cache-dir \
     fastapi>=0.110 \
     "openai>=1.30" \
-    "psycopg2-binary>=2.9" \
+    "psycopg[binary,pool]>=3.2" \
     "pydantic>=2.5" \
     "pydantic-settings>=2.1" \
     "sentence-transformers>=3.0" \

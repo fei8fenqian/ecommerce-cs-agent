@@ -315,6 +315,41 @@ class SessionManager:
         """从 Redis 加载单个会话"""
         return await self._load(session_id)
 
+    async def cleanup_expired(self) -> int:
+        """手动清理过期的会话。
+
+        遍历所有 session:* hash key，检测 last_active + ttl < now 的会话，
+        删除其 hash 和 messages list key。
+
+        Returns:
+            清理的会话数量
+        """
+        now = time.time()
+        cleaned = 0
+        async for key in self._redis.scan_iter(match="session:*"):
+            if b":messages" in key:
+                continue
+            sid = key.decode().split(":", 1)[1]
+            data = await self._redis.hgetall(key)
+            last_active = float(data.get(b"last_active", 0))
+            if last_active + self._ttl < now:
+                await self._redis.delete(key)
+                await self._redis.delete(self._key(sid, "messages"))
+                cleaned += 1
+        return cleaned
+
+    async def flush_all(self) -> int:
+        """清理所有 session 相关 key（用于测试 teardown）。
+
+        Returns:
+            删除的 key 数量
+        """
+        count = 0
+        async for key in self._redis.scan_iter(match="session:*"):
+            await self._redis.delete(key)
+            count += 1
+        return count
+
     async def delete(self, session_id: str) -> bool:
         """删除单个会话"""
         exists: int = await self._redis.exists(self._key(session_id))

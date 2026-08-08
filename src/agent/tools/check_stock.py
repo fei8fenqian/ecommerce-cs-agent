@@ -28,8 +28,8 @@ class CheckStock(BaseTool):
                 "product_name": {"type": "string", "description": "商品名称"},
                 "table": {
                     "type": "string",
-                    "enum": ["laptop_products", "phone_products"],
-                    "description": "笔记本电脑填 laptop_products，手机填 phone_products",
+                    "enum": ["laptop_products", "phone_products", "component_products"],
+                    "description": "笔记本电脑填 laptop_products，手机填 phone_products，电脑配件填 component_products",
                     "default": "laptop_products",
                 },
             },
@@ -38,28 +38,19 @@ class CheckStock(BaseTool):
 
     async def execute(self, product_name: str, table: str = "laptop_products") -> ToolResult:
         # 表名白名单，防注入
-        if table not in ("laptop_products", "phone_products"):
+        if table not in ("laptop_products", "phone_products", "component_products"):
             return ToolResult(name=self.name, status="error", error=f"不支持的表: {table}")
 
         try:
-            conn = get_connection()
-            cur = conn.cursor()
-            cur.execute(
+            conn = await get_connection()
+            await conn.set_autocommit(True)
+            results: list[dict[str, Any]] = []
+            async for row in await conn.execute(
                 f"SELECT product_name, brand, price, stock, warehouse "
                 f"FROM {table} WHERE product_name ILIKE %s LIMIT 10",
                 (f"%{product_name}%",),
-            )
-            rows = cur.fetchall()
-
-            if not rows:
-                return ToolResult(
-                    name=self.name,
-                    status="error",
-                    error=f"未找到 {product_name} 的库存信息",
-                )
-
-            results: list[dict[str, Any]] = []
-            for name, brand, price, stock, warehouse in rows:
+            ):
+                name, brand, price, stock, warehouse = row
                 results.append(
                     {
                         "name": name,
@@ -68,6 +59,13 @@ class CheckStock(BaseTool):
                         "stock": stock,
                         "warehouse": warehouse,
                     }
+                )
+
+            if not results:
+                return ToolResult(
+                    name=self.name,
+                    status="error",
+                    error=f"未找到 {product_name} 的库存信息",
                 )
 
             return ToolResult(
@@ -86,7 +84,5 @@ class CheckStock(BaseTool):
             return ToolResult(name=self.name, status="error", error=f"库存查询失败: {str(e)}")
 
         finally:
-            if "cur" in locals():
-                cur.close()
             if "conn" in locals():
-                put_connection(conn)
+                await put_connection(conn)

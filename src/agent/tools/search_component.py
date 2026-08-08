@@ -77,7 +77,7 @@ class SearchComponent(BaseTool):
             if price_max is not None:
                 conditions.append(f"price <= {price_max}")
             where = " and ".join(conditions)
-            raw_results = hybrid_search(query, table=table, where=where, top_k=top_k)
+            raw_results = await hybrid_search(query, table=table, where=where, top_k=top_k)
             results = []
             if not raw_results:
                 return ToolResult(name=self.name, status="error", error="未找到相关内容")

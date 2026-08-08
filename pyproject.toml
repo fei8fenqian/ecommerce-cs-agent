@@ -16,7 +16,7 @@ requires-python = ">=3.12"          # 低于 3.12 装不上。match 语句、泛
 dependencies = [
     "fastapi>=0.110",
     "openai>=1.30",
-    "psycopg2-binary>=2.9",
+    "psycopg[binary,pool]>=3.3",
     "pydantic>=2.5",
     "pydantic-settings>=2.1",
     "sentence-transformers>=3.0",

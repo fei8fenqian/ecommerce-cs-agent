@@ -4,6 +4,7 @@ __pycache__/
 .env
 .claude/
 draft.py
+draft.md
 
 # 爬虫原始数据（可重新爬取）
 data/products/raw/
@@ -36,6 +37,9 @@ scripts/db.py
 
 # 日志文件
 logs/
+
+# 对抗性评测结果（运行输出）
+data/eval_adversarial_results.json
 
 # 面试准备文档
 PROJECT_WALKTHROUGH.md

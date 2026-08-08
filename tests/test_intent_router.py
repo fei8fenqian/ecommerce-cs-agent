@@ -143,9 +143,7 @@ class TestRouteFallback:
 class TestRouteMarkdown:
     @pytest.mark.asyncio
     async def test_json_wrapped_in_markdown(self):
-        router = _router(
-            '```json\n{"target": "rag", "table": "laptop_products", "confidence": 0.97}\n```'
-        )
+        router = _router('```json\n{"target": "rag", "table": "laptop_products", "confidence": 0.97}\n```')
         intent = await router.route("推荐笔记本")
         assert intent.target == "rag"
         assert intent.table == "laptop_products"

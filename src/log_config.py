@@ -87,7 +87,7 @@ def setup_logging(level: int = logging.INFO) -> None:
         "httpx",
         "sentence_transformers",
         "urllib3",
-        "psycopg2",
+        "psycopg",
         "watchfiles",
     ):
         logging.getLogger(noisy).setLevel(logging.WARNING)

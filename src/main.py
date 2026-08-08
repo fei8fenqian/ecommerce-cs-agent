@@ -31,7 +31,7 @@ from log_config import setup_logging
 async def lifespan(app: FastAPI):
     # startup
     setup_logging()
-    init_pool()
+    await init_pool()
     await init_table()
     llm = LLMClient(
         api_key=settings.llm_api_key.get_secret_value(),
@@ -75,7 +75,7 @@ async def lifespan(app: FastAPI):
 
     # shutdown
     await session.close()
-    close_pool()
+    await close_pool()
     for manager in mcp_managers:
         await manager.disconnect()
 

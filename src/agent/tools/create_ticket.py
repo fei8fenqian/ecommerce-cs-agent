@@ -21,7 +21,7 @@ class CreateTicket(BaseTool):
     def description(self) -> str:
         return (
             "创建客服工单，转人工处理。"
-            "用户投诉、要求退款赔偿、情绪激动、明确要求转人工时使用。"
+            "用户投诉、要求退款赔偿、情绪激动、明确要求转人工、报告产品故障申请维修保修时使用。"
             "issue: 问题描述（必填）"
             "customer_name: 客户称呼（选填）"
             "phone: 联系电话（选填）"

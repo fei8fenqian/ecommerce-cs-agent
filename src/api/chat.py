@@ -1,4 +1,5 @@
 import json
+import logging
 import time
 
 from fastapi import APIRouter, Request
@@ -9,6 +10,8 @@ from agent.loop import LoopResult
 from agent.sentiment import build_escalation_prompt, detect_sentiment
 from config import settings
 from core.retrieve import hybrid_search
+
+_chat_logger = logging.getLogger(__name__)
 
 
 class ChatRequest(BaseModel):
@@ -38,61 +41,64 @@ def _build_context(docs: list[dict]) -> str:
     return "\n-----\n".join(lines)
 
 
-# 聊天管线
 @chat_router.post("/chat", response_model=ChatResponse)
 async def chat(chat_req: ChatRequest, request: Request):
-    agent = request.app.state.agent
-    session = request.app.state.session
-    intent_router = request.app.state.intent_router
+    try:
+        agent = request.app.state.agent
+        session = request.app.state.session
+        intent_router = request.app.state.intent_router
 
-    # 获取历史会话或创建新会话
-    ctx = await session.get_or_create(chat_req.session_id)
+        # 获取历史会话或创建新会话
+        ctx = await session.get_or_create(chat_req.session_id)
 
-    # 判断指代词对应的实体
-    resolved_query = await session.resolve(chat_req.query, ctx.session_id)
+        # 判断指代词对应的实体
+        resolved_query = await session.resolve(chat_req.query, ctx.session_id)
 
-    # 用户情感判断
-    sentiment = detect_sentiment(resolved_query, history=ctx.messages)
-    sentiment_ctx = build_escalation_prompt(sentiment)
+        # 用户情感判断
+        sentiment = detect_sentiment(resolved_query, history=ctx.messages)
+        sentiment_ctx = build_escalation_prompt(sentiment)
 
-    # 意图路由
-    intent = await intent_router.route(resolved_query)
+        # 意图路由
+        intent = await intent_router.route(resolved_query)
 
-    if intent.target == "plan_execute":
-        plan_agent = request.app.state.plan_execute_agent
-        plan_state = await plan_agent.run(
-            resolved_query,
-            history=ctx.messages,
-            scenario=intent.scenario,
-        )
-        # plan_execute 不走 AgentLoop，手动记录到 session
-        await session.add_turn_simple(ctx.session_id, chat_req.query, plan_state.get("answer", ""))
+        if intent.target == "plan_execute":
+            plan_agent = request.app.state.plan_execute_agent
+            plan_state = await plan_agent.run(
+                resolved_query,
+                history=ctx.messages,
+                scenario=intent.scenario,
+            )
+            # plan_execute 不走 AgentLoop，手动记录到 session
+            await session.add_turn_simple(ctx.session_id, chat_req.query, plan_state.get("answer", ""))
+            return ChatResponse(
+                answer=plan_state.get("answer", ""),
+                session_id=ctx.session_id,
+                total_steps=len(plan_state.get("plan", [])),
+                total_tokens=plan_state.get("total_tokens", 0),
+            )
+        elif intent.target == "rag":
+            docs = await hybrid_search(resolved_query, table=intent.table)
+            context = _build_context(docs)
+            loop_result = await agent.run(
+                resolved_query,
+                context=context,
+                history=ctx.messages,
+                system_prompt_extra=sentiment_ctx,
+            )
+        else:
+            loop_result = await agent.run(resolved_query, history=ctx.messages, system_prompt_extra=sentiment_ctx)
+
+        # 当前对话放入上下文ctx
+        await session.add_turn(ctx.session_id, chat_req.query, loop_result)
         return ChatResponse(
-            answer=plan_state.get("answer", ""),
+            answer=loop_result.answer,
             session_id=ctx.session_id,
-            total_steps=len(plan_state.get("plan", [])),
-            total_tokens=plan_state.get("total_tokens", 0),
+            total_steps=loop_result.total_steps,
+            total_tokens=loop_result.total_tokens,
         )
-    elif intent.target == "rag":
-        docs = hybrid_search(resolved_query, table=intent.table)
-        context = _build_context(docs)
-        loop_result = await agent.run(
-            resolved_query,
-            context=context,
-            history=ctx.messages,
-            system_prompt_extra=sentiment_ctx,
-        )
-    else:
-        loop_result = await agent.run(resolved_query, history=ctx.messages, system_prompt_extra=sentiment_ctx)
-
-    # 当前对话放入上下文ctx
-    await session.add_turn(ctx.session_id, chat_req.query, loop_result)
-    return ChatResponse(
-        answer=loop_result.answer,
-        session_id=ctx.session_id,
-        total_steps=loop_result.total_steps,
-        total_tokens=loop_result.total_tokens,
-    )
+    except Exception:
+        _chat_logger.exception("chat 端点异常: query=%s", chat_req.query)
+        raise
 
 
 @chat_router.post("/chat/stream")

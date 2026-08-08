@@ -48,7 +48,7 @@ class SearchProduct(BaseTool):
         top_k: int = settings.retrieval_top_k,
     ) -> ToolResult:
         try:
-            candidates: list[dict] = hybrid_search(query, table=table, where=None, top_k=top_k)
+            candidates: list[dict] = await hybrid_search(query, table=table, where=None, top_k=top_k)
             if not candidates:
                 return ToolResult(name=self.name, status="error", error="未找到相关内容")
             results: list[dict[str, Any]] = []

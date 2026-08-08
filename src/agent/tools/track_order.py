@@ -56,18 +56,11 @@ class TrackOrder(BaseTool):
         label = "order_id" if order_id else "phone"
 
         try:
-            conn = get_connection()
-            cur = conn.cursor()
-            cur.execute(self._SQL.format(where=where), (param,))
-            rows = cur.fetchall()
-
-            if not rows:
-                msg = "订单不存在" if order_id else "该手机号下没有订单"
-                return ToolResult(name=self.name, status="error", error=msg)
-
-            # 按 order_id 分组聚合
+            conn = await get_connection()
+            await conn.set_autocommit(True)
+            # 如果是用手机号查询, 订单需按 order_id 分组聚合
             orders: dict[str, dict[str, Any]] = {}
-            for row in rows:
+            async for row in await conn.execute(self._SQL.format(where=where), (param,)):
                 oid = row[0]
                 if oid not in orders:
                     orders[oid] = {
@@ -91,6 +84,10 @@ class TrackOrder(BaseTool):
                         }
                     )
 
+            if not orders:
+                msg = "订单不存在" if order_id else "该手机号下没有订单"
+                return ToolResult(name=self.name, status="error", error=msg)
+
             # 单号查询返回单个订单，手机号查询返回列表
             if order_id:
                 data: dict[str, Any] = orders[order_id]
@@ -104,7 +101,5 @@ class TrackOrder(BaseTool):
             return ToolResult(name=self.name, status="error", error=f"订单查询失败: {str(e)}")
 
         finally:
-            if "cur" in locals():
-                cur.close()
             if "conn" in locals():
-                put_connection(conn)
+                await put_connection(conn)

@@ -9,56 +9,57 @@ src/core/bm25.py — BM25 关键词检索
 
 import math
 from collections import Counter
+from typing import Any
 
 import jieba
+from psycopg import AsyncConnection
 
 
 class BM25Index:
-    def __init__(self, conn, *, table: str, text_col: str = "description"):
+    def __init__(self, docs: list[dict[str, Any]], idf: dict[str, float], avglen: float = 1.0):
+        self.docs = docs
+        self.idf = idf
+        self.avglen = avglen
+
+    @classmethod
+    async def build_from_db(cls, conn: AsyncConnection, table: str, text_col: str = "description"):
         """
         从 PG 表读取文本，建 BM25 索引。
 
-        conn:      psycopg2 连接
+        conn:      psycopg3 连接
         table:    表名（laptop_products / knowledge_chunks）
         text_col: 文本列名（description / content）
         """
-
-        # 从 PG 读数据
-        cur = conn.cursor()
-        cur.execute(f"select id,{text_col} from {table}")
-        rows = cur.fetchall()
-        cur.close()
-
-        # 对每条文本 jieba 分词，统计词频
-        # self.docs = [{"id": str, "tokens": Counter, "length": int}, ...]
-        self.docs = []
+        docs: list[dict[str, Any]] = []
         total_len = 0
-        for id, content in rows:
-            # tokens:Counter({word: freq, ...})
+        async for row in await conn.execute(f"select id,{text_col} from {table}"):
+            id, content = row
             words = jieba.lcut(content)
             tokens = Counter(words)
-            self.docs.append({"id": id, "tokens": tokens, "length": len(words)})
+            docs.append({"id": id, "tokens": tokens, "length": len(words)})
             total_len += len(words)
 
         # 文档平均长度
-        self.avglen = total_len / len(self.docs) if self.docs else 1
+        avglen = total_len / len(docs) if docs else 1
         # 文档数量
-        self.doc_count = len(self.docs)
+        doc_count = len(docs)
 
         # 建倒排索引  {词: {doc_id: 词频}}
-        self.inverted: dict[str, dict[str, int]] = {}
-        for doc in self.docs:
+        inverted: dict[str, dict[str, int]] = {}
+        for doc in docs:
             for word, freq in doc["tokens"].items():
                 # 为新词建空词典
-                if word not in self.inverted:
-                    self.inverted[word] = {}
-                self.inverted[word][doc["id"]] = freq
+                if word not in inverted:
+                    inverted[word] = {}
+                inverted[word][doc["id"]] = freq
 
         # 预计算每个词的 IDF(逆文档频率 计算词存在于在哪些文档中 文档数越低得分越高)
-        self.idf: dict[str, float] = {}
-        for word, word_docs in self.inverted.items():
+        idf: dict[str, float] = {}
+        for word, word_docs in inverted.items():
             counts = len(word_docs)
-            self.idf[word] = math.log((self.doc_count - counts + 0.5) / (counts + 0.5))
+            idf[word] = math.log((doc_count - counts + 0.5) / (counts + 0.5))
+
+        return cls(docs, idf, avglen)
 
     def search(self, query: str, top_k: int = 20) -> list[tuple[str, float]]:
         """

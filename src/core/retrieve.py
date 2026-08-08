@@ -29,7 +29,7 @@ _BM25_TABLE_TEXT = {
 }
 
 
-def _get_bm25(table: str) -> BM25Index:
+async def _get_bm25(table: str) -> BM25Index:
     """懒加载 BM25，首次调用建索引，后续命中缓存"""
     if table not in _BM25_TABLE_TEXT:
         raise ValueError(f"BM25 不支持: {table}，可选: {list(_BM25_TABLE_TEXT)}")
@@ -37,16 +37,17 @@ def _get_bm25(table: str) -> BM25Index:
     if table in _bm25_cache:
         return _bm25_cache[table]
 
-    conn = get_connection()
     try:
-        bm25 = BM25Index(conn, table=table, text_col=_BM25_TABLE_TEXT[table])
+        conn = await get_connection()
+        await conn.set_autocommit(True)
+        bm25 = await BM25Index.build_from_db(conn, table=table, text_col=_BM25_TABLE_TEXT[table])
     finally:
-        put_connection(conn)
+        await put_connection(conn)
     _bm25_cache[table] = bm25
     return bm25
 
 
-def vector_search(
+async def vector_search(
     query: str,
     *,
     table: str = "laptop_products",
@@ -74,7 +75,7 @@ def vector_search(
     elif table == "knowledge_chunks":
         cols = "id, source, title, content"
     elif table == "component_products":
-        cols = "id, name, category, price, description, normalized"
+        cols = "id, product_name, category, price, description, normalized"
     else:
         raise ValueError(f"不支持的表: {table}")
 
@@ -87,15 +88,14 @@ def vector_search(
         limit %s
     """
 
-    conn = get_connection()
-    cur = None
-
+    conn = None
     try:
-        cur = conn.cursor()
+        conn = await get_connection()
+        await conn.set_autocommit(True)
         if table in ("laptop_products", "phone_products"):
-            cur.execute(sql, (q_vec_str, q_vec_str, top_k))
+            cur = await conn.execute(sql, (q_vec_str, q_vec_str, top_k))
             res = []
-            for row in cur.fetchall():
+            async for row in cur:
                 id, product_name, brand, price, description, score = row
                 res.append(
                     {
@@ -109,9 +109,9 @@ def vector_search(
             return res
 
         elif table == "knowledge_chunks":
-            cur.execute(sql, (q_vec_str, q_vec_str, top_k))
+            cur = await conn.execute(sql, (q_vec_str, q_vec_str, top_k))
             res = []
-            for row in cur.fetchall():
+            async for row in cur:
                 id, source, title, content, score = row
                 res.append(
                     {
@@ -125,16 +125,16 @@ def vector_search(
             return res
 
         elif table == "component_products":
-            cur.execute(sql, (q_vec_str, q_vec_str, top_k))
+            cur = await conn.execute(sql, (q_vec_str, q_vec_str, top_k))
             res = []
-            for row in cur.fetchall():
-                id, name, category, price, description, normalized, score = row
+            async for row in cur:
+                id, product_name, category, price, description, normalized, score = row
                 res.append(
                     {
                         "id": id,
                         "content": description,
                         "score": score,
-                        "title": name,
+                        "title": product_name,
                         "category": category,
                         "price": price,
                         "normalized": normalized,
@@ -142,16 +142,14 @@ def vector_search(
                 )
             return res
 
-    # 兜底
     finally:
-        if cur is not None:
-            cur.close()
-        put_connection(conn)
+        if conn is not None:
+            await put_connection(conn)
 
     return []
 
 
-def hybrid_search(
+async def hybrid_search(
     query: str,
     *,
     table: str = "laptop_products",
@@ -164,8 +162,8 @@ def hybrid_search(
 
     use_rerank=False 时跳过精排直接返回 RRF 融合结果，用于消融实验。
     """
-    retrieve_vector = vector_search(query, table=table, where=where, top_k=top_k)
-    bm25 = _get_bm25(table)
+    retrieve_vector = await vector_search(query, table=table, where=where, top_k=top_k)
+    bm25 = await _get_bm25(table)
     retrieve_bm25 = bm25.search(query, top_k=20)
     rank_vector = [doc["id"] for doc in retrieve_vector if doc.get("id", 0)]
     rank_bm25 = [doc[0] for doc in retrieve_bm25]

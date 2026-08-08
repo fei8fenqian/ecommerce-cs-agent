@@ -45,8 +45,8 @@ class CompareProducts(BaseTool):
         if table not in ("laptop_products", "phone_products"):
             return ToolResult(name=self.name, status="error", error=f"不支持的产品类别: {table}")
         try:
-            results_a = hybrid_search(query=product_a, table=table, where=None, top_k=3)
-            results_b = hybrid_search(query=product_b, table=table, where=None, top_k=3)
+            results_a = await hybrid_search(query=product_a, table=table, where=None, top_k=3)
+            results_b = await hybrid_search(query=product_b, table=table, where=None, top_k=3)
 
             if not results_a:
                 return ToolResult(

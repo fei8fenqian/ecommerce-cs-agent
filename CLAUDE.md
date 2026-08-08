@@ -22,9 +22,33 @@ from log_config import get_request_id
 
 The `src/logging.py` was renamed to `src/log_config.py` because it shadowed Python stdlib `logging`.
 
+## Interaction Mode（学习模式）
+
+fei8 处于**学习阶段**，不是工作效率阶段。核心原则：
+
+**AI 不该做的事：**
+- ❌ 不给架构思路、实现方案、设计建议
+- ❌ 不给函数签名 + docstring + hint 的指导格式
+- ❌ 不主动指出"你可以这样写"
+- ❌ 不帮规划下一步做什么
+
+**AI 该做的事：**
+- ✅ 回答具体的知识点问题（"XXX 是什么"、"YYY 的原理"）
+- ✅ 解释概念，但不延伸到"所以在你的项目里可以这样用"
+- ✅ 跑 lint / test / 运维命令（纯体力活）
+- ✅ 代码审查（写完后来问才看）
+
+**原因**：fei8 发现之前"AI 给思路 → 自己写代码"的模式有问题——写代码退化为体力劳动，失去了独立思考和架构推导能力。学习阶段必须自己挣扎，效率不重要。
+
 ## Memory
 
-像人一样，重要的事情自然记住。遇到关键决策、用户偏好、tricky bug、阶段性进展时，写到 `memory/` 目录。不用频繁，只记真正重要的。详见 `memory/MEMORY.md`。
+项目记忆存在 `memory/` 目录（路径：`/home/fei8/.claude/projects/-home-fei8-ai-projects-E-Commerce-Agent/memory/`）。只记以下三类：
+
+**1. 里程碑** — 做过哪些重要的事，不记细节（代码 git 里都有）
+**2. 用户习惯** — fei8 的编码偏好、常用工具、喜欢什么样的工作方式
+**3. 用户画像** — 技能水平、当前学习目标、短板
+
+**不记：** 代码实现细节、git 能追溯的事情、一次性的配置改动。
 
 ## Commands
 

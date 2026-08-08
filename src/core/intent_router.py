@@ -11,15 +11,19 @@ logger = logging.getLogger(__name__)
 SYSTEM_PROMPT = """你是一个意图分类器。分析用户问题，返回 JSON。
 
 分类规则：
-- plan_execute: 配机组装（"配台电脑""5000预算打游戏""帮忙选配件""组装一台游戏机"）、
-  设备故障诊断（"笔记本无法开机""手机连不上wifi""屏幕闪烁"）。
-  配机返回 scenario="build_pc"，诊断返回 scenario="troubleshoot"
+- plan_execute: 设备故障诊断（"笔记本无法开机""手机连不上wifi""屏幕闪烁"），
+  返回 scenario="troubleshoot"
+- agent: 库存查询、订单追踪、配机组装（"配台电脑""5000预算打游戏""帮忙选配件"，
+  需调用 search_component 多次）
 - rag: 参数查询、选购建议、售后政策(退货条件/保修范围/换货规则)、使用指南（无需实时数据）
-- agent: 库存查询、订单追踪（需要调用工具获取实时数据）
-- ticket: 投诉、退款赔偿（用户要"退钱"不是"问退货规则"）、情绪激动骂人、明确要求转人工
+- agent: 库存查询、订单追踪、配机组装（"配台电脑""5000预算打游戏""帮忙选配件"，
+  需调用 search_component 多次）
+- ticket: 投诉、退款赔偿（用户要"退钱"不是"问退货规则"）、报修保修（"屏幕坏了帮我保修"
+  "申请维修"）、情绪激动骂人、明确要求转人工
 
 关键区别：用户问"退货什么流程/什么条件"→ rag；用户说"我要退款/我要投诉"→ ticket；
-用户说"配台电脑"/"笔记本坏了"→ plan_execute
+用户说"帮我报修/帮我保修"→ ticket；用户说"配台电脑/攒机"→ agent；
+用户说"笔记本无法开机怎么办"→ plan_execute（故障诊断）
 
 返回格式（只返回 JSON，不要其他文字。不要照抄示例的 confidence 值）：
 {"target": "rag", "table": "laptop_products", "confidence": 0.98}

@@ -13,10 +13,10 @@ logger = logging.getLogger(__name__)
 
 async def init_table() -> None:
     """建表（幂等），在 lifespan startup 中调用一次。"""
-    conn = get_connection()
     try:
-        cur = conn.cursor()
-        cur.execute("""
+        conn = await get_connection()
+        await conn.set_autocommit(True)
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS tickets (
                 id SERIAL PRIMARY KEY,
                 ticket_id VARCHAR(20) UNIQUE NOT NULL,
@@ -28,11 +28,9 @@ async def init_table() -> None:
                 created_at TIMESTAMP DEFAULT NOW()
             )
         """)
-        conn.commit()
+
     finally:
-        if "cur" in locals():
-            cur.close()
-        put_connection(conn)
+        await put_connection(conn)
 
 
 async def create_ticket(
@@ -43,37 +41,35 @@ async def create_ticket(
     urgency: str = "medium",
 ) -> None:
     """插入一条新工单。"""
-    conn = get_connection()
     try:
-        cur = conn.cursor()
-        cur.execute(
+        conn = await get_connection()
+        await conn.set_autocommit(True)
+        await conn.execute(
             "INSERT INTO tickets (ticket_id, customer_name, phone, issue, urgency) VALUES (%s, %s, %s, %s, %s)",
             (ticket_id, customer_name, phone, issue, urgency),
         )
-        conn.commit()
         logger.info("工单创建: %s urgency=%s", ticket_id, urgency)
     finally:
-        if "cur" in locals():
-            cur.close()
-        put_connection(conn)
+        await put_connection(conn)
 
 
 async def list_tickets(status: str | None = None) -> list[dict[str, Any]]:
     """查工单列表，可按 status 过滤，按 created_at 倒序。"""
-    conn = get_connection()
+
     try:
-        cur = conn.cursor()
+        conn = await get_connection()
+        await conn.set_autocommit(True)
         if status:
-            cur.execute(
+            cur = await conn.execute(
                 "SELECT ticket_id, customer_name, urgency, status, created_at "
                 "FROM tickets WHERE status = %s ORDER BY created_at DESC",
                 (status,),
             )
         else:
-            cur.execute(
+            cur = await conn.execute(
                 "SELECT ticket_id, customer_name, urgency, status, created_at FROM tickets ORDER BY created_at DESC"
             )
-        rows = cur.fetchall()
+        rows = await cur.fetchall()
         return [
             {
                 "ticket_id": row[0],
@@ -85,22 +81,20 @@ async def list_tickets(status: str | None = None) -> list[dict[str, Any]]:
             for row in rows
         ]
     finally:
-        if "cur" in locals():
-            cur.close()
-        put_connection(conn)
+        await put_connection(conn)
 
 
 async def get_ticket(ticket_id: str) -> dict[str, Any] | None:
     """查单条工单详情。"""
-    conn = get_connection()
     try:
-        cur = conn.cursor()
-        cur.execute(
+        conn = await get_connection()
+        await conn.set_autocommit(True)
+        cur = await conn.execute(
             "SELECT ticket_id, customer_name, phone, issue, urgency, status, created_at "
             "FROM tickets WHERE ticket_id = %s",
             (ticket_id,),
         )
-        row = cur.fetchone()
+        row = await cur.fetchone()
         if row is None:
             return None
         return {
@@ -113,9 +107,7 @@ async def get_ticket(ticket_id: str) -> dict[str, Any] | None:
             "created_at": (row[6].isoformat() if hasattr(row[6], "isoformat") else str(row[6])),
         }
     finally:
-        if "cur" in locals():
-            cur.close()
-        put_connection(conn)
+        await put_connection(conn)
 
 
 async def update_ticket(ticket_id: str, **kwargs: Any) -> bool:
@@ -135,19 +127,16 @@ async def update_ticket(ticket_id: str, **kwargs: Any) -> bool:
     if not updates:
         return True
 
-    conn = get_connection()
     try:
-        cur = conn.cursor()
+        conn = await get_connection()
+        await conn.set_autocommit(True)
         set_clause = ", ".join(f"{k} = %s" for k in updates)
         values = list(updates.values()) + [ticket_id]
-        cur.execute(
+        cur = await conn.execute(
             f"UPDATE tickets SET {set_clause} WHERE ticket_id = %s",
             values,
         )
-        conn.commit()
         affected = cur.rowcount
         return affected > 0
     finally:
-        if "cur" in locals():
-            cur.close()
-        put_connection(conn)
+        await put_connection(conn)

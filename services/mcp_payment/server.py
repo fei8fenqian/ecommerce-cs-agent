@@ -5,30 +5,29 @@ from mcp.server.fastmcp import FastMCP
 from core.db_pool import get_connection, init_pool, put_connection
 
 logger = logging.getLogger(__name__)
-init_pool()
-mcp = FastMCP("payment-server")
+mcp = FastMCP("payment-server", host="0.0.0.0", port=8081)
+_pool = None
 
 
-def _get_order(order_id: str) -> dict | None:
-    conn = None
-    cur = None
+async def _get_order(order_id: str) -> dict | None:
     try:
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute(
+        await _ensure_pool()
+        conn = await get_connection()
+        await conn.set_autocommit(True)
+        cur = await conn.execute(
             """
             select o.order_id, o.customer_id, o.customer_name, o.order_date,
             o.status, o.total_amount, o.paid_amount, o.discount,
             o.payment_method, o.payment_time, o.tracking_company, o.tracking_number,
             o.shipping_address, o.phone, o.created_at,
             oi.product_name, oi.category, oi.brand, oi.price, oi.quantity
-            from orders o left join order_items
+            from orders o left join order_items oi
             on o.order_id=oi.order_id
             where o.order_id = %s
         """,
             (order_id,),
         )
-        rows = cur.fetchall()
+        rows = await cur.fetchall()
         if not rows:
             return None
 
@@ -66,10 +65,7 @@ def _get_order(order_id: str) -> dict | None:
             "items": items,
         }
     finally:
-        if cur:
-            cur.close()
-        if conn:
-            put_connection(conn)
+        await put_connection(conn)
 
 
 @mcp.tool()
@@ -85,7 +81,7 @@ async def check_payment(order_id: str) -> dict:
         payment_status, amount, method, paid_at,
     """
     try:
-        order = _get_order(order_id)
+        order = await _get_order(order_id)
         if order is None:
             return {"found": False, "order_id": order_id, "error": "订单不存在"}
 
@@ -121,7 +117,8 @@ async def request_refund(order_id: str, reason: str = "") -> dict:
     "refund_amount": 5999}
     """
     try:
-        order = _get_order(order_id)
+        await _ensure_pool()
+        order = await _get_order(order_id)
         if order is None:
             return {
                 "success": False,
@@ -156,13 +153,10 @@ async def request_refund(order_id: str, reason: str = "") -> dict:
 
         refund_amount = order["paid_amount"]
 
-        conn = None
-        cur = None
         try:
-            conn = get_connection()
-            cur = conn.cursor()
-            cur.execute("update orders set status = '已退款' where order_id = %s", (order_id,))
-            conn.commit()
+            conn = await get_connection()
+            await conn.set_autocommit(True)
+            await conn.execute("update orders set status = '已退款' where order_id = %s", (order_id,))
         except Exception as e:
             logger.exception("request_refund 退款失败 order_id=%s", order_id)
             return {
@@ -172,10 +166,7 @@ async def request_refund(order_id: str, reason: str = "") -> dict:
                 "refund_amount": 0,
             }
         finally:
-            if cur:
-                cur.close()
-            if conn:
-                put_connection(conn)
+            await put_connection(conn)
 
         return {
             "success": True,
@@ -193,3 +184,13 @@ async def request_refund(order_id: str, reason: str = "") -> dict:
             "message": "退款失败",
             "refund_amount": 0,
         }
+
+
+async def _ensure_pool():
+    global _pool
+    if _pool is None:
+        await init_pool()
+
+
+if __name__ == "__main__":
+    mcp.run(transport="sse")
