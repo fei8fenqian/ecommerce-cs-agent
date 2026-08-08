@@ -22,6 +22,8 @@ async def _get_first_order_id() -> str | None:
         cur = await conn.execute("SELECT order_id FROM orders LIMIT 1")
         row = await cur.fetchone()
         return row[0] if row else None
+    except Exception:
+        return None
     finally:
         await put_connection(conn)
 
@@ -33,6 +35,8 @@ async def _get_first_phone() -> str | None:
         cur = await conn.execute("SELECT phone FROM orders WHERE phone != '' LIMIT 1")
         row = await cur.fetchone()
         return row[0] if row else None
+    except Exception:
+        return None
     finally:
         await put_connection(conn)
 
