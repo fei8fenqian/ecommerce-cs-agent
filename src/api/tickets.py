@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from core.ticket_store import get_ticket, list_tickets, update_ticket
+from store.ticket_store import get_ticket, list_tickets, update_ticket
 
 
 class TicketItem(BaseModel):
