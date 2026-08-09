@@ -8,7 +8,7 @@ from psycopg2.extensions import connection
 from psycopg2.extras import Json
 from sentence_transformers import SentenceTransformer
 
-from core.db_pool import close_pool, get_connection, init_pool, put_connection
+from infra.db_pool import close_pool, get_connection, init_pool, put_connection
 
 from ..generate_descriptions import build_phone_description
 

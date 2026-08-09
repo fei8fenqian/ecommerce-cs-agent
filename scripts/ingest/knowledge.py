@@ -5,7 +5,7 @@ from pathlib import Path
 import psycopg2
 from sentence_transformers import SentenceTransformer
 
-from core.db_pool import close_pool, get_connection, init_pool, put_connection
+from infra.db_pool import close_pool, get_connection, init_pool, put_connection
 
 
 def create_knowledge_table(conn: psycopg2.extensions.connection):

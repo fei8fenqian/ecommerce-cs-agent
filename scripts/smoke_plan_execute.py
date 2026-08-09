@@ -2,12 +2,12 @@
 
 import asyncio
 
-from agent.plan_execute import PlanAndExecuteAgent
+from agent.engines.plan_execute import PlanAndExecuteAgent
+from agent.llm.llm_client import LLMClient
 from agent.tools.search_component import SearchComponent
 from agent.tools_registry import ToolRegistry
 from config import settings
-from core.db_pool import init_pool
-from core.llm_client import LLMClient
+from infra.db_pool import init_pool
 
 
 async def main():

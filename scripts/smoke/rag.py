@@ -18,10 +18,10 @@ from pathlib import Path
 # 把项目根目录加入 sys.path，让脚本能 import src/ 下的模块
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
+from agent.llm.llm_client import LLMClient
+from agent.rag.retrieve import hybrid_search
 from config import settings
-from core.db_pool import init_pool
-from core.llm_client import LLMClient
-from core.retrieve import hybrid_search
+from infra.db_pool import init_pool
 
 init_pool()
 

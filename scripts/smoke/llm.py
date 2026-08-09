@@ -2,8 +2,8 @@
 
 import asyncio
 
+from agent.llm.llm_client import LLMClient
 from config import settings
-from core.llm_client import LLMClient
 
 
 async def main():

@@ -20,7 +20,8 @@ from typing import Any
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from agent.loop import AgentLoop  # noqa: E402
+from agent.engines.loop import AgentLoop  # noqa: E402
+from agent.llm.llm_client import LLMClient, LLMResponse  # noqa: E402
 from agent.tools import (  # noqa: E402
     check_stock,
     compare_products,
@@ -31,9 +32,8 @@ from agent.tools import (  # noqa: E402
 )
 from agent.tools_registry import ToolRegistry  # noqa: E402
 from config import settings  # noqa: E402
-from core.db_pool import close_pool, init_pool  # noqa: E402
-from core.llm_client import LLMClient, LLMResponse  # noqa: E402
-from core.ticket_store import init_table  # noqa: E402
+from infra.db_pool import close_pool, init_pool  # noqa: E402
+from store.ticket_store import init_table  # noqa: E402
 
 QUESTIONS_PATH = ROOT / "data" / "test_questions_adversarial.json"
 

@@ -14,17 +14,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
-from agent.loop import AgentLoop
+from agent.engines.loop import AgentLoop
+from agent.llm.intent_router import IntentRouter
+from agent.llm.llm_client import LLMClient
+from agent.rag.retrieve import hybrid_search
 from agent.tools.check_stock import CheckStock
 from agent.tools.create_ticket import CreateTicket
 from agent.tools.search_product import SearchProduct
 from agent.tools.track_order import TrackOrder
 from agent.tools_registry import ToolRegistry
 from config import settings
-from core.db_pool import init_pool
-from core.intent_router import IntentRouter
-from core.llm_client import LLMClient
-from core.retrieve import hybrid_search
+from infra.db_pool import init_pool
 
 init_pool()
 

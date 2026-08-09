@@ -20,10 +20,10 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
+from agent.llm.intent_router import IntentRouter
+from agent.llm.llm_client import LLMClient
 from config import settings
-from core.db_pool import init_pool
-from core.intent_router import IntentRouter
-from core.llm_client import LLMClient
+from infra.db_pool import init_pool
 
 QUESTIONS_PATH = ROOT / "data" / "test_questions.json"
 
@@ -138,7 +138,7 @@ async def eval_intent_router(questions: list[dict], limit: int | None = None):
 
 async def eval_plan_structure(questions: list[dict], limit: int | None = None):
     """测试 planner 生成的 plan 结构是否合法。"""
-    from agent.plan_execute import PlanAndExecuteAgent
+    from agent.engines.plan_execute import PlanAndExecuteAgent
     from agent.tools.create_ticket import CreateTicket
     from agent.tools.search_component import SearchComponent
     from agent.tools.search_product import SearchProduct
