@@ -2,7 +2,7 @@ import logging
 from typing import Any
 
 from agent.rag.retrieve import hybrid_search
-from agent.tools.tools_registry import BaseTool, ToolResult
+from agent.tools_registry import BaseTool, ToolResult
 
 logger = logging.getLogger(__name__)
 

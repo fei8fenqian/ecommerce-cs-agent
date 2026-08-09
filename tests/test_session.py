@@ -7,8 +7,8 @@ import pytest_asyncio
 
 from agent.engines.loop import LoopResult, StepResult
 from agent.llm.llm_client import ToolCall
-from agent.resolve import resolve_pronouns
-from agent.session import SessionContext, SessionManager
+from agent.llm.resolve import resolve_pronouns
+from agent.llm.session import SessionContext, SessionManager
 
 
 # =============================================================================

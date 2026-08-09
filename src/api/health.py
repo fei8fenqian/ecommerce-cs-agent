@@ -3,7 +3,7 @@ import logging
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from agent.session import SessionManager
+from agent.llm.session import SessionManager
 from infra.db_pool import check_alive
 
 logger = logging.getLogger(__name__)

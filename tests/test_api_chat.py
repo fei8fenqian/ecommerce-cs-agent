@@ -11,8 +11,8 @@ from fastapi.testclient import TestClient
 
 from agent.engines.loop import LoopResult
 from agent.llm.intent_router import Intent
-from agent.resolve import resolve_pronouns
-from agent.session import SessionContext
+from agent.llm.resolve import resolve_pronouns
+from agent.llm.session import SessionContext
 from api.chat import chat_router
 
 

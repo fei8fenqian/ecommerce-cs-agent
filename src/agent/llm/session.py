@@ -20,7 +20,7 @@ import tiktoken
 
 from config import settings
 
-from .engines.loop import LoopResult
+from ..engines.loop import LoopResult
 from .resolve import resolve_pronouns
 
 logger = logging.getLogger(__name__)

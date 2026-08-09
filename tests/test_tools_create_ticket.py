@@ -4,7 +4,7 @@ import pytest
 import pytest_asyncio
 
 from agent.tools.create_ticket import ALLOWED_URGENCY, CreateTicket
-from agent.tools.tools_registry import ToolResult
+from agent.tools_registry import ToolResult
 from infra.db_pool import close_pool, get_connection, init_pool, put_connection
 from store.ticket_store import get_ticket, init_table
 

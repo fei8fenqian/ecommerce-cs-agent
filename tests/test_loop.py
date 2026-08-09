@@ -4,7 +4,7 @@ import pytest
 
 from agent.engines.loop import AgentLoop, LoopResult, StepResult
 from agent.llm.llm_client import LLMResponse, TokenUsage, ToolCall
-from agent.tools.tools_registry import BaseTool, ToolRegistry, ToolResult
+from agent.tools_registry import BaseTool, ToolRegistry, ToolResult
 from config import settings
 
 

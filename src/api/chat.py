@@ -7,8 +7,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from agent.engines.loop import LoopResult
+from agent.llm.sentiment import build_escalation_prompt, detect_sentiment
 from agent.rag.retrieve import hybrid_search
-from agent.sentiment import build_escalation_prompt, detect_sentiment
 from config import settings
 from exceptions import LLMError
 

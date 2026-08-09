@@ -6,7 +6,8 @@ from agent.engines.loop import AgentLoop
 from agent.engines.plan_execute import PlanAndExecuteAgent
 from agent.llm.intent_router import IntentRouter
 from agent.llm.llm_client import LLMClient
-from agent.session import SessionManager
+from agent.llm.session import SessionManager
+from agent.mcp_tool import MCPClientManager, MCPTool
 from agent.tools import (
     check_stock,
     compare_products,
@@ -15,8 +16,7 @@ from agent.tools import (
     search_product,
     track_order,
 )
-from agent.tools.mcp_tool import MCPClientManager, MCPTool
-from agent.tools.tools_registry import ToolRegistry
+from agent.tools_registry import ToolRegistry
 from api.chat import chat_router
 from api.health import health_router
 from api.session import session_router

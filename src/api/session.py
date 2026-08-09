@@ -3,7 +3,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from agent.session import SessionManager
+from agent.llm.session import SessionManager
 
 
 class SessionItem(BaseModel):

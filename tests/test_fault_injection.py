@@ -8,7 +8,7 @@ import asyncio
 import pytest
 
 from agent.tools.check_stock import CheckStock
-from agent.tools.tools_registry import ToolResult
+from agent.tools_registry import ToolResult
 from infra.db_pool import close_pool, get_connection, init_pool, put_connection
 
 
@@ -121,7 +121,7 @@ class TestRedisUnavailable:
     @pytest.mark.asyncio
     async def test_health_check_returns_false_when_redis_down(self):
         """Redis 连不上时 health_check 返回 False 而非抛异常"""
-        from agent.session import SessionManager
+        from agent.llm.session import SessionManager
 
         # 用不存在的 Redis 端口
         session = SessionManager(redis_url="redis://localhost:16379/0", ttl=60)
@@ -132,7 +132,7 @@ class TestRedisUnavailable:
     @pytest.mark.asyncio
     async def test_get_or_create_handles_redis_connection_error(self):
         """Redis 不可用时 get_or_create 不应 crash"""
-        from agent.session import SessionManager
+        from agent.llm.session import SessionManager
 
         session = SessionManager(redis_url="redis://localhost:16379/0", ttl=60)
         try:
@@ -148,7 +148,7 @@ class TestRedisUnavailable:
     @pytest.mark.asyncio
     async def test_real_redis_health_check(self):
         """真实 Redis 的 health check 应该返回 True"""
-        from agent.session import SessionManager
+        from agent.llm.session import SessionManager
 
         session = SessionManager(ttl=10)
         result = await session.health_check()
@@ -228,7 +228,7 @@ class TestToolRegistryFault:
     @pytest.mark.asyncio
     async def test_execute_unregistered_tool(self):
         """调用未注册的工具 → error，不 crash"""
-        from agent.tools.tools_registry import ToolRegistry
+        from agent.tools_registry import ToolRegistry
 
         registry = ToolRegistry()
         result = await registry.execute("ghost_tool")
@@ -239,7 +239,7 @@ class TestToolRegistryFault:
     @pytest.mark.asyncio
     async def test_execute_tool_that_raises_unexpected(self):
         """工具执行抛非 ToolResult 异常 → 被 Registry 包装成 error"""
-        from agent.tools.tools_registry import BaseTool, ToolRegistry, ToolResult
+        from agent.tools_registry import BaseTool, ToolRegistry, ToolResult
 
         class _CrashTool(BaseTool):
             name = "crash_tool"
