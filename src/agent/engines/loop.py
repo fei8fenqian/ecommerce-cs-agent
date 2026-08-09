@@ -322,6 +322,9 @@ class AgentLoop:
                 "total_steps": self.max_steps,
             }
 
+        except AgentLoopError as e:
+            logger.error("run_stream error: %s", str(e))
+            yield {"event": "error", "message": str(e)}
         except Exception as e:
             logger.error("run_stream error: %s", str(e))
             yield {"event": "error", "message": "服务暂时不可用"}
