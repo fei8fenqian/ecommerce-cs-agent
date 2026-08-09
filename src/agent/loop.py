@@ -324,7 +324,7 @@ class AgentLoop:
 
         except Exception as e:
             logger.error("run_stream error: %s", str(e))
-            yield {"event": "error", "message": str(e)}
+            yield {"event": "error", "message": "服务暂时不可用"}
 
     def _assistant_message(self, tool_calls: list[ToolCall]) -> dict[str, Any]:
         """构建带 tool_calls 的 assistant 消息"""

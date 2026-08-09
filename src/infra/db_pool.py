@@ -4,7 +4,7 @@
 psycopg3 自带 AsyncConnectionPool，异步友好。
 
 用法：
-    from core.db_pool import get_connection, put_connection, init_pool,
+    from infra.db_pool import get_connection, put_connection, init_pool,
 close_pool
 
     conn = get_connection()
@@ -62,3 +62,13 @@ async def close_pool() -> None:
         await _pool.close()
         _pool = None
         logger.info("连接池已关闭")
+
+
+async def check_alive() -> bool:
+    if _pool is None:
+        return False
+    try:
+        await _pool.check()
+        return True
+    except Exception:
+        return False

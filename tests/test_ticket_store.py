@@ -3,7 +3,6 @@
 import pytest
 import pytest_asyncio
 
-from core.db_pool import close_pool, get_connection, init_pool, put_connection
 from core.ticket_store import (
     create_ticket,
     get_ticket,
@@ -11,6 +10,7 @@ from core.ticket_store import (
     list_tickets,
     update_ticket,
 )
+from infra.db_pool import close_pool, get_connection, init_pool, put_connection
 
 pytestmark = pytest.mark.asyncio
 

@@ -5,7 +5,7 @@ import pytest_asyncio
 
 from agent.tools.compare_products import CompareProducts
 from agent.tools_registry import ToolResult
-from core.db_pool import close_pool, init_pool
+from infra.db_pool import close_pool, init_pool
 
 
 @pytest_asyncio.fixture

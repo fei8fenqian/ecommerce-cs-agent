@@ -6,7 +6,7 @@ import pytest_asyncio
 from agent.tools.search_component import CATEGORY_MAP, SearchComponent
 from agent.tools.search_product import SearchProduct
 from agent.tools_registry import ToolResult
-from core.db_pool import close_pool, init_pool
+from infra.db_pool import close_pool, init_pool
 
 
 @pytest_asyncio.fixture

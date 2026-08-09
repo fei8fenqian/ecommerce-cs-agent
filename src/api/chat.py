@@ -10,6 +10,7 @@ from agent.loop import LoopResult
 from agent.sentiment import build_escalation_prompt, detect_sentiment
 from config import settings
 from core.retrieve import hybrid_search
+from exceptions import LLMError
 
 _chat_logger = logging.getLogger(__name__)
 
@@ -95,6 +96,20 @@ async def chat(chat_req: ChatRequest, request: Request):
             session_id=ctx.session_id,
             total_steps=loop_result.total_steps,
             total_tokens=loop_result.total_tokens,
+        )
+    except LLMError as e:
+        _chat_logger.error(
+            "LLM 调用失败: query=%s retry=%d status=%s reason=%s",
+            chat_req.query,
+            e.retry_count,
+            e.status_code,
+            e.last_response,
+        )
+        return ChatResponse(
+            answer="服务暂时不可用",
+            session_id=ctx.session_id,
+            total_steps=0,
+            total_tokens=0,
         )
     except Exception:
         _chat_logger.exception("chat 端点异常: query=%s", chat_req.query)

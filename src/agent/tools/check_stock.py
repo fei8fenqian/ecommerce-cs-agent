@@ -2,7 +2,7 @@ import logging
 from typing import Any
 
 from agent.tools_registry import BaseTool, ToolResult
-from core.db_pool import get_connection, put_connection
+from infra.db_pool import get_connection, put_connection
 
 logger = logging.getLogger(__name__)
 

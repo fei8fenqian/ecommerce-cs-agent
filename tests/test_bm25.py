@@ -5,7 +5,7 @@ from collections import Counter
 import pytest
 
 from core.bm25 import BM25Index
-from core.db_pool import close_pool, get_connection, init_pool, put_connection
+from infra.db_pool import close_pool, get_connection, init_pool, put_connection
 
 
 # =============================================================================

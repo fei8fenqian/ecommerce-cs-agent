@@ -3,7 +3,7 @@
 import pytest
 from psycopg import AsyncConnection
 
-from core.db_pool import close_pool, get_connection, get_dsn, init_pool, put_connection
+from infra.db_pool import close_pool, get_connection, get_dsn, init_pool, put_connection
 
 
 # =============================================================================

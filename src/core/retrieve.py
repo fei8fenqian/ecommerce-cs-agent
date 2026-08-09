@@ -10,9 +10,9 @@ from sentence_transformers import SentenceTransformer
 
 from config import settings
 from core.bm25 import BM25Index
-from core.db_pool import get_connection, put_connection
 from core.rerank import rerank
 from core.rrf import rrf_fuse
+from infra.db_pool import get_connection, put_connection
 
 # 启动时加载一次模型（模块级，不每次请求加载）
 _model = SentenceTransformer(settings.embedding_model)
