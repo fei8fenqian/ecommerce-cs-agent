@@ -3,7 +3,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from core.llm_client import LLMClient, LLMResponse
+from agent.llm.llm_client import LLMClient, LLMResponse
 
 """用一次轻量 LLM 调用给 query 分类，决定走 RAG 还是 Agent Loop"""
 logger = logging.getLogger(__name__)

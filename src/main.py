@@ -2,6 +2,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from agent.llm.intent_router import IntentRouter
+from agent.llm.llm_client import LLMClient
 from agent.loop import AgentLoop
 from agent.mcp_tool import MCPClientManager, MCPTool
 from agent.plan_execute import PlanAndExecuteAgent
@@ -21,8 +23,6 @@ from api.middleware import RequestIDMiddleware
 from api.session import session_router
 from api.tickets import ticket_router
 from config import settings
-from core.intent_router import IntentRouter
-from core.llm_client import LLMClient
 from infra.db_pool import close_pool, init_pool
 from log_config import setup_logging
 from store.ticket_store import init_table

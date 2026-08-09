@@ -192,7 +192,7 @@ class TestLLMErrorHandling:
 
     def test_extract_status_code_from_http_error(self):
         """从 OpenAI SDK 异常中提取 HTTP 状态码"""
-        from core.llm_client import _extract_status_code
+        from agent.llm.llm_client import _extract_status_code
 
         # 模拟 OpenAI APIError（有 http_status）
         class FakeAPIError(Exception):
@@ -204,7 +204,7 @@ class TestLLMErrorHandling:
 
     def test_extract_status_code_from_status_code_attr(self):
         """从有 status_code 属性的异常中提取"""
-        from core.llm_client import _extract_status_code
+        from agent.llm.llm_client import _extract_status_code
 
         class FakeHTTPError(Exception):
             def __init__(self):
@@ -215,7 +215,7 @@ class TestLLMErrorHandling:
 
     def test_extract_status_code_not_found(self):
         """没有状态码的异常返回 None"""
-        from core.llm_client import _extract_status_code
+        from agent.llm.llm_client import _extract_status_code
 
         code = _extract_status_code(ValueError("普通异常"))
         assert code is None

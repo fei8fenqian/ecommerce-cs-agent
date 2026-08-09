@@ -2,10 +2,10 @@
 
 import pytest
 
+from agent.llm.llm_client import LLMResponse, TokenUsage, ToolCall
 from agent.loop import AgentLoop, LoopResult, StepResult
 from agent.tools_registry import BaseTool, ToolRegistry, ToolResult
 from config import settings
-from core.llm_client import LLMResponse, TokenUsage, ToolCall
 
 
 # =============================================================================

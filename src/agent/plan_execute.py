@@ -22,9 +22,9 @@ from typing import Any, AsyncGenerator, TypedDict
 
 from langgraph.graph import StateGraph
 
+from agent.llm.llm_client import LLMClient
 from agent.tools_registry import ToolRegistry, ToolResult
 from config import settings
-from core.llm_client import LLMClient
 
 # =============================================================================
 # Prompt 模板

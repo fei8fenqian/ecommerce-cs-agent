@@ -2,8 +2,8 @@
 
 import pytest
 
-from core.intent_router import Intent, IntentRouter
-from core.llm_client import LLMResponse, TokenUsage
+from agent.llm.intent_router import Intent, IntentRouter
+from agent.llm.llm_client import LLMResponse, TokenUsage
 
 
 # =============================================================================

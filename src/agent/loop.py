@@ -4,9 +4,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from agent.llm.llm_client import LLMClient, ToolCall
 from agent.tools_registry import ToolRegistry
 from config import settings
-from core.llm_client import LLMClient, ToolCall
 from exceptions import AgentLoopError
 
 logger = logging.getLogger(__name__)
