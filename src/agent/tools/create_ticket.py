@@ -3,7 +3,7 @@ import random
 from datetime import datetime
 from typing import Any
 
-from agent.tools_registry import BaseTool, ToolResult
+from agent.tools.tools_registry import BaseTool, ToolResult
 from store.ticket_store import create_ticket as store_create_ticket
 
 logger = logging.getLogger(__name__)

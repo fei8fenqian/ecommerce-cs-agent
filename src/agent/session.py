@@ -20,36 +20,12 @@ import tiktoken
 
 from config import settings
 
-from .loop import LoopResult
+from .engines.loop import LoopResult
+from .resolve import resolve_pronouns
 
 logger = logging.getLogger(__name__)
 
 _ENCODER = tiktoken.get_encoding("cl100k_base")
-
-PRONOUN_MAP: dict[str, str] = {
-    "它": "product",
-    "他": "product",
-    "这个": "product",
-    "这台": "product",
-    "那台": "product",
-    "这款": "product",
-    "该商品": "product",
-    "该产品": "product",
-    "这单": "order",
-    "那个订单": "order",
-    "该订单": "order",
-}
-
-
-def resolve_pronouns(query: str, entities: dict[str, str]) -> str:
-    """用上一轮识别的实体替换指代词。"""
-    if not entities:
-        return query
-    for pronoun, key in PRONOUN_MAP.items():
-        entity = entities.get(key, "")
-        if entity and pronoun in query:
-            query = query.replace(pronoun, entity)
-    return query
 
 
 @dataclass

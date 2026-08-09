@@ -3,8 +3,8 @@
 import pytest
 import pytest_asyncio
 
+from agent.tools.tools_registry import ToolResult
 from agent.tools.track_order import TrackOrder
-from agent.tools_registry import ToolResult
 from infra.db_pool import close_pool, get_connection, init_pool, put_connection
 
 

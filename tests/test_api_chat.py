@@ -9,9 +9,10 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from agent.engines.loop import LoopResult
 from agent.llm.intent_router import Intent
-from agent.loop import LoopResult
-from agent.session import SessionContext, resolve_pronouns
+from agent.resolve import resolve_pronouns
+from agent.session import SessionContext
 from api.chat import chat_router
 
 

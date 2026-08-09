@@ -2,7 +2,7 @@
 
 import pytest
 
-from agent.tools_registry import BaseTool, ToolRegistry, ToolResult
+from agent.tools.tools_registry import BaseTool, ToolRegistry, ToolResult
 
 
 # =============================================================================

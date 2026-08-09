@@ -5,9 +5,10 @@ import time
 import pytest
 import pytest_asyncio
 
+from agent.engines.loop import LoopResult, StepResult
 from agent.llm.llm_client import ToolCall
-from agent.loop import LoopResult, StepResult
-from agent.session import SessionContext, SessionManager, resolve_pronouns
+from agent.resolve import resolve_pronouns
+from agent.session import SessionContext, SessionManager
 
 
 # =============================================================================

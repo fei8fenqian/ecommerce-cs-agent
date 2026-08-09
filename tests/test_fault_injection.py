@@ -8,7 +8,7 @@ import asyncio
 import pytest
 
 from agent.tools.check_stock import CheckStock
-from agent.tools_registry import ToolResult
+from agent.tools.tools_registry import ToolResult
 from infra.db_pool import close_pool, get_connection, init_pool, put_connection
 
 
@@ -228,7 +228,7 @@ class TestToolRegistryFault:
     @pytest.mark.asyncio
     async def test_execute_unregistered_tool(self):
         """调用未注册的工具 → error，不 crash"""
-        from agent.tools_registry import ToolRegistry
+        from agent.tools.tools_registry import ToolRegistry
 
         registry = ToolRegistry()
         result = await registry.execute("ghost_tool")
@@ -239,7 +239,7 @@ class TestToolRegistryFault:
     @pytest.mark.asyncio
     async def test_execute_tool_that_raises_unexpected(self):
         """工具执行抛非 ToolResult 异常 → 被 Registry 包装成 error"""
-        from agent.tools_registry import BaseTool, ToolRegistry, ToolResult
+        from agent.tools.tools_registry import BaseTool, ToolRegistry, ToolResult
 
         class _CrashTool(BaseTool):
             name = "crash_tool"

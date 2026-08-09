@@ -14,7 +14,7 @@ import logging
 from mcp.client.session import ClientSession
 from mcp.client.sse import sse_client
 
-from agent.tools_registry import BaseTool, ToolResult
+from agent.tools.tools_registry import BaseTool, ToolResult
 
 logger = logging.getLogger(__name__)
 

@@ -2,11 +2,10 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from agent.engines.loop import AgentLoop
+from agent.engines.plan_execute import PlanAndExecuteAgent
 from agent.llm.intent_router import IntentRouter
 from agent.llm.llm_client import LLMClient
-from agent.loop import AgentLoop
-from agent.mcp_tool import MCPClientManager, MCPTool
-from agent.plan_execute import PlanAndExecuteAgent
 from agent.session import SessionManager
 from agent.tools import (
     check_stock,
@@ -16,15 +15,16 @@ from agent.tools import (
     search_product,
     track_order,
 )
-from agent.tools_registry import ToolRegistry
+from agent.tools.mcp_tool import MCPClientManager, MCPTool
+from agent.tools.tools_registry import ToolRegistry
 from api.chat import chat_router
 from api.health import health_router
-from api.middleware import RequestIDMiddleware
 from api.session import session_router
 from api.tickets import ticket_router
 from config import settings
 from infra.db_pool import close_pool, init_pool
 from log_config import setup_logging
+from middleware.request_id import RequestIDMiddleware
 from store.ticket_store import init_table
 
 
