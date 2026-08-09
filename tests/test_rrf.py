@@ -1,6 +1,6 @@
 """tests/test_rrf.py — RRF 融合算法单元测试"""
 
-from core.rrf import rrf_fuse
+from agent.rag.rrf import rrf_fuse
 
 
 def test_rrf_identical_rankings():

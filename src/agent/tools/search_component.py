@@ -1,9 +1,9 @@
 import logging
 from typing import Any
 
+from agent.rag.retrieve import hybrid_search
 from agent.tools_registry import BaseTool, ToolResult
 from config import settings
-from core.retrieve import hybrid_search
 
 logger = logging.getLogger(__name__)
 

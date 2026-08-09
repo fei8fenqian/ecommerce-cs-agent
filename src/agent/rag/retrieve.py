@@ -8,10 +8,10 @@
 
 from sentence_transformers import SentenceTransformer
 
+from agent.rag.bm25 import BM25Index
+from agent.rag.rerank import rerank
+from agent.rag.rrf import rrf_fuse
 from config import settings
-from core.bm25 import BM25Index
-from core.rerank import rerank
-from core.rrf import rrf_fuse
 from infra.db_pool import get_connection, put_connection
 
 # 启动时加载一次模型（模块级，不每次请求加载）

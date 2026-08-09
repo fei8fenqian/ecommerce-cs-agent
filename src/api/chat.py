@@ -7,9 +7,9 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from agent.loop import LoopResult
+from agent.rag.retrieve import hybrid_search
 from agent.sentiment import build_escalation_prompt, detect_sentiment
 from config import settings
-from core.retrieve import hybrid_search
 from exceptions import LLMError
 
 _chat_logger = logging.getLogger(__name__)
