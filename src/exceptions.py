@@ -176,3 +176,15 @@ class AgentLoopError(BaseAppException):
         self.step_count = step_count
         self.last_action = last_action
         self.reason = reason
+
+
+class AuthenticationError(BaseAppException):
+    """鉴权失败。"""
+
+    def __init__(
+        self,
+        message: str,
+        error_code: str = "AUTHENTICATION_ERROR",
+        detail: dict[str, Any] | None = None,
+    ):
+        super().__init__(message, error_code=error_code, detail=detail)

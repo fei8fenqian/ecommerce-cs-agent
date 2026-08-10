@@ -65,13 +65,35 @@ async def update_users(id: int, fields: dict[str, Any]):
 
 
 async def get_user_by_username(username: str) -> dict:
-    """获取用户信息，用于验证用户信息"""
+    """通过用户名获取用户信息，用于验证用户信息"""
     try:
         conn = await get_connection()
         await conn.set_autocommit(True)
         cur = await conn.execute(
             "select id, username, password_hash, role from users where username = %s",
             (username,),
+        )
+        row = await cur.fetchone()
+        if not row:
+            return {}
+        return {
+            "id": row[0],
+            "username": row[1],
+            "password_hash": row[2],
+            "role": row[3],
+        }
+    finally:
+        await put_connection(conn)
+
+
+async def get_user_by_id(user_id: int) -> dict:
+    """通过id获取用户信息"""
+    try:
+        conn = await get_connection()
+        await conn.set_autocommit(True)
+        cur = await conn.execute(
+            "select id, username, password_hash, role from users where id = %s",
+            (user_id,),
         )
         row = await cur.fetchone()
         if not row:
