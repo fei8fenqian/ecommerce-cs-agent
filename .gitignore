@@ -43,3 +43,6 @@ data/eval_adversarial_results.json
 
 # 面试准备文档
 PROJECT_WALKTHROUGH.md
+
+# jwt私钥
+*.pem

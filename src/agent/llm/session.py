@@ -15,10 +15,11 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-import redis.asyncio as redis
 import tiktoken
+from redis.asyncio import Redis
 
 from config import settings
+from infra.redis_client import get_redis
 
 from ..engines.loop import LoopResult
 from .resolve import resolve_pronouns
@@ -112,7 +113,7 @@ class SessionManager:
     两个 key 都设 TTL（session_ttl），过期自动清理，无需手动 GC。
     """
 
-    def __init__(self, redis_url: str | None = None, ttl: int | None = None):
+    def __init__(self, ttl: int | None = None):
         """
         Args:
             redis_url: Redis 连接串，默认取 settings.redis_url
@@ -120,25 +121,8 @@ class SessionManager:
             ttl: 会话过期时间（秒），默认取 settings.session_ttl
                  过期后 Redis 自动删除，无需手动清理
         """
-        self._redis = redis.from_url(redis_url or settings.redis_url)
+        self._redis: Redis = get_redis()
         self._ttl = ttl or settings.session_ttl
-
-    async def health_check(self) -> bool:
-        """启动时检查 Redis 连通性。失败不阻塞启动，只打日志。"""
-        try:
-            await self._redis.ping()
-            logger.info(
-                "Redis 连接成功: %s",
-                self._redis.connection_pool.connection_kwargs.get("host", "?"),
-            )
-            return True
-        except Exception as e:
-            logger.warning("Redis 连接失败: %s，会话功能将不可用", e)
-            return False
-
-    async def close(self) -> None:
-        """关闭 Redis 连接池。"""
-        await self._redis.aclose()
 
     # -- Public API --
 

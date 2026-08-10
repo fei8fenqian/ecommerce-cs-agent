@@ -2,7 +2,7 @@ import logging
 
 from mcp.server.fastmcp import FastMCP
 
-from core.db_pool import get_connection, init_pool, put_connection
+from infra.db_pool import get_connection, init_pool, put_connection
 
 logger = logging.getLogger(__name__)
 mcp = FastMCP("payment-server", host="0.0.0.0", port=8081)

@@ -90,12 +90,6 @@ class _MockSessionManager:
             ctx.messages.append({"role": "user", "content": query})
             ctx.messages.append({"role": "assistant", "content": answer})
 
-    async def health_check(self) -> bool:
-        return True
-
-    async def close(self):
-        pass
-
 
 # =============================================================================
 # TestClient fixture

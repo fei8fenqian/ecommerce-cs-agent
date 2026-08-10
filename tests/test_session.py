@@ -9,6 +9,7 @@ from agent.engines.loop import LoopResult, StepResult
 from agent.llm.llm_client import ToolCall
 from agent.llm.resolve import resolve_pronouns
 from agent.llm.session import SessionContext, SessionManager
+from infra.redis_client import close_redis, init_redis
 
 
 # =============================================================================
@@ -170,10 +171,11 @@ class TestSessionManager:
 
     @pytest_asyncio.fixture
     async def manager(self):
+        init_redis()
         m = SessionManager(ttl=1)
         yield m
         await m.flush_all()
-        await m.close()
+        await close_redis()
 
     # -- get_or_create ---------------------------------------------------------
     @pytest.mark.asyncio
@@ -396,6 +398,7 @@ class TestSessionManager:
     @pytest.mark.asyncio
     async def test_cleanup_removes_expired_sessions(self):
         """手动将 last_active 设为过去 → cleanup_expired 删除"""
+        init_redis()
         m = SessionManager(ttl=3600)  # 长 TTL，Redis 不会自动删
         await m.get_or_create("sid_cleanup_expired")
         # 把 last_active 改成 2 小时前
@@ -409,11 +412,12 @@ class TestSessionManager:
         assert count == 1
         assert await m.get("sid_cleanup_expired") is None
         await m.flush_all()
-        await m.close()
+        await close_redis()
 
     @pytest.mark.asyncio
     async def test_cleanup_mixed_expired_and_active(self):
         """一个过期一个活跃 → 只清理过期的"""
+        init_redis()
         m = SessionManager(ttl=3600)
         await m.get_or_create("sid_cleanup_old")
         old_time = time.time() - 7200
@@ -429,7 +433,7 @@ class TestSessionManager:
         assert await m.get("sid_cleanup_old") is None
         assert await m.get("sid_cleanup_fresh") is not None
         await m.flush_all()
-        await m.close()
+        await close_redis()
 
     @pytest.mark.asyncio
     async def test_cleanup_no_expired_returns_zero(self, manager):

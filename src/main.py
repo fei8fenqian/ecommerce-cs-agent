@@ -23,6 +23,7 @@ from api.session import session_router
 from api.tickets import ticket_router
 from config import settings
 from infra.db_pool import close_pool, init_pool
+from infra.redis_client import close_redis, health_check, init_redis
 from log_config import setup_logging
 from middleware.request_id import RequestIDMiddleware
 from store.ticket_store import init_table
@@ -34,6 +35,8 @@ async def lifespan(app: FastAPI):
     setup_logging()
     await init_pool()
     await init_table()
+    init_redis()
+    await health_check()
     llm = LLMClient(
         api_key=settings.llm_api_key.get_secret_value(),
         base_url=settings.llm_base_url,
@@ -54,7 +57,6 @@ async def lifespan(app: FastAPI):
     )
     agent = AgentLoop(llm, registry, max_steps=settings.max_steps)
     session = SessionManager()
-    await session.health_check()
 
     mcp_managers: list[MCPClientManager] = []
     for url in settings.mcp_servers:
@@ -75,8 +77,8 @@ async def lifespan(app: FastAPI):
     yield
 
     # shutdown
-    await session.close()
     await close_pool()
+    await close_redis()
     for manager in mcp_managers:
         await manager.disconnect()
 
