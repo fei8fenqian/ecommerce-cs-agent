@@ -17,6 +17,7 @@ from agent.tools import (
     track_order,
 )
 from agent.tools_registry import ToolRegistry
+from api.auth import auth_router
 from api.chat import chat_router
 from api.health import health_router
 from api.session import session_router
@@ -25,6 +26,7 @@ from config import settings
 from infra.db_pool import close_pool, init_pool
 from infra.redis_client import close_redis, health_check, init_redis
 from log_config import setup_logging
+from middleware.auth import AuthMiddleware
 from middleware.request_id import RequestIDMiddleware
 from store.ticket_store import init_table
 
@@ -88,5 +90,7 @@ app.include_router(chat_router)
 app.include_router(session_router)
 app.include_router(ticket_router)
 app.include_router(health_router)
+app.include_router(auth_router)
 
 app.add_middleware(RequestIDMiddleware)
+app.add_middleware(AuthMiddleware)

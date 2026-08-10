@@ -1,5 +1,7 @@
 import logging
 
+import jwt
+
 from exceptions import AuthenticationError
 from infra.redis_client import get_redis
 from store.user_store import get_user_by_id, get_user_by_username
@@ -68,7 +70,13 @@ async def verify_token(token: str) -> dict:
     Raises:
         AuthenticationError: token 无效 / 已过期 / 已登出
     """
-    payload = parse_jwt(token)
+    try:
+        payload = parse_jwt(token)
+    except jwt.ExpiredSignatureError:
+        raise AuthenticationError("登录已过期，请重新登录")
+    except jwt.InvalidTokenError as e:
+        raise AuthenticationError(f"token 无效: {str(e)}")
+
     user_id = payload.get("sub")
     if not user_id:
         raise AuthenticationError("token 无效，缺少用户标识")
