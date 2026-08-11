@@ -5,7 +5,7 @@ from collections import Counter
 import pytest
 
 from agent.rag.bm25 import BM25Index
-from infra.db_pool import close_pool, get_connection, init_pool, put_connection
+from infra.db_pool import get_connection, init_pool, put_connection
 
 
 # =============================================================================
@@ -171,7 +171,6 @@ class TestBM25BuildFromDB:
             assert isinstance(results[0][1], float)
         finally:
             await put_connection(conn)
-            await close_pool()
 
     @pytest.mark.asyncio
     async def test_build_from_knowledge_chunks(self):
@@ -187,7 +186,6 @@ class TestBM25BuildFromDB:
             assert len(results) > 0
         finally:
             await put_connection(conn)
-            await close_pool()
 
     @pytest.mark.asyncio
     async def test_build_from_empty_table(self):
@@ -206,4 +204,3 @@ class TestBM25BuildFromDB:
             await conn.execute("DROP TABLE IF EXISTS _bm25_test_empty")
         finally:
             await put_connection(conn)
-            await close_pool()

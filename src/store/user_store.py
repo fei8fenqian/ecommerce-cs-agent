@@ -17,7 +17,7 @@ async def init_user_table():
         await conn.execute("""
             create table if not exists users (
                 id serial primary key,
-                username unique not null,
+                username varchar(64) unique not null,
                 password_hash varchar(60),
                 role varchar(32)
             )
@@ -53,7 +53,7 @@ async def update_users(id: int, fields: dict[str, Any]):
     for key, val in fields.items():
         set_parts.append(SQL("{} = %s").format(Identifier(key)))
         values.append(val)
-    sql = SQL("update users set {} where id = %s".format(SQL(",").join(set_parts)))
+    sql = SQL("update users set {} where id = %s").format(SQL(",").join(set_parts))
     try:
         conn = await get_connection()
         await conn.set_autocommit(True)

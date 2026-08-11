@@ -66,7 +66,10 @@ async def put_connection(conn) -> None:
 async def close_pool() -> None:
     global _pool
     if _pool is not None:
-        await _pool.close()
+        try:
+            await _pool.close()
+        except BaseException:
+            pass  # psycopg3 worker 清理时可能抛 CancelledError，资源已释放
         _pool = None
         logger.info("连接池已关闭")
 

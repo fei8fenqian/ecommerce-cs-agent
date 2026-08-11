@@ -3,7 +3,7 @@
 import pytest
 import pytest_asyncio
 
-from infra.db_pool import close_pool, get_connection, init_pool, put_connection
+from infra.db_pool import get_connection, init_pool, put_connection
 from store.user_store import (
     get_user_by_id,
     get_user_by_username,
@@ -34,7 +34,6 @@ async def _setup():
         await conn.set_autocommit(True)
         await conn.execute("DELETE FROM users")
         await put_connection(conn)
-        await close_pool()
     except Exception:
         pass
 
