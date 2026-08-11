@@ -11,7 +11,7 @@ from infra.db_pool import get_connection, put_connection
 logger = logging.getLogger(__name__)
 
 
-async def init_table() -> None:
+async def init_ticket_table() -> None:
     """建表（幂等），在 lifespan startup 中调用一次。"""
     try:
         conn = await get_connection()

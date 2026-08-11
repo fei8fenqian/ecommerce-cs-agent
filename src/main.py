@@ -28,7 +28,8 @@ from infra.redis_client import close_redis, health_check, init_redis
 from log_config import setup_logging
 from middleware.auth import AuthMiddleware
 from middleware.request_id import RequestIDMiddleware
-from store.ticket_store import init_table
+from store.ticket_store import init_ticket_table
+from store.user_store import init_user_table, seed_users
 
 
 @asynccontextmanager
@@ -36,9 +37,11 @@ async def lifespan(app: FastAPI):
     # startup
     setup_logging()
     await init_pool()
-    await init_table()
+    await init_ticket_table()
     init_redis()
     await health_check()
+    await init_user_table()
+    await seed_users()
     llm = LLMClient(
         api_key=settings.llm_api_key.get_secret_value(),
         base_url=settings.llm_base_url,

@@ -4,11 +4,12 @@ from typing import Any
 from psycopg.sql import SQL, Identifier
 
 from infra.db_pool import get_connection, put_connection
+from utils.password_utils import generate_hashed_password
 
 logger = logging.getLogger(__name__)
 
 
-async def init_table():
+async def init_user_table():
     """建表（幂等）"""
     try:
         conn = await get_connection()
@@ -106,3 +107,16 @@ async def get_user_by_id(user_id: int) -> dict:
         }
     finally:
         await put_connection(conn)
+
+
+async def seed_users():
+    """初始化种子用户"""
+    users = [
+        ("admin", "admin123", "admin"),
+        ("agent", "agent123", "agent"),
+        ("operator", "operator123", "operator"),
+        ("customer", "customer123", "customer"),
+    ]
+    for username, password, role in users:
+        password_hash = generate_hashed_password(password).decode()
+        await insert_users(username, password_hash, role)

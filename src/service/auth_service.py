@@ -39,9 +39,14 @@ async def login(username: str, password: str) -> tuple[str, dict]:
         raise AuthenticationError("账号或密码错误")
 
     user_id = user_info["id"]
-    token = generate_jwt(user_id)
+    role = user_info["role"]
+    if role in {"agent", "operator", "admin"}:
+        user_type = "internal"
+    else:
+        user_type = "external"
+    token = generate_jwt(user_id, role, user_type)
     redis = get_redis()
-    await redis.set(_key(user_id), token, ex=86400)  # 24h
+    await redis.set(_key(user_id), token, ex=3600)  # 1h
 
     user_info.pop("password_hash", None)
     logger.info("login success: user_id=%s username=%s", user_id, username)
