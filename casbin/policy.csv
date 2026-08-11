@@ -1,0 +1,36 @@
+# ========== customer (external) ==========
+p, customer, /api/v1/chat, POST
+p, customer, /api/v1/products/*, GET
+p, customer, /api/v1/orders/my/*, GET
+p, customer, /api/v1/tickets/my/*, GET
+p, customer, /api/v1/tickets/my/*, POST
+
+# ========== agent (internal) ==========
+p, agent, /api/v1/chat, POST
+p, agent, /api/v1/products/*, GET
+p, agent, /api/v1/orders/my/*, GET
+p, agent, /api/v1/tickets/my/*, GET
+p, agent, /api/v1/tickets/my/*, POST
+p, agent, /api/v1/tickets/*, GET
+p, agent, /api/v1/tickets/*, PUT
+p, agent, /api/v1/orders/*, GET
+p, agent, /api/v1/refunds/*, POST
+
+# ========== operator (internal) ==========
+p, operator, /api/v1/chat, POST
+p, operator, /api/v1/products/*, GET
+p, operator, /api/v1/orders/my/*, GET
+p, operator, /api/v1/tickets/my/*, GET
+p, operator, /api/v1/tickets/my/*, POST
+p, operator, /api/v1/tickets/*, GET
+p, operator, /api/v1/tickets/*, PUT
+p, operator, /api/v1/orders/*, GET
+p, operator, /api/v1/products/*, POST
+p, operator, /api/v1/products/*, PUT
+p, operator, /api/v1/products/*, DELETE
+p, operator, /api/v1/campaigns/*, GET
+p, operator, /api/v1/campaigns/*, POST
+p, operator, /api/v1/reports/*, GET
+
+# ========== admin (internal) ==========
+p, admin, *, *

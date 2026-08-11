@@ -29,11 +29,17 @@ RUN pip install --no-cache-dir \
     "mcp>=1.0" \
     "tiktoken>=0.7" \
     "redis>=5.0" \
+    "casbin>=1.40" \
+    "pyjwt>=2.8" \
+    "bcrypt>=4.0" \
     uvicorn \
     -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 # ---- 3. 代码（最常变，放最后）----
 COPY src/ src/
+COPY casbin/ casbin/
+COPY public_key.pem ./
+# private_key.pem 不进镜像——通过 volume 挂载或 K8s secret 注入
 
 # ---- 4. 启动 ----
 EXPOSE 8000

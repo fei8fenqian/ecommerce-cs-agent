@@ -2,6 +2,7 @@ from fastapi import HTTPException, Request
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from exceptions import AuthenticationError
+from infra.casbin_enforcer import enforce
 from service.auth_service import verify_token
 
 ALLOWLIST_PATHS = {"/health", "/api/v1/auth/login"}
@@ -22,10 +23,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
             request.state.user = user_info
             # internal
             if user_type == "internal":
-                ...
-            # external
-            else:
-                return await call_next(request)
+                has_permission: bool = enforce(user_info["role"], request.url.path, request.method)
+                if not has_permission:
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"{user_info['role']}无权通过{request.method}访问{request.url.path}",
+                    )
         except AuthenticationError as e:
             raise HTTPException(status_code=401, detail=e.to_dict())
         return await call_next(request)

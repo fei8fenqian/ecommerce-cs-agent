@@ -40,6 +40,10 @@ git clone https://github.com/fei8fenqian/ecommerce-cs-agent.git
 cd ecommerce-cs-agent
 pip install -e ".[dev]"
 cp .env.example .env  # 编辑 .env 填入 API Key 和数据库密码
+
+# 生成 JWT 密钥对（RS256）
+ssh-keygen -t rsa -b 2048 -m PEM -N "" -f private_key.pem
+openssl rsa -in private_key.pem -pubout -out public_key.pem
 ```
 
 ### 初始化数据

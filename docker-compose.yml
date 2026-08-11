@@ -25,6 +25,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    volumes:
+      - ./private_key.pem:/app/private_key.pem:ro
     restart: unless-stopped
 
   # ---- PostgreSQL + pgvector ----

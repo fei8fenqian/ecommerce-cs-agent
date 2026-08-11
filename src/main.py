@@ -23,6 +23,7 @@ from api.health import health_router
 from api.session import session_router
 from api.tickets import ticket_router
 from config import settings
+from infra.casbin_enforcer import init_casbin
 from infra.db_pool import close_pool, init_pool
 from infra.redis_client import close_redis, health_check, init_redis
 from log_config import setup_logging
@@ -42,6 +43,7 @@ async def lifespan(app: FastAPI):
     await health_check()
     await init_user_table()
     await seed_users()
+    init_casbin()
     llm = LLMClient(
         api_key=settings.llm_api_key.get_secret_value(),
         base_url=settings.llm_base_url,
