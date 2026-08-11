@@ -7,7 +7,7 @@ from infra.db_pool import close_pool, get_connection, init_pool, put_connection
 from store.ticket_store import (
     create_ticket,
     get_ticket,
-    init_table,
+    init_ticket_table,
     list_tickets,
     update_ticket,
 )
@@ -22,7 +22,7 @@ pytestmark = pytest.mark.asyncio
 async def _setup():
     """每个测试前建表，测试后清空"""
     await init_pool(minconn=1, maxconn=2)
-    await init_table()
+    await init_ticket_table()
     conn = await get_connection()
     await conn.set_autocommit(True)
     await conn.execute("DELETE FROM tickets")
@@ -36,18 +36,18 @@ async def _setup():
 
 
 # =============================================================================
-# init_table — 建表幂等
+# init_ticket_table — 建表幂等
 # =============================================================================
 class TestInitTable:
     @pytest.mark.asyncio
-    async def test_init_table_idempotent(self):
-        """连续调用 init_table 不应报错"""
-        await init_table()
-        await init_table()
+    async def test_init_ticket_table_idempotent(self):
+        """连续调用 init_ticket_table 不应报错"""
+        await init_ticket_table()
+        await init_ticket_table()
 
     @pytest.mark.asyncio
     async def test_table_exists_after_init(self):
-        """init_table 后表存在且可写"""
+        """init_ticket_table 后表存在且可写"""
         await create_ticket("TK-TEST-001", "测试工单", customer_name="小明")
         ticket = await get_ticket("TK-TEST-001")
         assert ticket is not None

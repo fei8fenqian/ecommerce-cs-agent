@@ -14,7 +14,7 @@ from agent.tools.search_product import SearchProduct
 from agent.tools.track_order import TrackOrder
 from agent.tools_registry import ToolResult
 from infra.db_pool import close_pool, get_connection, init_pool, put_connection
-from store.ticket_store import create_ticket, get_ticket, init_table, list_tickets, update_ticket
+from store.ticket_store import create_ticket, get_ticket, init_ticket_table, list_tickets, update_ticket
 
 
 # =============================================================================
@@ -30,7 +30,7 @@ async def _pool():
 @pytest_asyncio.fixture
 async def _tickets():
     await init_pool(minconn=1, maxconn=2)
-    await init_table()
+    await init_ticket_table()
     conn = await get_connection()
     await conn.set_autocommit(True)
     await conn.execute("DELETE FROM tickets")
