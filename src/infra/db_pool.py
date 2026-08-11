@@ -37,8 +37,10 @@ def get_dsn() -> str:
 
 
 async def init_pool(minconn: int = 4, maxconn: int = 20) -> None:
-    """在 lifespan startup 里调用一次"""
+    """在 lifespan startup 里调用一次（幂等：已初始化则跳过）"""
     global _pool
+    if _pool is not None:
+        return
     _pool = AsyncConnectionPool(conninfo=get_dsn, min_size=minconn, max_size=maxconn, open=False)
     await _pool.open()
     logger.info("连接池已初始化")
