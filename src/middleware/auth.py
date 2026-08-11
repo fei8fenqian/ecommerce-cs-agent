@@ -8,6 +8,8 @@ ALLOWLIST_PATHS = {"/health", "/api/v1/auth/login"}
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
+    """登录认证中间件"""
+
     async def dispatch(self, request: Request, call_next):
         if request.url.path in ALLOWLIST_PATHS:
             return await call_next(request)
@@ -16,8 +18,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
             raise HTTPException(status_code=401, detail="缺少 Authorization header")
         token = auth_header.removeprefix("Bearer ")
         try:
-            user_info = await verify_token(token)
+            user_info, user_type = await verify_token(token)
+            request.state.user = user_info
+            # internal
+            if user_type == "internal":
+                ...
+            # external
+            else:
+                return await call_next(request)
         except AuthenticationError as e:
             raise HTTPException(status_code=401, detail=e.to_dict())
-        request.state.user = user_info
         return await call_next(request)

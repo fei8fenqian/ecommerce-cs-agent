@@ -69,7 +69,7 @@ async def logout(token: str) -> None:
     logger.info("logout success: user_id=%s", user_id)
 
 
-async def verify_token(token: str) -> dict:
+async def verify_token(token: str) -> tuple[dict, str]:
     """验证 token 有效性，返回当前用户信息。
 
     Raises:
@@ -96,4 +96,8 @@ async def verify_token(token: str) -> dict:
     user_info = await get_user_by_id(int(user_id))
     if not user_info:
         raise AuthenticationError("用户不存在或已被删除")
-    return user_info
+    if user_info["role"] in {"agent", "operator", "admin"}:
+        user_type = "internal"
+    else:
+        user_type = "external"
+    return user_info, user_type
