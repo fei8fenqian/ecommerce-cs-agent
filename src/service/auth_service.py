@@ -59,7 +59,11 @@ async def logout(token: str) -> None:
     Raises:
         AuthenticationError: token 无效
     """
-    payload = parse_jwt(token)
+    try:
+        payload = parse_jwt(token)
+    except jwt.InvalidTokenError as e:
+        raise AuthenticationError(f"token 无效: {str(e)}")
+
     user_id = payload.get("sub")
     if not user_id:
         raise AuthenticationError("token 无效，缺少用户标识")

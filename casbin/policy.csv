@@ -33,4 +33,4 @@ p, operator, /api/v1/campaigns/*, POST
 p, operator, /api/v1/reports/*, GET
 
 # ========== admin (internal) ==========
-p, admin, *, *
+p, admin, *, .*

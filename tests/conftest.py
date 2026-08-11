@@ -24,7 +24,11 @@ def _build_dsn() -> str:
 async def _setup_db():
     """确保 CI 环境有所需的测试表 + 数据。本地已有数据时跳过 INSERT。"""
     dsn = _build_dsn()
-    conn = await psycopg.AsyncConnection.connect(dsn)
+    try:
+        conn = await psycopg.AsyncConnection.connect(dsn)
+    except psycopg.OperationalError:
+        yield  # PostgreSQL 不可用，跳过 DB 初始化（非 DB 测试不受影响）
+        return
     await conn.set_autocommit(True)
 
     # pgvector 扩展
@@ -165,6 +169,16 @@ async def _setup_db():
             ('ORD-TEST-003', '华为MateBook X Pro', '华为', 8999.00, 1)
         """)
 
+    # ── users ────────────────────────────────────────────────────────
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id SERIAL PRIMARY KEY,
+            username VARCHAR(64) UNIQUE NOT NULL,
+            password_hash VARCHAR(128),
+            role VARCHAR(32)
+        )
+    """)
+
     # ── tickets ──────────────────────────────────────────────────────
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS tickets (
@@ -182,3 +196,40 @@ async def _setup_db():
     await conn.close()
     yield
     # CI 容器跑完就销毁，不需要 teardown
+
+
+# =============================================================================
+# 测试用 JWT 密钥对（session 级别，所有测试共享）
+# =============================================================================
+@pytest_asyncio.fixture(scope="session", autouse=True)
+async def _setup_test_keys():
+    """生成测试用 RSA 密钥对（真实密钥，非 mock）。"""
+    from pathlib import Path
+
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    # 如果项目根已有密钥（用户自己生成的），不覆盖
+    if Path("private_key.pem").exists() and Path("public_key.pem").exists():
+        yield
+        return
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    private_pem = key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    public_pem = key.public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+
+    Path("private_key.pem").write_bytes(private_pem)
+    Path("public_key.pem").write_bytes(public_pem)
+
+    yield
+
+    # 清理：只删除测试生成的密钥
+    Path("private_key.pem").unlink(missing_ok=True)
+    Path("public_key.pem").unlink(missing_ok=True)

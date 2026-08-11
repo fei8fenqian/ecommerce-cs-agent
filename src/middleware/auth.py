@@ -1,5 +1,6 @@
-from fastapi import HTTPException, Request
+from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse
 
 from exceptions import AuthenticationError
 from infra.casbin_enforcer import enforce
@@ -16,19 +17,18 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
         auth_header = request.headers.get("Authorization")
         if not auth_header:
-            raise HTTPException(status_code=401, detail="缺少 Authorization header")
+            return JSONResponse(status_code=401, content={"detail": "缺少 Authorization header"})
         token = auth_header.removeprefix("Bearer ")
         try:
             user_info, user_type = await verify_token(token)
             request.state.user = user_info
             # internal
             if user_type == "internal":
-                has_permission: bool = enforce(user_info["role"], request.url.path, request.method)
-                if not has_permission:
-                    raise HTTPException(
+                if not enforce(user_info["role"], request.url.path, request.method):
+                    return JSONResponse(
                         status_code=403,
-                        detail=f"{user_info['role']}无权通过{request.method}访问{request.url.path}",
+                        content={"detail": f"{user_info['role']}无权通过{request.method}访问{request.url.path}"},
                     )
         except AuthenticationError as e:
-            raise HTTPException(status_code=401, detail=e.to_dict())
+            return JSONResponse(status_code=401, content={"detail": e.to_dict()})
         return await call_next(request)

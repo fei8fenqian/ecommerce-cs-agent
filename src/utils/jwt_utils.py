@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 def generate_jwt(user_id: int, role: str, user_type: str):
     payload: dict[str, Any] = {
-        "sub": user_id,
+        "sub": str(user_id),
         "role": role,  # admin | agent | customer
         "user_type": user_type,  # external | internal
         "exp": datetime.now(timezone.utc) + timedelta(hours=1),
