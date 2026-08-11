@@ -15,6 +15,7 @@ close_pool
         put_connection(conn)
 """
 
+import asyncio
 import logging
 
 from psycopg_pool.pool_async import AsyncConnectionPool
@@ -41,8 +42,12 @@ async def init_pool(minconn: int = 4, maxconn: int = 20) -> None:
     global _pool
     if _pool is not None:
         return
-    _pool = AsyncConnectionPool(conninfo=get_dsn, min_size=minconn, max_size=maxconn, open=False)
-    await _pool.open()
+    _pool = AsyncConnectionPool(conninfo=get_dsn(), min_size=minconn, max_size=maxconn, open=False)
+    try:
+        await asyncio.wait_for(_pool.open(), timeout=10)
+    except Exception:
+        _pool = None
+        raise
     logger.info("连接池已初始化")
 
 

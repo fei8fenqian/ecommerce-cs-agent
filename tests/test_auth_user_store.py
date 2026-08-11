@@ -18,19 +18,25 @@ pytestmark = pytest.mark.asyncio
 
 @pytest_asyncio.fixture(autouse=True)
 async def _setup():
-    """每个测试前建表 + 清空"""
-    await init_pool(minconn=1, maxconn=2)
+    """每个测试前建表 + 清空。连接失败时跳过整个文件。"""
+    try:
+        await init_pool(minconn=1, maxconn=2)
+    except Exception:
+        pytest.skip("PostgreSQL 不可用，跳过 user_store 测试")
     await init_user_table()
     conn = await get_connection()
     await conn.set_autocommit(True)
     await conn.execute("DELETE FROM users")
     await put_connection(conn)
     yield
-    conn = await get_connection()
-    await conn.set_autocommit(True)
-    await conn.execute("DELETE FROM users")
-    await put_connection(conn)
-    await close_pool()
+    try:
+        conn = await get_connection()
+        await conn.set_autocommit(True)
+        await conn.execute("DELETE FROM users")
+        await put_connection(conn)
+        await close_pool()
+    except Exception:
+        pass
 
 
 class TestInitTable:
