@@ -19,7 +19,7 @@ def create_component_table(conn: connection):
     cur.execute("""
         create table if not exists component_products (
             id          varchar(128) primary key,
-            name        varchar(512),
+            product_name varchar(512),
             category    varchar(64),
             price       numeric,
             url         varchar(512),
@@ -100,10 +100,11 @@ def ingest(conn: connection, model: SentenceTransformer, products: list[dict]):
             p = product_map[rid]
             cur.execute(
                 "insert into component_products "
-                "(id, name, category, price, url, normalized, params, description, embedding, metadata, content_hash) "
+                "(id, product_name, category, price, url, normalized, params, "
+                "description, embedding, metadata, content_hash) "
                 "values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
                 "on conflict (id) do update set "
-                "name=excluded.name, category=excluded.category, price=excluded.price, "
+                "product_name=excluded.product_name, category=excluded.category, price=excluded.price, "
                 "url=excluded.url, normalized=excluded.normalized, params=excluded.params, "
                 "description=excluded.description, embedding=excluded.embedding, "
                 "metadata=excluded.metadata, content_hash=excluded.content_hash",
