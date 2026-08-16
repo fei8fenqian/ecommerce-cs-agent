@@ -19,6 +19,7 @@ class SessionRecord(TypedDict):
     created_at: datetime
     last_active_at: datetime
     message_count: int
+    last_entities: dict[str, str]
 
 
 class SessionMessage(TypedDict):
@@ -52,7 +53,7 @@ async def create_session(owner_user_id: int, title: str = "") -> SessionRecord:
                 insert into public.sessions
                 (id, owner_user_id, title)
                 values (%s, %s, %s)
-                returning id, owner_user_id, title, created_at, last_active_at
+                returning id, owner_user_id, title, created_at, last_active_at, last_entities
                 """,
                 (sid, owner_user_id, (title or "")),
             )
@@ -66,6 +67,7 @@ async def create_session(owner_user_id: int, title: str = "") -> SessionRecord:
                 created_at=row[3],
                 last_active_at=row[4],
                 message_count=0,
+                last_entities=row[5] or {},
             )
     finally:
         if conn is not None:
@@ -83,11 +85,12 @@ async def get_session(session_id: str, owner_user_id: int) -> SessionRecord | No
         cur = await conn.execute(
             """
             select s.id, s.owner_user_id, s.title, s.created_at, s.last_active_at,
+            s.last_entities,
             count(m.id)::int as message_count
             from public.sessions s left join public.session_messages m
             on s.id=m.session_id
             where s.owner_user_id = %s and s.id = %s
-            group by s.id, s.owner_user_id, s.title, s.created_at, s.last_active_at
+            group by s.id, s.owner_user_id, s.title, s.created_at, s.last_active_at, s.last_entities
             """,
             (owner_user_id, session_uuid),
         )
@@ -100,7 +103,8 @@ async def get_session(session_id: str, owner_user_id: int) -> SessionRecord | No
             title=row[2],
             created_at=row[3],
             last_active_at=row[4],
-            message_count=row[5],
+            last_entities=row[5] or {},
+            message_count=row[6],
         )
     finally:
         if conn is not None:
@@ -115,11 +119,12 @@ async def list_sessions(owner_user_id: int) -> list[SessionRecord]:
         async for row in await conn.execute(
             """
             select s.id, s.owner_user_id, s.title, s.created_at, s.last_active_at,
+            s.last_entities,
             count(m.id)::int as message_count
             from public.sessions s left join public.session_messages m
             on s.id = m.session_id
             where s.owner_user_id = %s
-            group by s.id, s.owner_user_id, s.title, s.created_at, s.last_active_at
+            group by s.id, s.owner_user_id, s.title, s.created_at, s.last_active_at, s.last_entities
             order by s.last_active_at desc
             """,
             (owner_user_id,),
@@ -133,7 +138,8 @@ async def list_sessions(owner_user_id: int) -> list[SessionRecord]:
                     title=row[2],
                     created_at=row[3],
                     last_active_at=row[4],
-                    message_count=row[5],
+                    last_entities=row[5] or {},
+                    message_count=row[6],
                 )
             )
         return session_records
@@ -170,6 +176,8 @@ async def append_messages(
     session_id: str,
     owner_user_id: int,
     messages: list[dict[str, Any]],
+    title: str | None = None,
+    last_entities: dict[str, str] | None = None,
 ) -> None:
     """向当前用户的会话追加消息，并自动分配 sequence_no。"""
     if not messages:
@@ -232,10 +240,17 @@ async def append_messages(
             await conn.execute(
                 """
                 UPDATE public.sessions
-                SET last_active_at = now()
-                WHERE id = %s
+                SET title = COALESCE(%s, title),
+                    last_entities = COALESCE(%s::jsonb, last_entities),
+                    last_active_at = now()
+                WHERE id = %s AND owner_user_id = %s
                 """,
-                (session_uuid,),
+                (
+                    title,
+                    Jsonb(last_entities) if last_entities is not None else None,
+                    session_uuid,
+                    owner_user_id,
+                ),
             )
     finally:
         if conn is not None:

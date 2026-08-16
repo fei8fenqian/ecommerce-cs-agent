@@ -1,25 +1,37 @@
-"""src/session.py — 多轮对话 Session 管理 + 指代消解
+"""多轮对话 Session 管理和指代消解。
 
-职责：
-1. 对话历史管理 — 每轮 messages 存入 SessionContext，下一轮传给 AgentLoop
-2. 指代消解 — 规则替换 "它/这个/那台" 为上一轮识别的实体名
-
-规则做指代消解，比 LLM 快且确定。
-存储后端：Redis（带 TTL 自动过期），async 非阻塞。
+会话数据持久化到 PostgreSQL，Redis 不再用于保存会话内容。
 """
 
 import json
 import logging
 import time
-import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
 import tiktoken
-from redis.asyncio import Redis
 
 from config import settings
-from infra.redis_client import get_redis
+from store.session_store import (
+    SessionMessage,
+    SessionRecord,
+    create_session,
+)
+from store.session_store import (
+    append_messages as append_session_messages,
+)
+from store.session_store import (
+    delete_session as delete_session_record,
+)
+from store.session_store import (
+    get_messages as get_session_messages,
+)
+from store.session_store import (
+    get_session as get_session_record,
+)
+from store.session_store import (
+    list_sessions as list_session_records,
+)
 
 from ..engines.loop import LoopResult
 from .resolve import resolve_pronouns
@@ -31,19 +43,26 @@ _ENCODER = tiktoken.get_encoding("cl100k_base")
 
 @dataclass
 class SessionContext:
-    """单个会话的完整上下文。
+    """单个会话的上下文。
 
-    Redis 持久化策略：
-    - 元数据（除 messages 外）→ session:{id} hash
-    - messages                → session:{id}:messages list（每条 JSON 序列化）
+    ``messages`` 保存从数据库读取的完整消息历史。
+    ``history`` 是专门提供给 LLM 的、经过 token 裁剪的历史。
     """
 
-    session_id: str  # UUID4 唯一标识
-    title: str = ""  # 会话标题，取自首条 query 前 50 字符
-    messages: list[dict[str, Any]] = field(default_factory=list)  # OpenAI 格式对话历史
-    last_entities: dict[str, str] = field(default_factory=dict)  # {"product": "拯救者Y9000P", "order": "xxx"}
-    created_at: float = 0.0  # 创建时间戳
-    last_active: float = 0.0  # 最后活跃时间戳
+    session_id: str
+    title: str = ""
+    messages: list[dict[str, Any]] = field(default_factory=list)
+    last_entities: dict[str, str] = field(default_factory=dict)
+    created_at: float = 0.0
+    last_active: float = 0.0
+
+    @property
+    def history(self) -> list[dict[str, Any]]:
+        """返回经过 token 裁剪、适合发送给 LLM 的消息历史。"""
+        return _trim_history(
+            self.messages,
+            max_tokens=settings.history_max_tokens,
+        )
 
 
 def _trim_history(
@@ -70,317 +89,240 @@ def _trim_history(
 
     def _count_tokens(msgs: list[dict[str, Any]]) -> int:
         total = 0
-        for m in msgs:
-            total += len(_ENCODER.encode(json.dumps(m, ensure_ascii=False)))
+        for msg in msgs:
+            total += len(_ENCODER.encode(json.dumps(msg, ensure_ascii=False)))
         return total
 
     head = turns[:keep_head_turns]
     tail_candidates = turns[keep_head_turns:]
-    head_tokens = sum(_count_tokens(t) for t in head)
+    head_tokens = sum(_count_tokens(turn) for turn in head)
 
     kept_tail: list[list[dict[str, Any]]] = []
     tail_tokens = 0
     for turn in reversed(tail_candidates):
-        t = _count_tokens(turn)
-        if head_tokens + tail_tokens + t > max_tokens:
+        turn_tokens = _count_tokens(turn)
+        if head_tokens + tail_tokens + turn_tokens > max_tokens:
             break
         kept_tail.insert(0, turn)
-        tail_tokens += t
+        tail_tokens += turn_tokens
 
     if not kept_tail:
         kept_tail = [tail_candidates[-1]]
 
-    result = [m for t in head for m in t] + [m for t in kept_tail for m in t]
+    result = [msg for turn in head for msg in turn]
+    result.extend(msg for turn in kept_tail for msg in turn)
+
     trimmed = len(messages) - len(result)
     if trimmed > 0:
-        logger.info("trimmed %d messages, kept %d turns", trimmed, len(head) + len(kept_tail))
+        logger.info(
+            "trimmed %d messages, kept %d turns",
+            trimmed,
+            len(head) + len(kept_tail),
+        )
     return result
 
 
-def _decode(val: str | bytes | None) -> str:
-    """安全解码 Redis 返回的 bytes/str。"""
-    if val is None:
-        return ""
-    return val.decode() if isinstance(val, bytes) else val
-
-
 class SessionManager:
-    """Redis 后端会话管理，async 非阻塞，TTL 自动过期。
-
-    Redis 数据结构：
-      session:{id}          → hash   (title, created_at, last_active, last_entities)
-      session:{id}:messages → list   (每条消息 JSON 序列化后 push 到尾部)
-    两个 key 都设 TTL（session_ttl），过期自动清理，无需手动 GC。
-    """
-
-    def __init__(self, ttl: int | None = None):
-        """
-        Args:
-            redis_url: Redis 连接串，默认取 settings.redis_url
-                      格式 redis://host:port/db
-            ttl: 会话过期时间（秒），默认取 settings.session_ttl
-                 过期后 Redis 自动删除，无需手动清理
-        """
-        self._redis: Redis = get_redis()
-        self._ttl = ttl or settings.session_ttl
-
-    # -- Public API --
-
-    async def get_or_create(self, session_id: str | None = None) -> SessionContext:
-        """获取已有会话或创建新会话。
-
-        逻辑：
-        1. 传了 session_id → 查 Redis session:{id} hash
-           - 存在 → 反序列化返回（恢复历史对话）
-           - 不存在 → 当新会话处理
-        2. 没传 session_id → 生成 UUID4 新 ID，写 Redis
-
-        Returns:
-            SessionContext: 包含完整 messages 列表的会话对象
-        """
-        now = time.time()
-        if session_id:
-            data = await self._redis.hgetall(self._key(session_id))
-            if data:
-                return await self._from_hash(session_id, data)
-
-        sid = session_id or str(uuid.uuid4())
-        ctx = SessionContext(session_id=sid, created_at=now, last_active=now)
-        await self._save(sid, ctx)
-        logger.info("Session created: %s", sid)
-        return ctx
-
-    async def add_turn(self, session_id: str, query: str, result: LoopResult) -> None:
-        """把一轮 Agent ReAct 对话写入 Redis。
-
-        写入顺序（和 OpenAI API 多轮格式一致）：
-        1. user message       — 用户原始 query
-        2. assistant message  — LLM 的 thought + tool_calls 数组（如果有）
-        3. tool result messages — 每个工具调用一条，role="tool"
-        4. assistant message  — 最终给用户的文本回答
-
-        写完后：
-        - 更新 last_entities（供下一轮的指代消解使用）
-        - 调 _trim_history 截断超过 max_tokens 的历史
-        - 重新设 TTL（续期）
-        """
-        ctx = await self._load(session_id)
-        if ctx is None:
-            return
-
-        if not ctx.title:
-            ctx.title = query[:50]
-
-        ctx.messages.append({"role": "user", "content": query})
-
-        for step in result.steps:
-            if step.tool_calls:
-                ctx.messages.append(
-                    {
-                        "role": "assistant",
-                        "content": step.thought,
-                        "tool_calls": [
-                            {
-                                "id": tc.id,
-                                "type": "function",
-                                "function": {
-                                    "name": tc.name,
-                                    "arguments": json.dumps(tc.arguments, ensure_ascii=False),
-                                },
-                            }
-                            for tc in step.tool_calls
-                        ],
-                    }
-                )
-                for tc in step.tool_calls:
-                    ctx.messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tc.id,
-                            "content": step.observation or "",
-                        }
-                    )
-
-        ctx.messages.append({"role": "assistant", "content": result.answer})
-
-        if result.last_entities:
-            ctx.last_entities.update(result.last_entities)
-
-        ctx.messages = _trim_history(ctx.messages, max_tokens=settings.history_max_tokens)
-        ctx.last_active = time.time()
-        await self._save(session_id, ctx)
-
-    async def add_turn_simple(self, session_id: str, query: str, answer: str) -> None:
-        """轻量版 add_turn — 只存 user + assistant 两条消息。
-
-        用于 Plan-and-Execute 场景：中间步骤复杂（多个子任务、依赖传参），
-        展开存储会极大膨胀 messages 体积，只存最终问答对即可。
-        """
-        ctx = await self._load(session_id)
-        if ctx is None:
-            return
-
-        if not ctx.title:
-            ctx.title = query[:50]
-
-        ctx.messages.append({"role": "user", "content": query})
-        ctx.messages.append({"role": "assistant", "content": answer})
-        ctx.messages = _trim_history(ctx.messages, max_tokens=settings.history_max_tokens)
-        ctx.last_active = time.time()
-        await self._save(session_id, ctx)
-
-    async def resolve(self, query: str, session_id: str | None = None) -> str:
-        """对 query 做指代消解后返回。
-
-        从对话上下文中取出上一轮识别到的实体（产品名/订单号），
-        替换 query 中的指代词（"它""这单"等）。没有历史则原样返回。
-        """
-        if session_id is None:
-            return query
-        ctx = await self._load(session_id)
-        if ctx is None:
-            return query
-        return resolve_pronouns(query=query, entities=ctx.last_entities)
-
-    async def list_sessions(self) -> list[dict[str, Any]]:
-        """列出 Redis 中所有活跃会话（供中台列表页使用）。
-
-        用 SCAN 遍历 session:* 前缀的 key，跳过 :messages 子 key，
-        读取每个会话的元数据 hash，按 last_active 倒序排列。
-
-        Returns:
-            [{"session_id", "title", "created_at", "last_active", "message_count"}, ...]
-        """
-        result: list[dict[str, Any]] = []
-        async for key in self._redis.scan_iter(match="session:*"):  # type: ignore[attr-defined]
-            # 只取主 hash key（session:{id}），跳过 messages list 子 key
-            if b":messages" in key:
-                continue
-            sid = key.decode().split(":", 1)[1]
-            data = await self._redis.hgetall(key)
-            msg_count = await self._redis.llen(self._key(sid, "messages"))
-            result.append(
-                {
-                    "session_id": sid,
-                    "title": _decode(data.get(b"title")),
-                    "created_at": float(data.get(b"created_at", 0)),
-                    "last_active": float(data.get(b"last_active", 0)),
-                    "message_count": msg_count,
-                }
-            )
-        result.sort(key=lambda s: s["last_active"], reverse=True)
-        return result
-
-    async def get(self, session_id: str) -> SessionContext | None:
-        """从 Redis 加载单个会话"""
-        return await self._load(session_id)
-
-    async def cleanup_expired(self) -> int:
-        """手动清理过期的会话。
-
-        遍历所有 session:* hash key，检测 last_active + ttl < now 的会话，
-        删除其 hash 和 messages list key。
-
-        Returns:
-            清理的会话数量
-        """
-        now = time.time()
-        cleaned = 0
-        async for key in self._redis.scan_iter(match="session:*"):
-            if b":messages" in key:
-                continue
-            sid = key.decode().split(":", 1)[1]
-            data = await self._redis.hgetall(key)
-            last_active = float(data.get(b"last_active", 0))
-            if last_active + self._ttl < now:
-                await self._redis.delete(key)
-                await self._redis.delete(self._key(sid, "messages"))
-                cleaned += 1
-        return cleaned
-
-    async def flush_all(self) -> int:
-        """清理所有 session 相关 key（用于测试 teardown）。
-
-        Returns:
-            删除的 key 数量
-        """
-        count = 0
-        async for key in self._redis.scan_iter(match="session:*"):
-            await self._redis.delete(key)
-            count += 1
-        return count
-
-    async def delete(self, session_id: str) -> bool:
-        """删除单个会话"""
-        exists: int = await self._redis.exists(self._key(session_id))
-        if not exists:
-            return False
-        await self._redis.delete(self._key(session_id))
-        await self._redis.delete(self._key(session_id, "messages"))
-        return True
-
-    # -- Internal --
+    """基于 PostgreSQL 的会话管理器。"""
 
     @staticmethod
-    def _key(session_id: str, suffix: str = "") -> str:
-        """生成 Redis key。
-
-        - 主 key: session:{id}             → hash (元数据)
-        - 子 key: session:{id}:messages    → list (对话历史)
-        """
-        key = f"session:{session_id}"
-        return f"{key}:{suffix}" if suffix else key
-
-    async def _load(self, session_id: str) -> SessionContext | None:
-        """从 Redis 加载单个会话。不存在返回 None。"""
-        data = await self._redis.hgetall(self._key(session_id))
-        if not data:
-            return None
-        return await self._from_hash(session_id, data)
-
-    async def _from_hash(self, session_id: str, data: dict[str | bytes, str | bytes]) -> SessionContext:
-        """将 Redis 原始 bytes/str 数据反序列化为 SessionContext。
-
-        Redis hash 字段都是 bytes/str，时间戳存的是 float 的字符串表示，
-        last_entities 是 JSON 字符串，messages 从独立的 list key 读取。
-        """
-        msgs_raw = await self._redis.lrange(self._key(session_id, "messages"), 0, -1)
-        messages = [json.loads(m) for m in msgs_raw] if msgs_raw else []
-        entities_raw = data.get(b"last_entities", b"{}")
+    def _record_to_context(
+        record: SessionRecord,
+        stored_messages: list[SessionMessage],
+    ) -> SessionContext:
+        """把数据库记录转换成业务层的 SessionContext。"""
         return SessionContext(
-            session_id=session_id,
-            title=_decode(data.get(b"title")),
-            messages=messages,
-            last_entities=json.loads(entities_raw) if entities_raw else {},
-            created_at=float(data.get(b"created_at", 0)),
-            last_active=float(data.get(b"last_active", 0)),
+            session_id=record["id"],
+            title=record["title"],
+            messages=[stored_message["payload"] for stored_message in stored_messages],
+            last_entities=dict(record["last_entities"]),
+            created_at=record["created_at"].timestamp(),
+            last_active=record["last_active_at"].timestamp(),
         )
 
-    async def _save(self, session_id: str, ctx: SessionContext) -> None:
-        """将 SessionContext 全量写入 Redis。
+    async def _load_context(
+        self,
+        session_id: str,
+        owner_user_id: int,
+    ) -> SessionContext | None:
+        """读取会话元数据和消息，并组装成 SessionContext。"""
+        record = await get_session_record(session_id, owner_user_id)
+        if record is None:
+            return None
 
-        使用 pipeline 批量执行，减少网络往返：
-        1. HSET session:{id}      — 元数据 hash
-        2. EXPIRE session:{id}    — 续 TTL
-        3. DEL session:{id}:messages — 清空旧消息列表
-        4. RPUSH messages 逐条写入 — 顺序追加
-        5. EXPIRE session:{id}:messages — 续 TTL
+        # 当前 store 层最多返回 200 条消息；后续可改为支持 limit=None。
+        stored_messages = await get_session_messages(
+            session_id,
+            owner_user_id,
+            limit=200,
+        )
+        if stored_messages is None:
+            return None
+
+        return self._record_to_context(record, stored_messages)
+
+    # -- Public API ---------------------------------------------------------
+
+    async def get_or_create(
+        self,
+        session_id: str | None,
+        owner_user_id: int,
+    ) -> SessionContext | None:
+        """获取已有会话或创建新会话。
+
+        没有传 session_id 时创建新会话；指定了不存在或不属于当前用户的
+        session_id 时返回 None。
         """
-        key = self._key(session_id)
-        pipe = self._redis.pipeline()
-        pipe.hset(
-            key,
-            mapping={
-                "title": ctx.title,
-                "created_at": str(ctx.created_at),
-                "last_active": str(ctx.last_active),
-                "last_entities": json.dumps(ctx.last_entities, ensure_ascii=False),
-            },
+        if session_id is None:
+            record = await create_session(owner_user_id)
+            logger.info("Session created: %s", record["id"])
+            return self._record_to_context(record, [])
+
+        return await self._load_context(session_id, owner_user_id)
+
+    async def get(
+        self,
+        session_id: str,
+        owner_user_id: int,
+    ) -> SessionContext | None:
+        """读取当前用户的会话及其消息。"""
+        return await self._load_context(session_id, owner_user_id)
+
+    async def list_sessions(self, owner_user_id: int) -> list[dict[str, Any]]:
+        """列出当前用户的会话，保持现有 API 的返回格式。"""
+        records = await list_session_records(owner_user_id)
+        return [
+            {
+                "session_id": record["id"],
+                "title": record["title"],
+                "created_at": record["created_at"].timestamp(),
+                "last_active": record["last_active_at"].timestamp(),
+                "message_count": record["message_count"],
+            }
+            for record in records
+        ]
+
+    async def delete(self, session_id: str, owner_user_id: int) -> bool:
+        """删除当前用户的会话及其消息。"""
+        return await delete_session_record(session_id, owner_user_id)
+
+    async def resolve(
+        self,
+        query: str,
+        session_id: str | None,
+        owner_user_id: int,
+    ) -> str:
+        """根据当前用户会话中的实体进行指代消解。"""
+        if session_id is None:
+            return query
+
+        record = await get_session_record(session_id, owner_user_id)
+        if record is None:
+            return query
+
+        return resolve_pronouns(
+            query=query,
+            entities=record["last_entities"],
         )
-        pipe.expire(key, self._ttl)
-        msg_key = self._key(session_id, "messages")
-        pipe.delete(msg_key)
-        for msg in ctx.messages:
-            pipe.rpush(msg_key, json.dumps(msg, ensure_ascii=False))
-        pipe.expire(msg_key, self._ttl)
-        await pipe.execute()
+
+    async def add_turn(
+        self,
+        session_id: str,
+        owner_user_id: int,
+        query: str,
+        result: LoopResult,
+    ) -> None:
+        """保存一轮完整的 Agent ReAct 对话。"""
+        ctx = await self.get(session_id, owner_user_id)
+        if ctx is None:
+            return
+
+        new_messages: list[dict[str, Any]] = [
+            {"role": "user", "content": query},
+        ]
+
+        for step in result.steps:
+            if not step.tool_calls:
+                continue
+
+            new_messages.append(
+                {
+                    "role": "assistant",
+                    "content": step.thought,
+                    "tool_calls": [
+                        {
+                            "id": tool_call.id,
+                            "type": "function",
+                            "function": {
+                                "name": tool_call.name,
+                                "arguments": json.dumps(
+                                    tool_call.arguments,
+                                    ensure_ascii=False,
+                                ),
+                            },
+                        }
+                        for tool_call in step.tool_calls
+                    ],
+                }
+            )
+
+            for tool_call in step.tool_calls:
+                new_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": step.observation or "",
+                    }
+                )
+
+        new_messages.append({"role": "assistant", "content": result.answer})
+
+        entities = dict(ctx.last_entities)
+        entities.update(result.last_entities)
+        title = query[:50] if not ctx.title else None
+
+        await append_session_messages(
+            session_id,
+            owner_user_id,
+            new_messages,
+            title=title,
+            last_entities=entities,
+        )
+
+        # 更新本次调用中的上下文；数据库中保存的仍然是完整消息。
+        ctx.messages.extend(new_messages)
+        ctx.last_entities = entities
+        if title is not None:
+            ctx.title = title
+        ctx.last_active = time.time()
+
+    async def add_turn_simple(
+        self,
+        session_id: str,
+        owner_user_id: int,
+        query: str,
+        answer: str,
+    ) -> None:
+        """只保存 user 和 assistant 两条消息。"""
+        ctx = await self.get(session_id, owner_user_id)
+        if ctx is None:
+            return
+
+        new_messages = [
+            {"role": "user", "content": query},
+            {"role": "assistant", "content": answer},
+        ]
+        title = query[:50] if not ctx.title else None
+
+        await append_session_messages(
+            session_id,
+            owner_user_id,
+            new_messages,
+            title=title,
+            last_entities=ctx.last_entities,
+        )
+
+        ctx.messages.extend(new_messages)
+        if title is not None:
+            ctx.title = title
+        ctx.last_active = time.time()
