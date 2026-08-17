@@ -94,7 +94,8 @@ async def verify_token(token: str) -> tuple[dict, str]:
     saved_token = await redis.get(_key(int(user_id)))
     if saved_token is None:
         raise AuthenticationError("登录已过期，请重新登录")
-    if saved_token.decode() if isinstance(saved_token, bytes) else saved_token != token:
+    saved_token_value = saved_token.decode() if isinstance(saved_token, bytes) else saved_token
+    if saved_token_value != token:
         raise AuthenticationError("账号已在其他设备登录，请重新登录")
 
     user_info = await get_user_by_id(int(user_id))

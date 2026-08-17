@@ -119,6 +119,24 @@ class TestVerifyToken:
         assert user_type == "internal"
 
     @pytest.mark.asyncio
+    async def test_verify_success_with_redis_bytes(self):
+        """Redis 默认返回 bytes 时，合法 token 仍应通过校验。"""
+        token = generate_jwt(1, "agent", "internal")
+        user = _mock_user(role="agent", user_id=1, username="agent1")
+
+        with (
+            patch(
+                "service.auth_service.get_redis",
+                return_value=AsyncMock(get=AsyncMock(return_value=token.encode())),
+            ),
+            patch("service.auth_service.get_user_by_id", new=AsyncMock(return_value=user)),
+        ):
+            info, user_type = await verify_token(token)
+
+        assert info["id"] == 1
+        assert user_type == "internal"
+
+    @pytest.mark.asyncio
     async def test_verify_expired_token(self):
         """过期 token → AuthenticationError"""
         from datetime import datetime, timedelta, timezone
