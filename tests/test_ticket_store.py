@@ -245,6 +245,7 @@ class TestGetTicketFields:
         assert set(ticket.keys()) == {
             "ticket_id",
             "customer_user_id",
+            "assigned_agent_id",
             "customer_name",
             "phone",
             "issue",

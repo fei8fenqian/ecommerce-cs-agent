@@ -20,8 +20,12 @@ class TestCustomer:
     def test_can_view_own_orders(self):
         assert enforce("customer", "/api/v1/orders/my/456", "GET")
 
-    def test_can_create_own_ticket(self):
-        assert enforce("customer", "/api/v1/tickets/my/789", "POST")
+    def test_can_view_own_tickets(self):
+        assert enforce("customer", "/api/v1/tickets", "GET")
+        assert enforce("customer", "/api/v1/tickets/789", "GET")
+
+    def test_can_update_own_ticket(self):
+        assert enforce("customer", "/api/v1/tickets/789", "PATCH")
 
     def test_cannot_view_all_orders(self):
         assert not enforce("customer", "/api/v1/orders/456", "GET")
@@ -41,11 +45,12 @@ class TestAgent:
     def test_can_view_all_orders(self):
         assert enforce("agent", "/api/v1/orders/123", "GET")
 
-    def test_can_handle_tickets(self):
-        assert enforce("agent", "/api/v1/tickets/789", "PUT")
+    def test_can_claim_and_update_tickets(self):
+        assert enforce("agent", "/api/v1/tickets/789/claim", "POST")
+        assert enforce("agent", "/api/v1/tickets/789", "PATCH")
 
-    def test_can_process_refund(self):
-        assert enforce("agent", "/api/v1/refunds/ORD-001", "POST")
+    def test_cannot_process_refund(self):
+        assert not enforce("agent", "/api/v1/refunds/ORD-001", "POST")
 
     def test_cannot_manage_products(self):
         assert not enforce("agent", "/api/v1/products/123", "POST")
