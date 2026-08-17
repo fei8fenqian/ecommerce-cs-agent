@@ -1,13 +1,17 @@
 import logging
 from typing import Any
 
-from agent.tools_registry import BaseTool, ToolResult
-from infra.db_pool import get_connection, put_connection
+from agent.tools_registry import BaseTool, ToolContext, ToolResult
+from store.order_store import find_orders
 
 logger = logging.getLogger(__name__)
 
 
 class TrackOrder(BaseTool):
+    @property
+    def requires_tool_context(self) -> bool:
+        return True
+
     @property
     def name(self) -> str:
         return "track_order"
@@ -36,53 +40,28 @@ class TrackOrder(BaseTool):
             "required": [],
         }
 
-    _SQL = (
-        "SELECT o.order_id, o.status, o.tracking_company, o.tracking_number, "
-        "o.total_amount, o.paid_amount, o.payment_method, o.order_date, "
-        "o.delivered_at, "
-        "oi.product_name, oi.brand, oi.price, oi.quantity "
-        "FROM orders o "
-        "LEFT JOIN order_items oi ON o.order_id = oi.order_id "
-        "WHERE {where} "
-        "ORDER BY o.order_date DESC"
-    )
-
-    async def execute(self, order_id: str = "", phone: str = "") -> ToolResult:  # noqa: C901
+    async def execute(
+        self,
+        order_id: str = "",
+        phone: str = "",
+        *,
+        tool_context: ToolContext | None = None,
+    ) -> ToolResult:
+        if tool_context is None:
+            return ToolResult(
+                name=self.name,
+                status="error",
+                error="缺少当前用户身份，无法追踪订单",
+            )
         if not order_id and not phone:
             return ToolResult(name=self.name, status="error", error="请提供订单号或手机号")
 
-        where = "o.order_id = %s" if order_id else "o.phone = %s"
-        param = order_id if order_id else phone
-        label = "order_id" if order_id else "phone"
-
         try:
-            conn = await get_connection()
-            await conn.set_autocommit(True)
-            # 如果是用手机号查询, 订单需按 order_id 分组聚合
-            orders: dict[str, dict[str, Any]] = {}
-            async for row in await conn.execute(self._SQL.format(where=where), (param,)):
-                oid = row[0]
-                if oid not in orders:
-                    orders[oid] = {
-                        "order_id": oid,
-                        "status": row[1],
-                        "tracking": {"company": row[2], "number": row[3]},
-                        "total_amount": float(row[4]) if row[4] else 0.0,
-                        "paid_amount": float(row[5]) if row[5] else 0.0,
-                        "payment_method": row[6],
-                        "order_date": str(row[7]),
-                        "delivered_at": str(row[8]) if row[8] else None,
-                        "items": [],
-                    }
-                if row[9] is not None:  # product_name (LEFT JOIN)
-                    orders[oid]["items"].append(
-                        {
-                            "product_name": row[9],
-                            "brand": row[10],
-                            "price": float(row[11]) if row[11] else 0.0,
-                            "quantity": row[12],
-                        }
-                    )
+            orders = await find_orders(
+                tool_context.user_id,
+                order_id=order_id,
+                phone=phone,
+            )
 
             if not orders:
                 msg = "订单不存在" if order_id else "该手机号下没有订单"
@@ -90,16 +69,14 @@ class TrackOrder(BaseTool):
 
             # 单号查询返回单个订单，手机号查询返回列表
             if order_id:
-                data: dict[str, Any] = orders[order_id]
+                data: dict[str, Any] = orders[0]
             else:
-                data = {"count": len(orders), "orders": list(orders.values())}
+                data = {"count": len(orders), "orders": orders}
 
             return ToolResult(name=self.name, status="success", data=data)
 
         except Exception as e:
-            logger.error("track_order 查询失败: %s=%s error=%s", label, param, str(e))
+            label = "order_id" if order_id else "phone"
+            value = order_id if order_id else phone
+            logger.error("track_order 查询失败: %s=%s error=%s", label, value, str(e))
             return ToolResult(name=self.name, status="error", error=f"订单查询失败: {str(e)}")
-
-        finally:
-            if "conn" in locals():
-                await put_connection(conn)

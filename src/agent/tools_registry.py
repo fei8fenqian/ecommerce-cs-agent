@@ -71,6 +71,14 @@ class ToolResult:
             return f"[{self.name} 错误] {self.error}"
 
 
+@dataclass(frozen=True)
+class ToolContext:
+    """由服务端注入的工具调用上下文，不暴露给大模型。"""
+
+    user_id: int
+    role: str
+
+
 # =============================================================================
 # BaseTool —— 工具抽象基类
 # =============================================================================
@@ -111,6 +119,11 @@ class BaseTool(ABC):
     async def execute(self, **kwargs: Any) -> ToolResult:
         """真正执行工具的代码。参数从 kwargs 里取，必须返回 ToolResult"""
         ...
+
+    @property
+    def requires_tool_context(self) -> bool:
+        """工具是否必须由服务端提供当前用户上下文。"""
+        return False
 
     def to_openai_function(self) -> dict[str, Any]:
         """把工具转成 OpenAI function calling 格式。子类不需要重写。"""
@@ -160,7 +173,13 @@ class ToolRegistry:
         return list(self._tools.values())
 
     # -- 执行 ----------------------------------------------------------------
-    async def execute(self, name: str, **kwargs: Any) -> ToolResult:
+    async def execute(
+        self,
+        name: str,
+        *,
+        tool_context: ToolContext | None = None,
+        **kwargs: Any,
+    ) -> ToolResult:
         """
         Agent Loop 唯一需要调的执行入口。
 
@@ -174,7 +193,15 @@ class ToolRegistry:
                 status="error",
                 error=f"未知工具: {name}。可用: {list(self._tools.keys())}",
             )
+        if tool.requires_tool_context and tool_context is None:
+            return ToolResult(
+                name=name,
+                status="error",
+                error="缺少当前用户身份，无法执行该工具",
+            )
         try:
+            if tool.requires_tool_context:
+                kwargs["tool_context"] = tool_context
             result = await tool.execute(**kwargs)
             if isinstance(result, ToolResult):
                 return result

@@ -3,7 +3,7 @@ import random
 from datetime import datetime
 from typing import Any
 
-from agent.tools_registry import BaseTool, ToolResult
+from agent.tools_registry import BaseTool, ToolContext, ToolResult
 from store.ticket_store import create_ticket as store_create_ticket
 
 logger = logging.getLogger(__name__)
@@ -13,6 +13,10 @@ ALLOWED_URGENCY = ("low", "medium", "high", "critical")
 
 
 class CreateTicket(BaseTool):
+    @property
+    def requires_tool_context(self) -> bool:
+        return True
+
     @property
     def name(self) -> str:
         return "create_ticket"
@@ -61,7 +65,16 @@ class CreateTicket(BaseTool):
         customer_name: str = "",
         phone: str = "",
         urgency: str = "medium",
+        *,
+        tool_context: ToolContext | None = None,
     ) -> ToolResult:
+        if tool_context is None:
+            return ToolResult(
+                name=self.name,
+                status="error",
+                error="缺少当前用户身份，无法创建工单",
+            )
+
         if urgency not in ALLOWED_URGENCY:
             urgency = "medium"
 
@@ -74,6 +87,7 @@ class CreateTicket(BaseTool):
                 phone=phone,
                 issue=issue,
                 urgency=urgency,
+                customer_user_id=tool_context.user_id,
             )
 
             return ToolResult(

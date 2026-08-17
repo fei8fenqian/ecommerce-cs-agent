@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from agent.engines.loop import LoopResult
 from agent.llm.sentiment import build_escalation_prompt, detect_sentiment
 from agent.rag.retrieve import hybrid_search
+from agent.tools_registry import ToolContext
 from config import settings
 from exceptions import LLMError
 
@@ -49,6 +50,7 @@ async def chat(chat_req: ChatRequest, request: Request):
         session = request.app.state.session
         intent_router = request.app.state.intent_router
         user_id = request.state.user["id"]
+        tool_context = ToolContext(user_id=user_id, role=request.state.user["role"])
 
         # 获取历史会话或创建新会话
         ctx = await session.get_or_create(chat_req.session_id, user_id)
@@ -71,6 +73,7 @@ async def chat(chat_req: ChatRequest, request: Request):
                 resolved_query,
                 history=ctx.history,
                 scenario=intent.scenario,
+                tool_context=tool_context,
             )
             # plan_execute 不走 AgentLoop，手动记录到 session
             await session.add_turn_simple(ctx.session_id, user_id, chat_req.query, plan_state.get("answer", ""))
@@ -88,9 +91,15 @@ async def chat(chat_req: ChatRequest, request: Request):
                 context=context,
                 history=ctx.history,
                 system_prompt_extra=sentiment_ctx,
+                tool_context=tool_context,
             )
         else:
-            loop_result = await agent.run(resolved_query, history=ctx.history, system_prompt_extra=sentiment_ctx)
+            loop_result = await agent.run(
+                resolved_query,
+                history=ctx.history,
+                system_prompt_extra=sentiment_ctx,
+                tool_context=tool_context,
+            )
 
         # 当前对话放入上下文ctx
         await session.add_turn(ctx.session_id, user_id, chat_req.query, loop_result)
@@ -125,6 +134,7 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
     session = request.app.state.session
     intent_router = request.app.state.intent_router
     user_id = request.state.user["id"]
+    tool_context = ToolContext(user_id=user_id, role=request.state.user["role"])
 
     # 历史会话
     session_ctx = await session.get_or_create(chat_req.session_id, user_id)
@@ -164,6 +174,7 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                 resolve_query,
                 history=history,
                 scenario=intent.scenario,
+                tool_context=tool_context,
             ):
                 yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
                 if chunk.get("event") == "done":
@@ -191,6 +202,7 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
             context=context,
             history=history,
             system_prompt_extra=extra_prompt,
+            tool_context=tool_context,
         ):
             # event 可能的值：
             #   {"event": "thinking", ...}

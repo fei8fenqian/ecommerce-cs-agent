@@ -20,6 +20,7 @@ async def init_ticket_table() -> None:
             CREATE TABLE IF NOT EXISTS tickets (
                 id SERIAL PRIMARY KEY,
                 ticket_id VARCHAR(20) UNIQUE NOT NULL,
+                customer_user_id INTEGER,
                 customer_name VARCHAR(50) DEFAULT '',
                 phone VARCHAR(20) DEFAULT '',
                 issue TEXT NOT NULL,
@@ -39,14 +40,19 @@ async def create_ticket(
     customer_name: str = "",
     phone: str = "",
     urgency: str = "medium",
+    customer_user_id: int | None = None,
 ) -> None:
     """插入一条新工单。"""
     try:
         conn = await get_connection()
         await conn.set_autocommit(True)
         await conn.execute(
-            "INSERT INTO tickets (ticket_id, customer_name, phone, issue, urgency) VALUES (%s, %s, %s, %s, %s)",
-            (ticket_id, customer_name, phone, issue, urgency),
+            """
+            INSERT INTO tickets
+                (ticket_id, customer_user_id, customer_name, phone, issue, urgency)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            (ticket_id, customer_user_id, customer_name, phone, issue, urgency),
         )
         logger.info("工单创建: %s urgency=%s", ticket_id, urgency)
     finally:
@@ -90,7 +96,7 @@ async def get_ticket(ticket_id: str) -> dict[str, Any] | None:
         conn = await get_connection()
         await conn.set_autocommit(True)
         cur = await conn.execute(
-            "SELECT ticket_id, customer_name, phone, issue, urgency, status, created_at "
+            "SELECT ticket_id, customer_user_id, customer_name, phone, issue, urgency, status, created_at "
             "FROM tickets WHERE ticket_id = %s",
             (ticket_id,),
         )
@@ -99,12 +105,13 @@ async def get_ticket(ticket_id: str) -> dict[str, Any] | None:
             return None
         return {
             "ticket_id": row[0],
-            "customer_name": row[1],
-            "phone": row[2],
-            "issue": row[3],
-            "urgency": row[4],
-            "status": row[5],
-            "created_at": (row[6].isoformat() if hasattr(row[6], "isoformat") else str(row[6])),
+            "customer_user_id": row[1],
+            "customer_name": row[2],
+            "phone": row[3],
+            "issue": row[4],
+            "urgency": row[5],
+            "status": row[6],
+            "created_at": (row[7].isoformat() if hasattr(row[7], "isoformat") else str(row[7])),
         }
     finally:
         await put_connection(conn)

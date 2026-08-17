@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from agent.llm.llm_client import LLMClient, ToolCall
-from agent.tools_registry import ToolRegistry
+from agent.tools_registry import ToolContext, ToolRegistry
 from config import settings
 from exceptions import AgentLoopError
 
@@ -71,6 +71,7 @@ class AgentLoop:
         context: str = "",
         history: list[dict[str, Any]] | None = None,
         system_prompt_extra: str = "",
+        tool_context: ToolContext | None = None,
     ) -> LoopResult:
         t_start = time.perf_counter()
         step_results: list[StepResult] = []
@@ -148,7 +149,11 @@ class AgentLoop:
                         )
 
                 # 执行工具
-                tool_result = await self.registry.execute(tool_call.name, **tool_call.arguments)
+                tool_result = await self.registry.execute(
+                    tool_call.name,
+                    tool_context=tool_context,
+                    **tool_call.arguments,
+                )
                 observation = tool_result.to_observation()
                 observations.append(observation)
 
@@ -206,6 +211,7 @@ class AgentLoop:
         context: str = "",
         history: list[dict[str, Any]] | None = None,
         system_prompt_extra: str = "",
+        tool_context: ToolContext | None = None,
     ):
         try:
             query = self._sanitize_input(query)
@@ -290,7 +296,11 @@ class AgentLoop:
                         "args": tool_call.arguments,
                     }
 
-                    tool_result = await self.registry.execute(tool_call.name, **tool_call.arguments)
+                    tool_result = await self.registry.execute(
+                        tool_call.name,
+                        tool_context=tool_context,
+                        **tool_call.arguments,
+                    )
                     observation = tool_result.to_observation()
 
                     messages.append(

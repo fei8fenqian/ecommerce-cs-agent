@@ -23,7 +23,7 @@ from typing import Any, AsyncGenerator, TypedDict
 from langgraph.graph import StateGraph
 
 from agent.llm.llm_client import LLMClient
-from agent.tools_registry import ToolRegistry, ToolResult
+from agent.tools_registry import ToolContext, ToolRegistry, ToolResult
 from config import settings
 
 # =============================================================================
@@ -131,6 +131,7 @@ class PlanExecuteState(TypedDict, total=False):
     messages: list[dict[str, Any]]  # 多轮对话历史
     query: str  # 用户原始输入
     scenario: str  # "build_pc" 或 "troubleshoot"
+    tool_context: ToolContext | None  # 服务端注入的工具身份上下文
     prompt: str  # 提示词
 
     # ---- planner 产出 ----
@@ -298,7 +299,15 @@ class PlanAndExecuteAgent:
 
         for batch in batches:
             # 同一批次的步骤没有互相依赖，可以并行执行
-            tasks = [self._execute_single_step(step, step_results, plan) for step in batch]
+            tasks = [
+                self._execute_single_step(
+                    step,
+                    step_results,
+                    plan,
+                    state.get("tool_context"),
+                )
+                for step in batch
+            ]
             # asyncio.gather 同时启动所有协程，等全部完成后返回
             batch_results: list[tuple[int, ToolResult]] = await asyncio.gather(*tasks)
 
@@ -312,6 +321,7 @@ class PlanAndExecuteAgent:
         step: dict,  # plan 里的一个步骤
         step_results: dict[int, ToolResult],  # 已完成的步骤结果（用于提取依赖字段）
         plan: list[dict],  # 完整 plan（用于查找依赖步骤的 component）
+        tool_context: ToolContext | None,
     ) -> tuple[int, ToolResult]:
         """执行单个 step：调工具 + 自动化依赖传参。
 
@@ -369,7 +379,11 @@ class PlanAndExecuteAgent:
             params["query"] = params["query"] + " " + " ".join(extra_terms)
 
         # ---- 5. 执行工具 ----
-        result: ToolResult = await self.registry.execute(action_name, **params)
+        result: ToolResult = await self.registry.execute(
+            action_name,
+            tool_context=tool_context,
+            **params,
+        )
         return (int(step.get("id", -1)), result)
 
     # =========================================================================
@@ -604,6 +618,7 @@ class PlanAndExecuteAgent:
         *,
         history: list[dict[str, Any]] | None = None,
         scenario: str = "build_pc",
+        tool_context: ToolContext | None = None,
     ) -> dict:
         """执行 Plan-and-Execute 并返回最终 state。
 
@@ -619,6 +634,7 @@ class PlanAndExecuteAgent:
             messages=history or [],
             query=query,
             scenario=scenario,
+            tool_context=tool_context,
             max_iterations=self.max_iterations,
         )
         final_state: dict = await self._graph.ainvoke(initial_state)
@@ -630,12 +646,14 @@ class PlanAndExecuteAgent:
         *,
         history: list[dict[str, Any]] | None = None,
         scenario: str = "build_pc",
+        tool_context: ToolContext | None = None,
     ) -> AsyncGenerator[dict, None]:
         """SSE 流式执行 Plan-and-Execute"""
         initial_state = PlanExecuteState(
             messages=history or [],
             query=query,
             scenario=scenario,
+            tool_context=tool_context,
             max_iterations=self.max_iterations,
         )
 

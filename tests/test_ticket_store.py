@@ -244,6 +244,7 @@ class TestGetTicketFields:
         ticket = await get_ticket("TK-FULL")
         assert set(ticket.keys()) == {
             "ticket_id",
+            "customer_user_id",
             "customer_name",
             "phone",
             "issue",

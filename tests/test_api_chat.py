@@ -37,7 +37,7 @@ class _MockAgentLoop:
     def __init__(self, answer: str = "Mock 回答"):
         self._answer = answer
 
-    async def run(self, query, *, context="", history=None, system_prompt_extra=""):
+    async def run(self, query, *, context="", history=None, system_prompt_extra="", tool_context=None):
         return LoopResult(
             answer=self._answer,
             total_steps=1,
@@ -45,7 +45,7 @@ class _MockAgentLoop:
             total_latency_ms=100.0,
         )
 
-    async def run_stream(self, query, *, context="", history=None, system_prompt_extra=""):
+    async def run_stream(self, query, *, context="", history=None, system_prompt_extra="", tool_context=None):
         """模拟流式回答"""
         yield {"event": "start"}
         for char in self._answer:

@@ -3,6 +3,8 @@
 所有测试不依赖 LLM，直接测工具/函数层面的鲁棒性。
 """
 
+import uuid
+
 import pytest
 import pytest_asyncio
 
@@ -12,7 +14,7 @@ from agent.tools.create_ticket import CreateTicket
 from agent.tools.search_component import SearchComponent
 from agent.tools.search_product import SearchProduct
 from agent.tools.track_order import TrackOrder
-from agent.tools_registry import ToolResult
+from agent.tools_registry import ToolContext, ToolResult
 from infra.db_pool import close_pool, get_connection, init_pool, put_connection
 from store.ticket_store import create_ticket, get_ticket, init_ticket_table, list_tickets, update_ticket
 
@@ -34,11 +36,21 @@ async def _tickets():
     conn = await get_connection()
     await conn.set_autocommit(True)
     await conn.execute("DELETE FROM tickets")
+    cur = await conn.execute(
+        """
+        INSERT INTO users (username, password_hash, role)
+        VALUES (%s, %s, %s)
+        RETURNING id
+        """,
+        (f"adversarial-ticket-{uuid.uuid4().hex}", "test-hash", "customer"),
+    )
+    owner_id = (await cur.fetchone())[0]
     await put_connection(conn)
-    yield
+    yield ToolContext(user_id=owner_id, role="customer")
     conn = await get_connection()
     await conn.set_autocommit(True)
     await conn.execute("DELETE FROM tickets")
+    await conn.execute("DELETE FROM users WHERE id = %s", (owner_id,))
     await put_connection(conn)
     await close_pool()
 
@@ -288,7 +300,7 @@ class TestInvalidResources:
     @pytest.mark.asyncio
     async def test_invalid_urgency_create_ticket(self, _tickets):
         tool = CreateTicket()
-        result = await tool.execute(issue="测试", urgency="nuclear")
+        result = await tool.execute(issue="测试", urgency="nuclear", tool_context=_tickets)
         assert result.is_success is True  # 降级为 medium，不崩
         assert result.data["urgency"] == "medium"
 
