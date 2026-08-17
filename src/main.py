@@ -29,8 +29,24 @@ from infra.redis_client import close_redis, health_check, init_redis
 from log_config import setup_logging
 from middleware.auth import AuthMiddleware
 from middleware.request_id import RequestIDMiddleware
-from store.ticket_store import init_ticket_table
-from store.user_store import init_user_table, seed_users
+from store.user_store import seed_users
+
+
+async def _seed_demo_users_if_enabled() -> None:
+    """仅在显式开启且非生产环境时插入 demo 用户。"""
+    if not settings.seed_demo_users:
+        return
+    if settings.env.lower() == "prod":
+        raise RuntimeError("生产环境禁止开启 SEED_DEMO_USERS")
+
+    await seed_users(
+        (
+            ("admin", settings.demo_admin_password.get_secret_value(), "admin"),
+            ("agent", settings.demo_agent_password.get_secret_value(), "agent"),
+            ("operator", settings.demo_operator_password.get_secret_value(), "operator"),
+            ("customer", settings.demo_customer_password.get_secret_value(), "customer"),
+        )
+    )
 
 
 @asynccontextmanager
@@ -38,11 +54,9 @@ async def lifespan(app: FastAPI):
     # startup
     setup_logging()
     await init_pool()
-    await init_ticket_table()
     init_redis()
     await health_check()
-    await init_user_table()
-    await seed_users()
+    await _seed_demo_users_if_enabled()
     init_casbin()
     llm = LLMClient(
         api_key=settings.llm_api_key.get_secret_value(),

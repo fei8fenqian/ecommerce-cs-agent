@@ -19,6 +19,14 @@ class Settings(BaseSettings):
     # ---- 运行环境 ----
     env: str = "dev"  # dev | staging | prod
 
+    # ---- 开发/测试 demo 账号 ----
+    # 默认关闭；生产环境禁止开启。密码只能通过环境变量注入。
+    seed_demo_users: bool = False
+    demo_admin_password: SecretStr = SecretStr("")
+    demo_agent_password: SecretStr = SecretStr("")
+    demo_operator_password: SecretStr = SecretStr("")
+    demo_customer_password: SecretStr = SecretStr("")
+
     # ---- PostgreSQL / pgvector ----
     pg_host: str = "localhost"
     pg_port: int = 5433

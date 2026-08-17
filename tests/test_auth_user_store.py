@@ -5,6 +5,7 @@ import pytest_asyncio
 
 from infra.db_pool import get_connection, init_pool, put_connection
 from store.user_store import (
+    create_initial_admin,
     get_user_by_id,
     get_user_by_username,
     init_user_table,
@@ -102,13 +103,47 @@ class TestUpdateUsers:
 class TestSeedUsers:
     async def test_seed_idempotent(self):
         """seed 两次不报错"""
-        await seed_users()
-        await seed_users()
+        users = (
+            ("admin", "test-admin-password", "admin"),
+            ("agent", "test-agent-password", "agent"),
+            ("operator", "test-operator-password", "operator"),
+            ("customer", "test-customer-password", "customer"),
+        )
+        await seed_users(users)
+        await seed_users(users)
 
     async def test_all_four_users_exist(self):
-        await seed_users()
+        await seed_users(
+            (
+                ("admin", "test-admin-password", "admin"),
+                ("agent", "test-agent-password", "agent"),
+                ("operator", "test-operator-password", "operator"),
+                ("customer", "test-customer-password", "customer"),
+            )
+        )
         for name in ("admin", "agent", "operator", "customer"):
             user = await get_user_by_username(name)
             assert user != {}, f"{name} should exist"
             assert user["username"] == name
             assert "password_hash" in user
+
+
+class TestInitialAdmin:
+    async def test_create_is_idempotent_and_does_not_replace_password(self):
+        created = await create_initial_admin("bootstrap-admin", "first-password")
+        assert created is True
+        original = await get_user_by_username("bootstrap-admin")
+
+        created_again = await create_initial_admin("bootstrap-admin", "second-password")
+        assert created_again is False
+        unchanged = await get_user_by_username("bootstrap-admin")
+
+        assert unchanged["id"] == original["id"]
+        assert unchanged["password_hash"] == original["password_hash"]
+        assert unchanged["role"] == "admin"
+
+    async def test_existing_non_admin_username_is_rejected(self):
+        await insert_users("existing-customer", "hash", "customer")
+
+        with pytest.raises(ValueError, match="非管理员"):
+            await create_initial_admin("existing-customer", "password")

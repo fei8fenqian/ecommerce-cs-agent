@@ -3,9 +3,10 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
+from infra.casbin_enforcer import init_casbin
 from middleware.auth import AuthMiddleware
 
 
@@ -14,6 +15,7 @@ from middleware.auth import AuthMiddleware
 # =============================================================================
 @pytest.fixture
 def client():
+    init_casbin()
     app = FastAPI()
     app.add_middleware(AuthMiddleware)
 
@@ -24,6 +26,10 @@ def client():
     @app.get("/api/v1/test")
     async def test_route():
         return {"ok": True}
+
+    @app.get("/api/v1/whoami")
+    async def whoami(request: Request):
+        return request.state.user
 
     @app.get("/api/v1/admin/users/42")
     async def admin_users_route():
@@ -100,3 +106,23 @@ class TestInternalWithCasbin:
             )
         # external 不走 Casbin，直接放行到 route handler
         assert resp.status_code == 200
+
+    def test_request_state_excludes_password_hash(self, client):
+        from utils.jwt_utils import generate_jwt
+
+        token = generate_jwt(3, "customer", "external")
+        mock_user = {
+            "id": 3,
+            "username": "buyer",
+            "role": "customer",
+            "password_hash": "must-not-reach-request-state",
+        }
+
+        with patch("middleware.auth.verify_token", new=AsyncMock(return_value=(mock_user, "external"))):
+            resp = client.get(
+                "/api/v1/whoami",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+
+        assert resp.status_code == 200
+        assert "password_hash" not in resp.json()

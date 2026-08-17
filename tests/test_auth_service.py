@@ -116,6 +116,7 @@ class TestVerifyToken:
 
         assert info["username"] == "agent1"
         assert info["role"] == "agent"
+        assert "password_hash" not in info
         assert user_type == "internal"
 
     @pytest.mark.asyncio

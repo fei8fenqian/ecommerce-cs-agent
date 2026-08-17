@@ -21,7 +21,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
         token = auth_header.removeprefix("Bearer ")
         try:
             user_info, user_type = await verify_token(token)
-            request.state.user = user_info
+            # 认证层只向业务传递最小身份上下文，避免 password_hash 等敏感字段下沉。
+            request.state.user = {
+                "id": user_info["id"],
+                "username": user_info["username"],
+                "role": user_info["role"],
+            }
             # internal
             if user_type == "internal":
                 if not enforce(user_info["role"], request.url.path, request.method):
