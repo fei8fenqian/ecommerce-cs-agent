@@ -1,6 +1,6 @@
 """tests/test_session.py — 多轮对话 Session 管理 + 指代消解单元测试"""
 
-import time
+import uuid
 
 import pytest
 import pytest_asyncio
@@ -9,7 +9,7 @@ from agent.engines.loop import LoopResult, StepResult
 from agent.llm.llm_client import ToolCall
 from agent.llm.resolve import resolve_pronouns
 from agent.llm.session import SessionContext, SessionManager
-from infra.redis_client import close_redis, init_redis
+from infra.db_pool import close_pool, get_connection, init_pool, put_connection
 
 
 # =============================================================================
@@ -164,23 +164,61 @@ class TestSessionContext:
 
 
 # =============================================================================
-# SessionManager — Redis 后端
+# SessionManager — PostgreSQL 后端
 # =============================================================================
 class TestSessionManager:
-    """所有测试共享同一个 manager 实例，但每个测试前后 flush Redis 避免状态泄漏"""
+    """使用独立测试用户验证 PostgreSQL 会话的持久化和用户隔离。"""
+
+    @pytest_asyncio.fixture(autouse=True)
+    async def _db_pool(self):
+        """在当前测试事件循环中初始化 PostgreSQL 连接池。"""
+        await close_pool()
+        await init_pool(minconn=1, maxconn=4)
+        yield
+        await close_pool()
 
     @pytest_asyncio.fixture
-    async def manager(self):
-        init_redis()
-        m = SessionManager(ttl=1)
-        yield m
-        await m.flush_all()
-        await close_redis()
+    async def owner_ids(self):
+        conn = await get_connection()
+        owner_ids: list[int] = []
+        try:
+            await conn.set_autocommit(True)
+            for role in ("customer", "customer"):
+                username = f"session-test-{uuid.uuid4().hex}"
+                cur = await conn.execute(
+                    """
+                    insert into users (username, password_hash, role)
+                    values (%s, %s, %s)
+                    returning id
+                    """,
+                    (username, "test-hash", role),
+                )
+                row = await cur.fetchone()
+                assert row is not None
+                owner_ids.append(row[0])
+            yield owner_ids
+        finally:
+            if owner_ids:
+                await conn.execute(
+                    "delete from sessions where owner_user_id = any(%s)",
+                    (owner_ids,),
+                )
+                await conn.execute(
+                    "delete from users where id = any(%s)",
+                    (owner_ids,),
+                )
+            await put_connection(conn)
+
+    @pytest_asyncio.fixture
+    async def manager(self, owner_ids):
+        yield SessionManager(), owner_ids[0], owner_ids[1]
 
     # -- get_or_create ---------------------------------------------------------
     @pytest.mark.asyncio
     async def test_get_or_create_new_session_without_id(self, manager):
-        ctx = await manager.get_or_create()
+        session_manager, owner_id, _ = manager
+        ctx = await session_manager.get_or_create(None, owner_id)
+        assert ctx is not None
         assert ctx.session_id != ""
         assert len(ctx.session_id) == 36  # UUID4
         assert ctx.created_at > 0
@@ -190,32 +228,42 @@ class TestSessionManager:
 
     @pytest.mark.asyncio
     async def test_get_or_create_new_session_with_id(self, manager):
-        ctx = await manager.get_or_create("session_test_new")
-        assert ctx.session_id == "session_test_new"
-        assert ctx.created_at > 0
+        session_manager, owner_id, _ = manager
+        created = await session_manager.get_or_create(None, owner_id)
+        assert created is not None
+        loaded = await session_manager.get_or_create(created.session_id, owner_id)
+        assert loaded is not None
+        assert loaded.session_id == created.session_id
+        assert loaded.created_at == created.created_at
 
     @pytest.mark.asyncio
     async def test_get_or_create_returns_existing(self, manager):
         """同一个 session_id 返回的 SessionContext 内容相同"""
-        ctx1 = await manager.get_or_create("sid_get")
-        ctx2 = await manager.get_or_create("sid_get")
+        session_manager, owner_id, _ = manager
+        ctx1 = await session_manager.get_or_create(None, owner_id)
+        assert ctx1 is not None
+        ctx2 = await session_manager.get_or_create(ctx1.session_id, owner_id)
+        assert ctx2 is not None
         assert ctx2.session_id == ctx1.session_id
         assert ctx2.created_at == ctx1.created_at  # 已存在的不会改
 
     @pytest.mark.asyncio
     async def test_get_or_create_updates_last_active(self, manager):
-        ctx1 = await manager.get_or_create("sid_active")
-        old_active = ctx1.last_active
-        time.sleep(0.01)
-        # 重新 get_or_create 会返回一个新的 SessionContext（从 Redis 重新加载）
-        # last_active 每次 _save 都会更新
-        ctx2 = await manager.get_or_create("sid_active")
-        assert ctx2.last_active >= old_active
+        session_manager, owner_id, _ = manager
+        ctx = await session_manager.get_or_create(None, owner_id)
+        assert ctx is not None
+        result = _make_loop_result(answer="更新活跃时间")
+        await session_manager.add_turn(ctx.session_id, owner_id, "查询", result)
+        updated = await session_manager.get(ctx.session_id, owner_id)
+        assert updated is not None
+        assert updated.last_active > ctx.last_active
 
     # -- add_turn --------------------------------------------------------------
     @pytest.mark.asyncio
     async def test_add_turn_with_tool_call(self, manager):
-        ctx = await manager.get_or_create("sid_turn_tool")
+        session_manager, owner_id, _ = manager
+        ctx = await session_manager.get_or_create(None, owner_id)
+        assert ctx is not None
         step = _make_step(
             step=1,
             thought="先查库存",
@@ -229,10 +277,11 @@ class TestSessionManager:
             last_entities={"product": "拯救者Y9000P"},
         )
 
-        await manager.add_turn("sid_turn_tool", query="拯救者有货吗", result=result)
+        await session_manager.add_turn(ctx.session_id, owner_id, "拯救者有货吗", result)
 
-        # 重新从 Redis 加载，验证持久化
-        ctx = await manager.get_or_create("sid_turn_tool")
+        # 重新从 PostgreSQL 加载，验证持久化
+        ctx = await session_manager.get(ctx.session_id, owner_id)
+        assert ctx is not None
         assert len(ctx.messages) == 4
 
         assert ctx.messages[0]["role"] == "user"
@@ -251,12 +300,15 @@ class TestSessionManager:
     @pytest.mark.asyncio
     async def test_add_turn_without_tool_calls(self, manager):
         """LLM 直接回答，没有调工具"""
-        ctx = await manager.get_or_create("sid_turn_notool")
+        session_manager, owner_id, _ = manager
+        ctx = await session_manager.get_or_create(None, owner_id)
+        assert ctx is not None
         result = _make_loop_result(answer="您好，有什么可以帮您？")
 
-        await manager.add_turn("sid_turn_notool", query="你好", result=result)
+        await session_manager.add_turn(ctx.session_id, owner_id, "你好", result)
 
-        ctx = await manager.get_or_create("sid_turn_notool")
+        ctx = await session_manager.get(ctx.session_id, owner_id)
+        assert ctx is not None
         assert len(ctx.messages) == 2
         assert ctx.messages[0]["role"] == "user"
         assert ctx.messages[0]["content"] == "你好"
@@ -266,35 +318,44 @@ class TestSessionManager:
     @pytest.mark.asyncio
     async def test_add_turn_multiple_steps(self, manager):
         """多步工具调用"""
-        ctx = await manager.get_or_create("sid_multi")
+        session_manager, owner_id, _ = manager
+        ctx = await session_manager.get_or_create(None, owner_id)
+        assert ctx is not None
         step1 = _make_step(step=1, tool_name="search_product", observation="找到了")
         step2 = _make_step(step=2, tool_name="check_stock", observation="库存3台")
         result = _make_loop_result(answer="有货，3台", steps=[step1, step2])
 
-        await manager.add_turn("sid_multi", query="查库存", result=result)
+        await session_manager.add_turn(ctx.session_id, owner_id, "查库存", result)
 
-        ctx = await manager.get_or_create("sid_multi")
+        ctx = await session_manager.get(ctx.session_id, owner_id)
+        assert ctx is not None
         assert len(ctx.messages) == 6
 
     @pytest.mark.asyncio
     async def test_add_turn_missing_session_does_not_raise(self, manager):
         """session 不存在时不抛异常"""
+        session_manager, owner_id, _ = manager
         result = _make_loop_result(answer="回答")
-        await manager.add_turn("nonexistent_session_xyz", query="问题", result=result)
+        await session_manager.add_turn(str(uuid.uuid4()), owner_id, "问题", result)
 
     @pytest.mark.asyncio
     async def test_add_turn_updates_last_entities(self, manager):
-        await manager.get_or_create("sid_entities")
+        session_manager, owner_id, _ = manager
+        ctx = await session_manager.get_or_create(None, owner_id)
+        assert ctx is not None
         result = _make_loop_result(answer="回答", last_entities={"product": "拯救者Y9000P"})
-        await manager.add_turn("sid_entities", query="查询", result=result)
+        await session_manager.add_turn(ctx.session_id, owner_id, "查询", result)
 
-        ctx = await manager.get_or_create("sid_entities")
+        ctx = await session_manager.get(ctx.session_id, owner_id)
+        assert ctx is not None
         assert ctx.last_entities["product"] == "拯救者Y9000P"
 
     @pytest.mark.asyncio
     async def test_add_turn_merges_entities_across_turns(self, manager):
         """多轮累积 entity：product 和 order 都保留"""
-        await manager.get_or_create("sid_merge")
+        session_manager, owner_id, _ = manager
+        ctx = await session_manager.get_or_create(None, owner_id)
+        assert ctx is not None
 
         step1 = _make_step(step=1, tool_name="search_product", observation="找到了")
         r1 = _make_loop_result(
@@ -302,156 +363,143 @@ class TestSessionManager:
             steps=[step1],
             last_entities={"product": "拯救者Y9000P"},
         )
-        await manager.add_turn("sid_merge", query="拯救者配置", result=r1)
+        await session_manager.add_turn(ctx.session_id, owner_id, "拯救者配置", r1)
 
         r2 = _make_loop_result(
             answer="订单ORD001已发货",
             last_entities={"order": "ORD001"},
         )
-        await manager.add_turn("sid_merge", query="ORD001到哪了", result=r2)
+        await session_manager.add_turn(ctx.session_id, owner_id, "ORD001到哪了", r2)
 
-        ctx = await manager.get_or_create("sid_merge")
+        ctx = await session_manager.get(ctx.session_id, owner_id)
+        assert ctx is not None
         assert ctx.last_entities["product"] == "拯救者Y9000P"
         assert ctx.last_entities["order"] == "ORD001"
 
     @pytest.mark.asyncio
     async def test_add_turn_overwrites_same_key_entity(self, manager):
         """同 key 的 entity 被新值覆盖"""
-        await manager.get_or_create("sid_overwrite")
+        session_manager, owner_id, _ = manager
+        ctx = await session_manager.get_or_create(None, owner_id)
+        assert ctx is not None
 
         r1 = _make_loop_result(answer="a", last_entities={"product": "拯救者"})
-        await manager.add_turn("sid_overwrite", query="q1", result=r1)
+        await session_manager.add_turn(ctx.session_id, owner_id, "q1", r1)
 
         r2 = _make_loop_result(answer="b", last_entities={"product": "ThinkPad"})
-        await manager.add_turn("sid_overwrite", query="q2", result=r2)
+        await session_manager.add_turn(ctx.session_id, owner_id, "q2", r2)
 
-        ctx = await manager.get_or_create("sid_overwrite")
+        ctx = await session_manager.get(ctx.session_id, owner_id)
+        assert ctx is not None
         assert ctx.last_entities["product"] == "ThinkPad"
 
     @pytest.mark.asyncio
     async def test_add_turn_no_entities_does_not_clear_existing(self, manager):
         """新轮没有 entity 时，旧的保留"""
-        await manager.get_or_create("sid_keep")
+        session_manager, owner_id, _ = manager
+        ctx = await session_manager.get_or_create(None, owner_id)
+        assert ctx is not None
         # 通过 add_turn 设置初始 entity
         r1 = _make_loop_result(answer="有货", last_entities={"product": "拯救者"})
-        await manager.add_turn("sid_keep", query="查库存", result=r1)
+        await session_manager.add_turn(ctx.session_id, owner_id, "查库存", r1)
 
         result = _make_loop_result(answer="不知道", last_entities={})
-        await manager.add_turn("sid_keep", query="随便聊聊", result=result)
+        await session_manager.add_turn(ctx.session_id, owner_id, "随便聊聊", result)
 
-        ctx = await manager.get_or_create("sid_keep")
+        ctx = await session_manager.get(ctx.session_id, owner_id)
+        assert ctx is not None
         assert ctx.last_entities["product"] == "拯救者"
 
     @pytest.mark.asyncio
     async def test_add_turn_updates_last_active(self, manager):
-        ctx1 = await manager.get_or_create("sid_upd_active")
+        session_manager, owner_id, _ = manager
+        ctx1 = await session_manager.get_or_create(None, owner_id)
+        assert ctx1 is not None
         old_active = ctx1.last_active
-        time.sleep(0.01)
         result = _make_loop_result(answer="回答")
-        await manager.add_turn("sid_upd_active", query="查询", result=result)
-        ctx2 = await manager.get_or_create("sid_upd_active")
+        await session_manager.add_turn(ctx1.session_id, owner_id, "查询", result)
+        ctx2 = await session_manager.get(ctx1.session_id, owner_id)
+        assert ctx2 is not None
         assert ctx2.last_active > old_active
 
     @pytest.mark.asyncio
     async def test_add_turn_step_no_tool_calls_is_skipped(self, manager):
         """steps 中某步没有 tool_calls 时不产生 assistant/tool 消息对"""
-        await manager.get_or_create("sid_skip")
+        session_manager, owner_id, _ = manager
+        ctx = await session_manager.get_or_create(None, owner_id)
+        assert ctx is not None
         step = StepResult(step=1, thought="直接回答了", latency_ms=100.0)
         result = _make_loop_result(answer="最终答案", steps=[step])
 
-        await manager.add_turn("sid_skip", query="问题", result=result)
+        await session_manager.add_turn(ctx.session_id, owner_id, "问题", result)
 
-        ctx = await manager.get_or_create("sid_skip")
+        ctx = await session_manager.get(ctx.session_id, owner_id)
+        assert ctx is not None
         assert len(ctx.messages) == 2
 
     # -- resolve ---------------------------------------------------------------
     @pytest.mark.asyncio
     async def test_resolve_no_entities_returns_original(self, manager):
         """第一轮没有 entity，指代词不被替换"""
-        await manager.get_or_create("sid_resolve_none")
-        resolved = await manager.resolve("它的价格", session_id="sid_resolve_none")
+        session_manager, owner_id, _ = manager
+        ctx = await session_manager.get_or_create(None, owner_id)
+        assert ctx is not None
+        resolved = await session_manager.resolve("它的价格", ctx.session_id, owner_id)
         assert resolved == "它的价格"
 
     @pytest.mark.asyncio
     async def test_resolve_with_entity_replaces_pronoun(self, manager):
         """query 中的指代词被替换为实体名"""
-        await manager.get_or_create("sid_resolve_entity")
+        session_manager, owner_id, _ = manager
+        ctx = await session_manager.get_or_create(None, owner_id)
+        assert ctx is not None
         # 通过 add_turn 写入 entity
         r1 = _make_loop_result(answer="配置...", last_entities={"product": "拯救者Y9000P"})
-        await manager.add_turn("sid_resolve_entity", query="配置", result=r1)
-        resolved = await manager.resolve("它的价格呢", session_id="sid_resolve_entity")
+        await session_manager.add_turn(ctx.session_id, owner_id, "配置", r1)
+        resolved = await session_manager.resolve("它的价格呢", ctx.session_id, owner_id)
         assert resolved == "拯救者Y9000P的价格呢"
 
     @pytest.mark.asyncio
     async def test_resolve_session_not_found(self, manager):
         """session 过期/不存在，返回原 query"""
-        resolved = await manager.resolve("这个有货吗", session_id="ghost_session_xyz")
+        session_manager, owner_id, _ = manager
+        resolved = await session_manager.resolve("这个有货吗", str(uuid.uuid4()), owner_id)
         assert resolved == "这个有货吗"
 
     @pytest.mark.asyncio
     async def test_resolve_session_id_none(self, manager):
         """新用户没传 session_id，返回原 query"""
-        resolved = await manager.resolve("这个有货吗", session_id=None)
+        session_manager, owner_id, _ = manager
+        resolved = await session_manager.resolve("这个有货吗", None, owner_id)
         assert resolved == "这个有货吗"
 
-    # -- cleanup ---------------------------------------------------------------
+    # -- ownership, listing, deletion -----------------------------------------
     @pytest.mark.asyncio
-    async def test_cleanup_removes_expired_sessions(self):
-        """手动将 last_active 设为过去 → cleanup_expired 删除"""
-        init_redis()
-        m = SessionManager(ttl=3600)  # 长 TTL，Redis 不会自动删
-        await m.get_or_create("sid_cleanup_expired")
-        # 把 last_active 改成 2 小时前
-        old_time = time.time() - 7200
-        await m._redis.hset(
-            m._key("sid_cleanup_expired"),
-            "last_active",
-            str(old_time),
-        )
-        count = await m.cleanup_expired()
-        assert count == 1
-        assert await m.get("sid_cleanup_expired") is None
-        await m.flush_all()
-        await close_redis()
+    async def test_session_isolation_between_users(self, manager):
+        session_manager, owner_id, other_owner_id = manager
+        ctx = await session_manager.get_or_create(None, owner_id)
+        assert ctx is not None
+        assert await session_manager.get(ctx.session_id, other_owner_id) is None
+        assert await session_manager.delete(ctx.session_id, other_owner_id) is False
 
     @pytest.mark.asyncio
-    async def test_cleanup_mixed_expired_and_active(self):
-        """一个过期一个活跃 → 只清理过期的"""
-        init_redis()
-        m = SessionManager(ttl=3600)
-        await m.get_or_create("sid_cleanup_old")
-        old_time = time.time() - 7200
-        await m._redis.hset(
-            m._key("sid_cleanup_old"),
-            "last_active",
-            str(old_time),
-        )
-        await m.get_or_create("sid_cleanup_fresh")
+    async def test_list_sessions_only_returns_owner_sessions(self, manager):
+        session_manager, owner_id, other_owner_id = manager
+        owner_session = await session_manager.get_or_create(None, owner_id)
+        other_session = await session_manager.get_or_create(None, other_owner_id)
+        assert owner_session is not None
+        assert other_session is not None
 
-        count = await m.cleanup_expired()
-        assert count == 1
-        assert await m.get("sid_cleanup_old") is None
-        assert await m.get("sid_cleanup_fresh") is not None
-        await m.flush_all()
-        await close_redis()
+        sessions = await session_manager.list_sessions(owner_id)
+        session_ids = {item["session_id"] for item in sessions}
+        assert owner_session.session_id in session_ids
+        assert other_session.session_id not in session_ids
 
     @pytest.mark.asyncio
-    async def test_cleanup_no_expired_returns_zero(self, manager):
-        await manager.get_or_create("sid_cleanup_active")
-        count = await manager.cleanup_expired()
-        assert count == 0
-
-    @pytest.mark.asyncio
-    async def test_cleanup_empty_store_returns_zero(self, manager):
-        count = await manager.cleanup_expired()
-        assert count == 0
-
-    @pytest.mark.asyncio
-    async def test_cleanup_activity_extends_lifetime(self, manager):
-        """get_or_create 刷新 last_active 后不会过期"""
-        await manager.get_or_create("sid_cleanup_refresh")
-        time.sleep(0.6)  # 没过 TTL
-        await manager.get_or_create("sid_cleanup_refresh")
-        time.sleep(0.6)  # 从刷新算起还是没过期
-        count = await manager.cleanup_expired()
-        assert count == 0
+    async def test_delete_session_only_for_owner(self, manager):
+        session_manager, owner_id, other_owner_id = manager
+        ctx = await session_manager.get_or_create(None, owner_id)
+        assert ctx is not None
+        assert await session_manager.delete(ctx.session_id, other_owner_id) is False
+        assert await session_manager.delete(ctx.session_id, owner_id) is True
+        assert await session_manager.get(ctx.session_id, owner_id) is None

@@ -58,12 +58,16 @@ class _MockAgentLoop:
 
 
 class _MockSessionManager:
-    """内存版 SessionManager，不依赖 Redis"""
+    """内存版 SessionManager，不依赖 PostgreSQL。"""
 
     def __init__(self):
         self._sessions: dict[str, SessionContext] = {}
 
-    async def get_or_create(self, session_id: str | None = None) -> SessionContext:
+    async def get_or_create(
+        self,
+        session_id: str | None,
+        owner_user_id: int,
+    ) -> SessionContext | None:
         if session_id and session_id in self._sessions:
             return self._sessions[session_id]
         sid = session_id or "mock-session-id"
@@ -71,12 +75,23 @@ class _MockSessionManager:
         self._sessions[sid] = ctx
         return ctx
 
-    async def resolve(self, query: str, session_id: str | None = None) -> str:
+    async def resolve(
+        self,
+        query: str,
+        session_id: str | None,
+        owner_user_id: int,
+    ) -> str:
         if session_id and session_id in self._sessions:
             return resolve_pronouns(query, self._sessions[session_id].last_entities)
         return query
 
-    async def add_turn(self, session_id: str, query: str, result: LoopResult) -> None:
+    async def add_turn(
+        self,
+        session_id: str,
+        owner_user_id: int,
+        query: str,
+        result: LoopResult,
+    ) -> None:
         ctx = self._sessions.get(session_id)
         if ctx:
             ctx.messages.append({"role": "user", "content": query})
@@ -84,7 +99,13 @@ class _MockSessionManager:
             if result.last_entities:
                 ctx.last_entities.update(result.last_entities)
 
-    async def add_turn_simple(self, session_id: str, query: str, answer: str) -> None:
+    async def add_turn_simple(
+        self,
+        session_id: str,
+        owner_user_id: int,
+        query: str,
+        answer: str,
+    ) -> None:
         ctx = self._sessions.get(session_id)
         if ctx:
             ctx.messages.append({"role": "user", "content": query})
@@ -97,6 +118,12 @@ class _MockSessionManager:
 @pytest.fixture
 def client():
     app = FastAPI()
+
+    @app.middleware("http")
+    async def fake_auth(request, call_next):
+        request.state.user = {"id": 1, "username": "test-user", "role": "customer"}
+        return await call_next(request)
+
     app.include_router(chat_router)
     app.state.agent = _MockAgentLoop(answer="这是测试回答")
     app.state.session = _MockSessionManager()

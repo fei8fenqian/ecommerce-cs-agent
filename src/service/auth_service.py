@@ -100,8 +100,13 @@ async def verify_token(token: str) -> tuple[dict, str]:
     user_info = await get_user_by_id(int(user_id))
     if not user_info:
         raise AuthenticationError("用户不存在或已被删除")
+    safe_user_info = {
+        "id": user_info["id"],
+        "username": user_info["username"],
+        "role": user_info["role"],
+    }
     if user_info["role"] in {"agent", "operator", "admin"}:
         user_type = "internal"
     else:
         user_type = "external"
-    return user_info, user_type
+    return safe_user_info, user_type

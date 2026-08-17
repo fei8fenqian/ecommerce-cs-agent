@@ -39,7 +39,8 @@ session_router = APIRouter(prefix="/api/v1", tags=["会话记录"])
 @session_router.get("/sessions", response_model=SessionListResponse)
 async def get_sessions(request: Request):
     session: SessionManager = request.app.state.session
-    results: list[dict[str, Any]] = await session.list_sessions()
+    user_id = request.state.user["id"]
+    results: list[dict[str, Any]] = await session.list_sessions(user_id)
     session_list: list[SessionItem] = []
     for res in results:
         session_list.append(
@@ -57,7 +58,8 @@ async def get_sessions(request: Request):
 @session_router.get("/sessions/{session_id}", response_model=SessionDetailResponse)
 async def get_session(session_id: str, request: Request):
     session: SessionManager = request.app.state.session
-    session_ctx = await session.get(session_id)
+    user_id = request.state.user["id"]
+    session_ctx = await session.get(session_id, user_id)
     if session_ctx is None:
         raise HTTPException(status_code=404, detail="会话不存在")
     return SessionDetailResponse(
@@ -72,7 +74,8 @@ async def get_session(session_id: str, request: Request):
 @session_router.delete("/sessions/{session_id}")
 async def del_session(session_id: str, request: Request):
     session: SessionManager = request.app.state.session
-    success = await session.delete(session_id)
+    user_id = request.state.user["id"]
+    success = await session.delete(session_id, user_id)
     if not success:
         raise HTTPException(status_code=404, detail="删除失败")
     return {"ok": success}

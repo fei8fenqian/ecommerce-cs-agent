@@ -2,7 +2,7 @@ import json
 import logging
 import time
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -48,15 +48,18 @@ async def chat(chat_req: ChatRequest, request: Request):
         agent = request.app.state.agent
         session = request.app.state.session
         intent_router = request.app.state.intent_router
+        user_id = request.state.user["id"]
 
         # 获取历史会话或创建新会话
-        ctx = await session.get_or_create(chat_req.session_id)
+        ctx = await session.get_or_create(chat_req.session_id, user_id)
+        if ctx is None:
+            raise HTTPException(status_code=404, detail="会话不存在")
 
         # 判断指代词对应的实体
-        resolved_query = await session.resolve(chat_req.query, ctx.session_id)
+        resolved_query = await session.resolve(chat_req.query, ctx.session_id, user_id)
 
         # 用户情感判断
-        sentiment = detect_sentiment(resolved_query, history=ctx.messages)
+        sentiment = detect_sentiment(resolved_query, history=ctx.history)
         sentiment_ctx = build_escalation_prompt(sentiment)
 
         # 意图路由
@@ -66,11 +69,11 @@ async def chat(chat_req: ChatRequest, request: Request):
             plan_agent = request.app.state.plan_execute_agent
             plan_state = await plan_agent.run(
                 resolved_query,
-                history=ctx.messages,
+                history=ctx.history,
                 scenario=intent.scenario,
             )
             # plan_execute 不走 AgentLoop，手动记录到 session
-            await session.add_turn_simple(ctx.session_id, chat_req.query, plan_state.get("answer", ""))
+            await session.add_turn_simple(ctx.session_id, user_id, chat_req.query, plan_state.get("answer", ""))
             return ChatResponse(
                 answer=plan_state.get("answer", ""),
                 session_id=ctx.session_id,
@@ -83,14 +86,14 @@ async def chat(chat_req: ChatRequest, request: Request):
             loop_result = await agent.run(
                 resolved_query,
                 context=context,
-                history=ctx.messages,
+                history=ctx.history,
                 system_prompt_extra=sentiment_ctx,
             )
         else:
-            loop_result = await agent.run(resolved_query, history=ctx.messages, system_prompt_extra=sentiment_ctx)
+            loop_result = await agent.run(resolved_query, history=ctx.history, system_prompt_extra=sentiment_ctx)
 
         # 当前对话放入上下文ctx
-        await session.add_turn(ctx.session_id, chat_req.query, loop_result)
+        await session.add_turn(ctx.session_id, user_id, chat_req.query, loop_result)
         return ChatResponse(
             answer=loop_result.answer,
             session_id=ctx.session_id,
@@ -121,14 +124,18 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
     agent = request.app.state.agent
     session = request.app.state.session
     intent_router = request.app.state.intent_router
+    user_id = request.state.user["id"]
 
     # 历史会话
-    session_ctx = await session.get_or_create(chat_req.session_id)
-    history = session_ctx.messages
+    session_ctx = await session.get_or_create(chat_req.session_id, user_id)
+    if session_ctx is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+
+    history = session_ctx.history
     session_id = session_ctx.session_id
 
     # 指代消解
-    resolve_query = await session.resolve(chat_req.query, session_id)
+    resolve_query = await session.resolve(chat_req.query, session_id, user_id)
 
     # 用户情绪
     sentiment = detect_sentiment(resolve_query, history=history)
@@ -138,7 +145,7 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
     intent = await intent_router.route(resolve_query)
     context = ""
     if intent.target == "rag":
-        docs = hybrid_search(resolve_query, table=intent.table)
+        docs = await hybrid_search(resolve_query, table=intent.table)
         context = _build_context(docs)
 
     stream_res = {"answer": "", "total_steps": 0, "total_tokens": 0}
@@ -167,6 +174,7 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
 
             await session.add_turn(
                 session_id,
+                user_id,
                 resolve_query,
                 LoopResult(
                     answer=stream_res["answer"],
@@ -207,6 +215,7 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
 
         await session.add_turn(
             session_id,
+            user_id,
             resolve_query,
             LoopResult(
                 answer=stream_res["answer"],
