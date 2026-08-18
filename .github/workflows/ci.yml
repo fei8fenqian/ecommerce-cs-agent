@@ -17,7 +17,7 @@ jobs:
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: postgres
+          POSTGRES_DB: ecommerce_agent_test
         ports:
           - 5432:5432
         options: >-
@@ -41,7 +41,7 @@ jobs:
       PG_PORT: 5432
       PG_USER: postgres
       PG_PASSWORD: postgres
-      PG_DBNAME: postgres
+      PG_DBNAME: ecommerce_agent_test
       REDIS_URL: redis://localhost:6379/0
       # LLM API Key — 单测不调 LLM，占位即可
       LLM_API_KEY: ci-placeholder-key
