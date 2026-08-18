@@ -400,6 +400,14 @@ psql -h "${TARGET_HOST}" -p "${TARGET_PORT}" -U "${TARGET_USER}" -d "${RESTORE_D
       ORDER BY tc.table_name, tc.constraint_type,
                tc.constraint_name, kcu.ordinal_position;"
 psql -h "${TARGET_HOST}" -p "${TARGET_PORT}" -U "${TARGET_USER}" -d "${RESTORE_DB}" \
+  -c "SELECT c.conrelid::regclass AS table_name, c.conname,
+             c.contype, c.convalidated, pg_get_constraintdef(c.oid)
+      FROM pg_constraint c
+      JOIN pg_namespace n ON n.oid = c.connamespace
+      WHERE n.nspname = 'public'
+        AND c.contype = 'c'
+      ORDER BY c.conrelid::regclass::text, c.conname;"
+psql -h "${TARGET_HOST}" -p "${TARGET_PORT}" -U "${TARGET_USER}" -d "${RESTORE_DB}" \
   -c "SELECT schemaname, tablename, indexname, indexdef
       FROM pg_indexes
       WHERE schemaname = 'public'
@@ -414,17 +422,20 @@ pg_dump \
   --file="${BACKUP_DIR}/schema-restored.sql"
 diff -u "${BACKUP_DIR}/schema-before.sql" \
   "${BACKUP_DIR}/schema-restored.sql" \
-  > "${BACKUP_DIR}/schema-restore.diff" || {
-    echo "恢复库 schema 与备份 schema 不一致，停止验收。"
+  > "${BACKUP_DIR}/schema-restore.diff" || schema_diff_status=$?
+if [ "${schema_diff_status:-0}" -gt 1 ]; then
+    echo "schema diff 命令执行失败，停止验收。"
     exit 1
-  }
+fi
 ```
+
+`schema-restore.diff` 必须归档并人工审查。退出码为 1 只表示存在文本差异，不得直接判定失败或通过。允许的非语义差异仅包括：`pg_dump` 每次生成的 `\\restrict`/`\\unrestrict` token，以及 PostgreSQL 对已知 CHECK 表达式的等价重新格式化；这些差异必须由上面的系统目录查询、约束名称、类型、`convalidated` 和业务语义共同证明。出现其他字段、表、约束、外键或索引差异时，必须停止验收。
 
 预期：
 
 - 恢复库中的 `alembic_version` 与备份时记录的 `${SOURCE_REVISION}` 一致；
-- 主键、唯一约束、外键和关键索引查询结果已保存，并与 `schema-before.sql` 对照；
-- `schema-restore.diff` 为空；任何差异都必须停止验收并单独处理，不能带差异通过；
+- 主键、唯一约束、CHECK 约束、外键和关键索引查询结果已保存，并与 `schema-before.sql` 对照；
+- `schema-restore.diff` 已人工审查且没有未解释差异；
 - 六张业务表的数据量与 `counts-before.txt` 逐项一致；
 - `orders` 与 `order_items` 的外键关系可查询，不能只验证表存在。
 
