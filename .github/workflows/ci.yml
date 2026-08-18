@@ -69,7 +69,10 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Lint
-        run: make lint
+        run: ruff check src scripts
+
+      - name: Apply database migrations
+        run: alembic upgrade head
 
       - name: Run tests
         run: make test
