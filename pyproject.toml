@@ -101,6 +101,7 @@ dev = [
     "pytest-asyncio>=0.24",
     "ruff>=0.5",
     "mypy>=1.10",
+    "httpx2",
 ]
 
 [tool.setuptools.packages.find]
