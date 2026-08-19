@@ -25,7 +25,6 @@ class AgentTicketItem(BaseModel):
     urgency: str
     status: str
     created_at: str
-    assigned_agent_id: int | None = None
 
 
 class CustomerTicketListResponse(BaseModel):
@@ -53,7 +52,6 @@ class AgentTicketSummaryResponse(BaseModel):
     urgency: str
     status: str
     created_at: str
-    assigned_agent_id: int | None = None
 
 
 class AgentTicketDetailResponse(BaseModel):
@@ -133,7 +131,6 @@ async def ticket(ticket_id: str, request: Request):
             urgency=ticket_data["urgency"],
             status=ticket_data["status"],
             created_at=ticket_data["created_at"],
-            assigned_agent_id=None,
         )
 
     raise HTTPException(status_code=403, detail="当前帐号无权查询工单")

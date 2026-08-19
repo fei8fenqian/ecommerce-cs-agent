@@ -92,7 +92,12 @@ async def test_unclaimed_agent_gets_redacted_summary(_assignment_data):
     )
 
     assert isinstance(result, AgentTicketSummaryResponse)
-    assert result.assigned_agent_id is None
+    assert set(result.model_dump()) == {
+        "ticket_id",
+        "urgency",
+        "status",
+        "created_at",
+    }
     assert "customer_name" not in result.model_dump()
     assert "phone" not in result.model_dump()
     assert "issue" not in result.model_dump()
