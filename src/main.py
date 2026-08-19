@@ -1,6 +1,8 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from agent.engines.loop import AgentLoop
 from agent.engines.plan_execute import PlanAndExecuteAgent
@@ -19,10 +21,17 @@ from agent.tools import (
 from agent.tools_registry import ToolRegistry
 from api.auth import auth_router
 from api.chat import chat_router
+from api.errors import (
+    handle_app_exception,
+    handle_http_exceptions,
+    handle_unexpected_exception,
+    handle_validation_error,
+)
 from api.health import health_router
 from api.session import session_router
 from api.tickets import ticket_router
 from config import settings
+from exceptions import BaseAppException
 from infra.casbin_enforcer import init_casbin
 from infra.db_pool import close_pool, init_pool
 from infra.redis_client import close_redis, health_check, init_redis
@@ -43,8 +52,16 @@ async def _seed_demo_users_if_enabled() -> None:
         (
             ("admin", settings.demo_admin_password.get_secret_value(), "admin"),
             ("agent", settings.demo_agent_password.get_secret_value(), "agent"),
-            ("operator", settings.demo_operator_password.get_secret_value(), "operator"),
-            ("customer", settings.demo_customer_password.get_secret_value(), "customer"),
+            (
+                "operator",
+                settings.demo_operator_password.get_secret_value(),
+                "operator",
+            ),
+            (
+                "customer",
+                settings.demo_customer_password.get_secret_value(),
+                "customer",
+            ),
         )
     )
 
@@ -105,11 +122,16 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="极客数码 AI 客服", version="0.1.0", lifespan=lifespan)
+app.add_exception_handler(StarletteHTTPException, handle_http_exceptions)
+app.add_exception_handler(RequestValidationError, handle_validation_error)
+app.add_exception_handler(BaseAppException, handle_app_exception)
+app.add_exception_handler(Exception, handle_unexpected_exception)
 app.include_router(chat_router)
 app.include_router(session_router)
 app.include_router(ticket_router)
 app.include_router(health_router)
 app.include_router(auth_router)
 
-app.add_middleware(RequestIDMiddleware)
+
 app.add_middleware(AuthMiddleware)
+app.add_middleware(RequestIDMiddleware)

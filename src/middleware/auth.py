@@ -2,8 +2,10 @@ from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
+from api.errors import error_response_body
 from exceptions import AuthenticationError
 from infra.casbin_enforcer import enforce
+from log_config import get_request_id
 from service.auth_service import verify_token
 
 ALLOWLIST_PATHS = {"/health", "/api/v1/auth/login"}
@@ -17,7 +19,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
         auth_header = request.headers.get("Authorization")
         if not auth_header:
-            return JSONResponse(status_code=401, content={"detail": "缺少 Authorization header"})
+            return self._error_response(
+                code="AUTHENTICATION_REQUIRED",
+                message="需要登录后访问",
+            )
         token = auth_header.removeprefix("Bearer ")
         try:
             user_info, user_type = await verify_token(token)
@@ -30,10 +35,28 @@ class AuthMiddleware(BaseHTTPMiddleware):
             # internal
             if user_type == "internal":
                 if not enforce(user_info["role"], request.url.path, request.method):
-                    return JSONResponse(
+                    return self._error_response(
+                        code="FORBIDDEN",
+                        message="无权访问该资源",
                         status_code=403,
-                        content={"detail": f"{user_info['role']}无权通过{request.method}访问{request.url.path}"},
                     )
-        except AuthenticationError as e:
-            return JSONResponse(status_code=401, content={"detail": e.to_dict()})
+        except AuthenticationError:
+            return self._error_response(
+                code="TOKEN_INVALID",
+                message="登录状态无效，请重新登录",
+            )
         return await call_next(request)
+
+    @staticmethod
+    def _error_response(
+        code: str,
+        message: str,
+        status_code: int = 401,
+    ) -> JSONResponse:
+        content = error_response_body(
+            code,
+            message,
+            {},
+            get_request_id(),
+        )
+        return JSONResponse(content=content, status_code=status_code)

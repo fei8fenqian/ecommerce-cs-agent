@@ -4,10 +4,18 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from api.auth import auth_router
-from exceptions import AuthenticationError
+from api.errors import (
+    handle_app_exception,
+    handle_http_exceptions,
+    handle_unexpected_exception,
+    handle_validation_error,
+)
+from exceptions import AuthenticationError, BaseAppException
 
 
 # =============================================================================
@@ -16,6 +24,10 @@ from exceptions import AuthenticationError
 @pytest.fixture
 def client():
     app = FastAPI()
+    app.add_exception_handler(StarletteHTTPException, handle_http_exceptions)
+    app.add_exception_handler(RequestValidationError, handle_validation_error)
+    app.add_exception_handler(BaseAppException, handle_app_exception)
+    app.add_exception_handler(Exception, handle_unexpected_exception)
     app.include_router(auth_router)
     yield TestClient(app, raise_server_exceptions=False)
 
@@ -57,6 +69,7 @@ class TestLoginAPI:
             )
 
         assert resp.status_code == 401
+        assert resp.json()["error"]["code"] == "AUTHENTICATION_REQUIRED"
 
 
 # =============================================================================
@@ -76,6 +89,7 @@ class TestLogoutAPI:
     def test_logout_missing_auth_header_returns_401(self, client):
         resp = client.post("/api/v1/auth/logout")
         assert resp.status_code == 401
+        assert resp.json()["error"]["code"] == "AUTHENTICATION_REQUIRED"
 
     def test_logout_invalid_token_returns_401(self, client):
         with patch(
@@ -88,3 +102,4 @@ class TestLogoutAPI:
             )
 
         assert resp.status_code == 401
+        assert resp.json()["error"]["code"] == "TOKEN_INVALID"

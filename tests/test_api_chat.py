@@ -7,13 +7,22 @@ import json
 
 import pytest
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from agent.engines.loop import LoopResult
 from agent.llm.intent_router import Intent
 from agent.llm.resolve import resolve_pronouns
 from agent.llm.session import SessionContext
 from api.chat import chat_router
+from api.errors import (
+    handle_app_exception,
+    handle_http_exceptions,
+    handle_unexpected_exception,
+    handle_validation_error,
+)
+from exceptions import BaseAppException
 
 
 # =============================================================================
@@ -118,6 +127,10 @@ class _MockSessionManager:
 @pytest.fixture
 def client():
     app = FastAPI()
+    app.add_exception_handler(StarletteHTTPException, handle_http_exceptions)
+    app.add_exception_handler(RequestValidationError, handle_validation_error)
+    app.add_exception_handler(BaseAppException, handle_app_exception)
+    app.add_exception_handler(Exception, handle_unexpected_exception)
 
     @app.middleware("http")
     async def fake_auth(request, call_next):
@@ -168,19 +181,22 @@ class TestChatEndpoint:
         assert resp2.json()["session_id"] == "my-session"
 
     def test_empty_query_rejected(self, client):
-        """空 query → 422 (pydantic 校验 min_length=1)"""
+        """空 query → 400 (pydantic 校验 min_length=1)"""
         resp = client.post("/api/v1/chat", json={"query": ""})
-        assert resp.status_code == 422
+        assert resp.status_code == 400
+        assert resp.json()["error"]["code"] == "INVALID_REQUEST"
 
     def test_query_too_long_rejected(self, client):
-        """超长 query → 422"""
+        """超长 query → 400"""
         resp = client.post("/api/v1/chat", json={"query": "a" * 2001})
-        assert resp.status_code == 422
+        assert resp.status_code == 400
+        assert resp.json()["error"]["code"] == "INVALID_REQUEST"
 
     def test_missing_query_rejected(self, client):
-        """缺少必填字段 → 422"""
+        """缺少必填字段 → 400"""
         resp = client.post("/api/v1/chat", json={})
-        assert resp.status_code == 422
+        assert resp.status_code == 400
+        assert resp.json()["error"]["code"] == "INVALID_REQUEST"
 
     def test_response_format(self, client):
         """返回的 JSON 结构完整"""
@@ -224,6 +240,7 @@ class TestChatStreamEndpoint:
         assert len(done_events) == 1
 
     def test_stream_empty_query_rejected(self, client):
-        """空 query → 422"""
+        """空 query → 400"""
         resp = client.post("/api/v1/chat/stream", json={"query": ""})
-        assert resp.status_code == 422
+        assert resp.status_code == 400
+        assert resp.json()["error"]["code"] == "INVALID_REQUEST"

@@ -3,9 +3,19 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
+from pydantic import BaseModel
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from api.errors import (
+    handle_app_exception,
+    handle_http_exceptions,
+    handle_unexpected_exception,
+    handle_validation_error,
+)
+from exceptions import AuthenticationError, BaseAppException
 from infra.casbin_enforcer import init_casbin
 from middleware.auth import AuthMiddleware
 
@@ -17,6 +27,10 @@ from middleware.auth import AuthMiddleware
 def client():
     init_casbin()
     app = FastAPI()
+    app.add_exception_handler(StarletteHTTPException, handle_http_exceptions)
+    app.add_exception_handler(RequestValidationError, handle_validation_error)
+    app.add_exception_handler(BaseAppException, handle_app_exception)
+    app.add_exception_handler(Exception, handle_unexpected_exception)
     app.add_middleware(AuthMiddleware)
 
     @app.get("/health")
@@ -34,6 +48,21 @@ def client():
     @app.get("/api/v1/admin/users/42")
     async def admin_users_route():
         return {"ok": True}
+
+    @app.get("/api/v1/raises-404")
+    async def raises_404():
+        raise HTTPException(status_code=404, detail="会话不存在")
+
+    class RequiredPayload(BaseModel):
+        ticket_id: int
+
+    @app.post("/api/v1/validated")
+    async def validated(payload: RequiredPayload):
+        return payload
+
+    @app.get("/api/v1/raises-unknown")
+    async def raises_unknown():
+        raise RuntimeError("internal secret")
 
     yield TestClient(app, raise_server_exceptions=False)
 
@@ -56,13 +85,23 @@ class TestNoAuthHeader:
     def test_missing_auth_header_returns_401(self, client):
         resp = client.get("/api/v1/test")
         assert resp.status_code == 401
-        assert "缺少 Authorization header" in resp.text
+        assert resp.json()["error"]["code"] == "AUTHENTICATION_REQUIRED"
+        assert "detail" not in resp.json()
 
 
 class TestInvalidToken:
     def test_bad_token_returns_401(self, client):
-        resp = client.get("/api/v1/test", headers={"Authorization": "Bearer garbage"})
+        with patch(
+            "middleware.auth.verify_token",
+            new=AsyncMock(side_effect=AuthenticationError("token 无效: internal secret")),
+        ):
+            resp = client.get(
+                "/api/v1/test",
+                headers={"Authorization": "Bearer garbage"},
+            )
         assert resp.status_code == 401
+        assert resp.json()["error"]["code"] == "TOKEN_INVALID"
+        assert "internal secret" not in resp.text
 
 
 class TestInternalWithCasbin:
@@ -91,6 +130,56 @@ class TestInternalWithCasbin:
                 headers={"Authorization": f"Bearer {token}"},
             )
         assert resp.status_code == 403
+        assert resp.json()["error"]["code"] == "FORBIDDEN"
+        assert "agent" not in resp.text
+
+    def test_route_404_uses_generic_resource_message(self, client):
+        mock_user = {"id": 3, "username": "buyer", "role": "customer"}
+        with patch(
+            "middleware.auth.verify_token",
+            new=AsyncMock(return_value=(mock_user, "external")),
+        ):
+            resp = client.get(
+                "/api/v1/raises-404",
+                headers={"Authorization": "Bearer valid-token"},
+            )
+
+        assert resp.status_code == 404
+        assert resp.json()["error"]["code"] == "RESOURCE_NOT_AVAILABLE"
+        assert resp.json()["error"]["message"] == "资源不可用或无法核验"
+        assert "会话不存在" not in resp.text
+
+    def test_missing_required_field_returns_400(self, client):
+        mock_user = {"id": 3, "username": "buyer", "role": "customer"}
+        with patch(
+            "middleware.auth.verify_token",
+            new=AsyncMock(return_value=(mock_user, "external")),
+        ):
+            resp = client.post(
+                "/api/v1/validated",
+                json={},
+                headers={"Authorization": "Bearer valid-token"},
+            )
+
+        assert resp.status_code == 400
+        assert resp.json()["error"]["code"] == "INVALID_REQUEST"
+        assert resp.json()["error"]["details"]["fields"]
+
+    def test_unknown_exception_returns_generic_500(self, client):
+        mock_user = {"id": 3, "username": "buyer", "role": "customer"}
+        with patch(
+            "middleware.auth.verify_token",
+            new=AsyncMock(return_value=(mock_user, "external")),
+        ):
+            resp = client.get(
+                "/api/v1/raises-unknown",
+                headers={"Authorization": "Bearer valid-token"},
+            )
+
+        assert resp.status_code == 500
+        assert resp.json()["error"]["code"] == "INTERNAL_ERROR"
+        assert resp.json()["error"]["message"] == "服务器内部错误，请稍后重试"
+        assert "internal secret" not in resp.text
 
     def test_external_bypasses_casbin(self, client):
         """external 用户不走 Casbin，直接放行"""
