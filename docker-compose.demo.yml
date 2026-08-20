@@ -15,6 +15,8 @@ services:
     volumes:
       - ./secrets/private_key.pem:/app/private_key.pem:ro
       - ./secrets/public_key.pem:/app/public_key.pem:ro
+      # 面试演示可快速验证已提交源码；正式部署应仅运行不可变镜像。
+      - ./src:/app/src:ro
     depends_on:
       db:
         condition: service_healthy
