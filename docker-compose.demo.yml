@@ -1,6 +1,8 @@
 # 仅供面试演示的单机部署：服务不直接暴露公网，通过 SSH 隧道访问本机 8000 端口。
 services:
   app:
+    image: ecommerce-agent-demo:latest
+    pull_policy: never
     build: .
     env_file:
       - .env
