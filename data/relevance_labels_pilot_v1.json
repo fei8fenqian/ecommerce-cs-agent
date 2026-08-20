@@ -1,0 +1,41 @@
+{
+  "dataset_version": "pilot-v1",
+  "annotation_scope": "single-annotator corpus review",
+  "annotator": "Codex",
+  "reviewed_at": "2026-08-20",
+  "source_questions": "data/test_questions.json (questions 1-30)",
+  "labels": [
+    {"question_id": 1, "relevant_doc_ids": ["6ad24e55f8aa4855e9770b297f57487b", "7ca27c54fcc77c228850a1264471ff55", "e704d207f6789372dd423b9addb7f3be", "f71d5624f6364c422f4d5bf9379039ea", "fc31b7e7ac3696609eb2ff3b513b886a"]},
+    {"question_id": 2, "relevant_doc_ids": ["7a08cd24a66a91f3518077f90ef5a7c2", "eedb7a91a3189e5227631ca9669bb586", "bac6b2553baa32db25fcb5f723fddcb3", "c6389f17fd02a114922488cda64ace1a", "99c353336dee9ebe3d8c59378a8aa8b7"]},
+    {"question_id": 3, "relevant_doc_ids": ["e543d53ee78ef7d8e57b43e5b88059ec", "88a69c4168adcb07d06d4a186a8eb4f8", "cf6946bc414c68dea575fa737c160ecd", "4f18f174e5c88e195f1975ee221009f3", "1b05243d5820d759c62fb8be04f13e04"]},
+    {"question_id": 4, "relevant_doc_ids": ["fc441170c7c1db8698f6cd12895cee0f"]},
+    {"question_id": 5, "relevant_doc_ids": ["7cd933e2037a182c2a0fcba042fd0951", "bf089cb8024a6964c22e6271ce9b7447"]},
+    {"question_id": 7, "relevant_doc_ids": ["4069c44ab5c8beeec5366cc6d80283a2", "8df11c12c6b3205e82a60dd3488fca23", "1062023e6f24d0964416d311c1d02768", "4e94def61d0a4ddccd0b090e825dbf3b", "e769c7370371f766a9ceaa37bdbbb087"]},
+    {"question_id": 8, "relevant_doc_ids": ["841df66be1e46dc71690542ef4383c0c", "67abbd62d8d66e76b3fa98d15da21ef3", "272fd29878c91fdac6fe878ea5978257", "339951cc0693261fea8fa81726ab1e14", "7ae55668794e900414586122559b85f4"]},
+    {"question_id": 9, "relevant_doc_ids": ["b0c5f2c2d0cdfe623aa6291aaaa21fb7", "0f1e5cedeada7586f38140f1b9bbc107", "a97ad2f4ed47e67c04416fa76dbaa0cc"]},
+    {"question_id": 10, "relevant_doc_ids": ["c3d1fd336c8aeadd45b3a14418d11555", "63ed7d47852d5ea3c5413146b90d08a8", "0cb1b69da7a381381ff99a121b6c58dc", "50cf6c2e2da82cb3a41fb336e2e3fa53", "6216495e2d6055901743d9cc8b77fd95"]},
+    {"question_id": 12, "relevant_doc_ids": ["7398cfb18d5f6dd715a2d0523c91cbd9", "52cedfec26deee649361688c371103f1", "48c8596c717763895582649fc5eb8ec8"]},
+    {"question_id": 14, "relevant_doc_ids": ["64e56d4de3048d5fa4de6ba35700599e", "a7a39211c2e2315a313a25920d21e9cb"]},
+    {"question_id": 15, "relevant_doc_ids": ["e31a6ee43f70c733f80e54ec3b5e0694", "7c0b197f526f09d22d204591649d83a7", "f3195fbf6041af9b782942a3ddf37289"]},
+    {"question_id": 16, "relevant_doc_ids": ["cd7d9956fc573a779e908d5a0e050af7", "640a6cea353825e2188b631e665c1c51", "19a93f16c683e21fd84455d32807bb28", "32ed3d2bdcbc1e61ad0aaf529c687f92"]},
+    {"question_id": 17, "relevant_doc_ids": ["f3fd30b39fc1a36630ce1bf0b13e8f9f", "b3224cb731aa9e66204f4191addda95e", "05e7dab02546324b28b6544a82e22ce5", "803180933ad5c3fc3fd3c12d6e6e6ed5", "beddea006c37e4ef12e2df9979bb9b51"]},
+    {"question_id": 18, "relevant_doc_ids": ["6d895f200101381c49f14eadf6c1cf1a", "92dfeeb2f09d61bca1762a67535500d7", "66b36244ea33adddbd98a101919aa35f"]},
+    {"question_id": 19, "relevant_doc_ids": ["acbfdd16c68a3f335e986840772f89df", "4c4ae9b4374abe5058bd0504ad74f2ab", "4b0f130c87e746d922f0745a30108bf8", "150aae65cc397e8299eadf98de10cf4e", "4835475f019f60210a41b4642fa4d30b"]},
+    {"question_id": 20, "relevant_doc_ids": ["dbac13cb1de17831fcf438dc93d55744", "790ac30362bc206454301fa600728344"]},
+    {"question_id": 21, "relevant_doc_ids": ["6802ed9af6f69f603d669990b9977826"]},
+    {"question_id": 22, "relevant_doc_ids": ["e2362d9721bfb41bda3ea1e1e7e5152a", "a1e1eb8cff5faad0b2f2348c6b266cee"]},
+    {"question_id": 23, "relevant_doc_ids": ["d4e4e8e6d93ac2216c41ee3a0c6c3e0c", "0db643293f92788f83d92a4f67701feb"]},
+    {"question_id": 24, "relevant_doc_ids": ["0d8ff9ba06eaf5f3117f394b072646c0"]},
+    {"question_id": 25, "relevant_doc_ids": ["68a0ada4a245035477486bb5e48ffc03", "9c9380ea08026c4ea1c9f7bef77d869e"]},
+    {"question_id": 26, "relevant_doc_ids": ["61e4ce023886f9fedc3cc45d9644982d", "57bb781b57d9fb7c38e9ddabe467257a"]},
+    {"question_id": 27, "relevant_doc_ids": ["1c4584fa8eb82f682c4f8e126fcb5d96", "8fd8dc7067dc86d6f785ca1bd21cd20f"]},
+    {"question_id": 28, "relevant_doc_ids": ["b56b697b91932b5d3aaf39f304120f1d"]},
+    {"question_id": 29, "relevant_doc_ids": ["68a0ada4a245035477486bb5e48ffc03", "2eec74d1d97f3647b622435c73ed736d", "57bb781b57d9fb7c38e9ddabe467257a"]},
+    {"question_id": 30, "relevant_doc_ids": ["61e4ce023886f9fedc3cc45d9644982d", "fa3463f357c2a694cda7be33db3b57e4", "b62f8ec7baebe22410d661d019bd53dd"]}
+  ],
+  "excluded": [
+    {"question_id": 6, "reason": "当前语料未找到戴尔灵越15的可确认文档"},
+    {"question_id": 11, "reason": "当前语料未找到华为Pura X的可确认文档"},
+    {"question_id": 13, "reason": "当前语料未找到红米2亿像素机型的可确认文档"}
+  ]
+}
