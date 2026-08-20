@@ -14,8 +14,16 @@ from agent.rag.rrf import rrf_fuse
 from config import settings
 from infra.db_pool import get_connection, put_connection
 
-# 启动时加载一次模型（模块级，不每次请求加载）
-_model = SentenceTransformer(settings.embedding_model)
+_model: SentenceTransformer | None = None
+
+
+def _get_model() -> SentenceTransformer:
+    """首次实际向量检索时加载 Embedding 模型。"""
+    global _model
+    if _model is None:
+        _model = SentenceTransformer(settings.embedding_model)
+    return _model
+
 
 # 模块级 表名:bm25
 _bm25_cache: dict[str, BM25Index] = {}
@@ -66,7 +74,7 @@ async def vector_search(
     ...}, ...]
     """
 
-    q_vec = _model.encode(inputs=[query], normalize_embeddings=True)[0].tolist()
+    q_vec = _get_model().encode(inputs=[query], normalize_embeddings=True)[0].tolist()
     q_vec_str = str(q_vec)
     where = where or "1=1"  # 没有过滤条件时查全表
 
