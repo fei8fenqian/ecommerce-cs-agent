@@ -8,7 +8,7 @@ from infra.casbin_enforcer import enforce
 from log_config import get_request_id
 from service.auth_service import verify_token
 
-ALLOWLIST_PATHS = {"/health", "/api/v1/auth/login"}
+ALLOWLIST_PATHS = {"/health", "/api/v1/auth/login", "/internal/metrics"}
 
 
 class AuthMiddleware(BaseHTTPMiddleware):

@@ -47,6 +47,9 @@ class Settings(BaseSettings):
     llm_base_url: str = "https://api.deepseek.com/v1"
     llm_model: str = "deepseek-chat"
 
+    # ---- 内部 Metrics 端点 ----
+    metrics_bearer_token: SecretStr = SecretStr("")
+
     # ---- 检索参数 ----
     retrieval_top_k: int = Field(default=20, ge=1, le=100, description="粗筛返回条数")
     rerank_top_k: int = Field(default=5, ge=1, le=20, description="精排后保留条数")

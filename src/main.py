@@ -28,6 +28,7 @@ from api.errors import (
     handle_validation_error,
 )
 from api.health import health_router
+from api.metrics import metrics_router
 from api.session import session_router
 from api.tickets import ticket_router
 from config import settings
@@ -37,6 +38,7 @@ from infra.db_pool import close_pool, init_pool
 from infra.redis_client import close_redis, health_check, init_redis
 from log_config import setup_logging
 from middleware.auth import AuthMiddleware
+from middleware.metrics import MetricsMiddleware
 from middleware.request_id import RequestIDMiddleware
 from store.user_store import seed_users
 
@@ -130,8 +132,10 @@ app.include_router(chat_router)
 app.include_router(session_router)
 app.include_router(ticket_router)
 app.include_router(health_router)
+app.include_router(metrics_router)
 app.include_router(auth_router)
 
 
 app.add_middleware(AuthMiddleware)
 app.add_middleware(RequestIDMiddleware)
+app.add_middleware(MetricsMiddleware)

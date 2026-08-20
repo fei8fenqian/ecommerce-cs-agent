@@ -24,6 +24,7 @@ dependencies = [
     "mcp>=1.0",
     "tiktoken>=0.7",
     "redis>=5.0",
+    "prometheus-client>=0.21,<1",
     "jieba>=0.42",
     "FlagEmbedding>=1.4",
     "PyJWT>=2.8",
