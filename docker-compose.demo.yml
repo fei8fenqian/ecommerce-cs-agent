@@ -4,6 +4,8 @@ services:
     image: ecommerce-agent-demo:latest
     pull_policy: never
     build: .
+    # 仅 demo：宿主机源码只读挂载的属主不可预知，因此以 root 读取。
+    user: "0:0"
     env_file:
       - .env
     environment:
