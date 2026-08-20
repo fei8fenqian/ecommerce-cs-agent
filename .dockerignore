@@ -24,7 +24,8 @@ logs/
 
 # 开发工具
 tests/
-scripts/
+scripts/*
+!scripts/init_admin.py
 
 # 原始数据（已经在数据库里）
 data/

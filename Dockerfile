@@ -13,34 +13,34 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app/src
+
 # ---- 1. 系统依赖 ----
-RUN apt-get update && rm -rf /var/lib/apt/lists/*
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y curl \
+    && rm -rf /var/lib/apt/lists/*
 
-# ---- 2. pip 依赖（这层缓存住，改了代码不会重装）----
+# ---- 2. 应用与迁移代码 ----
 COPY pyproject.toml .
-RUN pip install --no-cache-dir \
-    fastapi>=0.110 \
-    "openai>=1.30" \
-    "psycopg[binary,pool]>=3.2" \
-    "pydantic>=2.5" \
-    "pydantic-settings>=2.1" \
-    "sentence-transformers>=3.0" \
-    "langgraph>=1.0" \
-    "mcp>=1.0" \
-    "tiktoken>=0.7" \
-    "redis>=5.0" \
-    "casbin>=1.40" \
-    "pyjwt>=2.8" \
-    "bcrypt>=4.0" \
-    uvicorn \
-    -i https://pypi.tuna.tsinghua.edu.cn/simple
-
-# ---- 3. 代码（最常变，放最后）----
 COPY src/ src/
 COPY casbin/ casbin/
-COPY public_key.pem ./
-# private_key.pem 不进镜像——通过 volume 挂载或 K8s secret 注入
+COPY alembic/ alembic/
+COPY alembic.ini ./
+COPY scripts/init_admin.py scripts/init_admin.py
 
-# ---- 4. 启动 ----
+# 从 pyproject.toml 安装唯一事实来源中的运行依赖；不要维护第二份手写依赖列表。
+RUN pip install --no-cache-dir . \
+    && useradd --create-home --uid 10001 appuser \
+    && mkdir -p /app/logs \
+    && chown -R appuser:appuser /app
+
+# JWT 密钥由部署环境以只读 volume 注入，绝不写入镜像或 Git 仓库。
+USER appuser
+
+# ---- 3. 启动 ----
 EXPOSE 8000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+    CMD curl --fail --silent http://127.0.0.1:8000/health || exit 1
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
