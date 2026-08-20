@@ -1,0 +1,36 @@
+# 面试演示镜像的 CPU 运行依赖。
+# 版本取自本机已通过测试的虚拟环境；不包含 pytest、Playwright、Ruff 或 CUDA/NVIDIA 包。
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+torch==2.13.0+cpu
+accelerate==1.14.0
+alembic==1.19.1
+bcrypt==5.0.0
+casbin==1.43.0
+cryptography==49.0.0
+fastapi==0.139.2
+FlagEmbedding==1.4.0
+huggingface_hub==0.36.2
+jieba==0.42.1
+langgraph==1.2.9
+mcp==1.28.1
+numpy==2.5.1
+openai==2.46.0
+passlib==1.7.4
+prometheus_client==0.26.0
+psycopg[binary,pool]==3.3.4
+PyJWT==2.13.0
+pydantic==2.13.4
+pydantic-settings==2.14.2
+redis==8.1.0
+requests==2.34.2
+safetensors==0.8.0
+scikit-learn==1.9.0
+scipy==1.18.0
+sentence-transformers==5.6.0
+sentencepiece==0.2.2
+SQLAlchemy==2.0.52
+tiktoken==0.13.0
+tokenizers==0.21.4
+transformers==4.47.0
+uvicorn[standard]==0.51.0

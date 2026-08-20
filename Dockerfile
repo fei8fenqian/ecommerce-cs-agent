@@ -24,6 +24,7 @@ RUN apt-get update \
 
 # ---- 2. 应用与迁移代码 ----
 COPY pyproject.toml .
+COPY requirements-demo-cpu.txt .
 COPY src/ src/
 COPY casbin/ casbin/
 COPY alembic/ alembic/
@@ -31,7 +32,8 @@ COPY alembic.ini ./
 COPY scripts/init_admin.py scripts/init_admin.py
 
 # 从 pyproject.toml 安装唯一事实来源中的运行依赖；不要维护第二份手写依赖列表。
-RUN pip install --no-cache-dir . \
+RUN pip install --no-cache-dir -r requirements-demo-cpu.txt \
+    && pip install --no-cache-dir --no-deps . \
     && useradd --create-home --uid 10001 appuser \
     && mkdir -p /app/logs \
     && chown -R appuser:appuser /app
