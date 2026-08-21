@@ -2,6 +2,12 @@
 
 These tests are read-only.  They must run only after an isolated ``_test``
 database has been upgraded to the S3-01 head revision.
+
+Before migration, the operator must record the following values and compare
+them after migration; the migration must not alter either count:
+
+    SELECT COUNT(*) FROM orders;
+    SELECT COUNT(*) FROM orders WHERE customer_user_id IS NULL;
 """
 
 import psycopg
@@ -131,15 +137,18 @@ async def test_s3_01_indexes_cover_idempotency_and_claim_queries() -> None:
         "uq_after_sale_requests_reapplication",
         "idx_after_sale_requests_agent_claim",
         "uq_refunds_external_refund_id",
+        "idx_refunds_last_callback",
         "uq_audit_events_command_idempotency",
         "uq_audit_events_callback_dedup",
+        "idx_audit_events_created_at",
         "idx_outbox_events_claim",
+        "idx_outbox_events_dead_lettered_at",
     }
     assert expected <= indexes
 
 
 @pytest.mark.asyncio
-async def test_s3_01_does_not_change_legacy_order_shape_or_ownership() -> None:
+async def test_s3_01_preserves_legacy_order_shape() -> None:
     rows = await _fetchall(
         """
         SELECT column_name
@@ -158,6 +167,3 @@ async def test_s3_01_does_not_change_legacy_order_shape_or_ownership() -> None:
         "paid_amount",
         "payment_time",
     } <= order_columns
-
-    rows = await _fetchall("SELECT COUNT(*) FROM orders WHERE customer_user_id IS NULL")
-    assert rows[0][0] >= 0

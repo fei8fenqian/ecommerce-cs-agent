@@ -202,6 +202,12 @@ def upgrade() -> None:
         ON public.refunds(reconciliation_due_at)
         """
     )
+    op.execute(
+        """
+        CREATE INDEX idx_refunds_last_callback
+        ON public.refunds(last_callback_at)
+        """
+    )
 
     op.execute(
         """
@@ -310,6 +316,12 @@ def upgrade() -> None:
         ON public.audit_events(request_id)
         """
     )
+    op.execute(
+        """
+        CREATE INDEX idx_audit_events_created_at
+        ON public.audit_events(created_at)
+        """
+    )
 
     op.execute(
         """
@@ -354,6 +366,12 @@ def upgrade() -> None:
         """
         CREATE INDEX idx_outbox_events_dead
         ON public.outbox_events(status, updated_at)
+        """
+    )
+    op.execute(
+        """
+        CREATE INDEX idx_outbox_events_dead_lettered_at
+        ON public.outbox_events(dead_lettered_at)
         """
     )
 
