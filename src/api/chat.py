@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import time
@@ -11,7 +12,8 @@ from agent.llm.sentiment import build_escalation_prompt, detect_sentiment
 from agent.rag.retrieve import hybrid_search
 from agent.tools_registry import ToolContext
 from config import settings
-from exceptions import LLMError
+from exceptions import DependencyUnavailableError, LLMError
+from log_config import get_request_id
 
 _chat_logger = logging.getLogger(__name__)
 
@@ -29,6 +31,18 @@ class ChatResponse(BaseModel):
 
 
 chat_router = APIRouter(prefix="/api/v1", tags=["聊天"])
+
+_STREAM_ERROR_MESSAGE = "智能服务暂时不可用，请稍后重试"
+
+
+def _stream_error_event(request: Request) -> dict[str, str]:
+    request_id = getattr(request.state, "request_id", None) or get_request_id()
+    return {
+        "event": "error",
+        "code": "DEPENDENCY_UNAVAILABLE",
+        "message": _STREAM_ERROR_MESSAGE,
+        "request_id": request_id,
+    }
 
 
 def _build_context(docs: list[dict]) -> str:
@@ -109,6 +123,8 @@ async def chat(chat_req: ChatRequest, request: Request):
             total_steps=loop_result.total_steps,
             total_tokens=loop_result.total_tokens,
         )
+    except DependencyUnavailableError:
+        raise
     except LLMError as e:
         _chat_logger.error(
             "LLM 调用失败: query=%s retry=%d status=%s reason=%s",
@@ -117,12 +133,7 @@ async def chat(chat_req: ChatRequest, request: Request):
             e.status_code,
             e.last_response,
         )
-        return ChatResponse(
-            answer="服务暂时不可用",
-            session_id=ctx.session_id,
-            total_steps=0,
-            total_tokens=0,
-        )
+        raise DependencyUnavailableError("智能服务暂时不可用") from e
     except Exception:
         _chat_logger.exception("chat 端点异常: query=%s", chat_req.query)
         raise
@@ -130,111 +141,122 @@ async def chat(chat_req: ChatRequest, request: Request):
 
 @chat_router.post("/chat/stream")
 async def chat_stream(chat_req: ChatRequest, request: Request):
-    agent = request.app.state.agent
-    session = request.app.state.session
-    intent_router = request.app.state.intent_router
-    user_id = request.state.user["id"]
-    tool_context = ToolContext(user_id=user_id, role=request.state.user["role"])
+    try:
+        agent = request.app.state.agent
+        session = request.app.state.session
+        intent_router = request.app.state.intent_router
+        user_id = request.state.user["id"]
+        tool_context = ToolContext(user_id=user_id, role=request.state.user["role"])
 
-    # 历史会话
-    session_ctx = await session.get_or_create(chat_req.session_id, user_id)
-    if session_ctx is None:
-        raise HTTPException(status_code=404, detail="会话不存在")
+        # 这些步骤发生在 StreamingResponse 创建前，失败时可以正常返回 HTTP 503。
+        session_ctx = await session.get_or_create(chat_req.session_id, user_id)
+        if session_ctx is None:
+            raise HTTPException(status_code=404, detail="会话不存在")
 
-    history = session_ctx.history
-    session_id = session_ctx.session_id
-
-    # 指代消解
-    resolve_query = await session.resolve(chat_req.query, session_id, user_id)
-
-    # 用户情绪
-    sentiment = detect_sentiment(resolve_query, history=history)
-    extra_prompt = build_escalation_prompt(sentiment)
-
-    # 意图识别
-    intent = await intent_router.route(resolve_query)
-    context = ""
-    if intent.target == "rag":
-        docs = await hybrid_search(resolve_query, table=intent.table)
-        context = _build_context(docs)
+        history = session_ctx.history
+        session_id = session_ctx.session_id
+        resolve_query = await session.resolve(chat_req.query, session_id, user_id)
+        sentiment = detect_sentiment(resolve_query, history=history)
+        extra_prompt = build_escalation_prompt(sentiment)
+        intent = await intent_router.route(resolve_query)
+        context = ""
+        if intent.target == "rag":
+            docs = await hybrid_search(resolve_query, table=intent.table)
+            context = _build_context(docs)
+    except DependencyUnavailableError:
+        raise
+    except LLMError as exc:
+        raise DependencyUnavailableError("智能服务暂时不可用") from exc
 
     stream_res = {"answer": "", "total_steps": 0, "total_tokens": 0}
     last_entities: dict[str, str] = {}
     start_t = time.perf_counter()
 
     async def generate():
-        # 先推一个 start 事件给前端，带 session_id
-        yield f"data: {json.dumps({'event': 'start', 'session_id': session_id}, ensure_ascii=False)}\n\n"
-
+        stream_completed = False
         nonlocal last_entities
+        try:
+            # 先推一个 start 事件给前端，带 session_id
+            yield f"data: {json.dumps({'event': 'start', 'session_id': session_id}, ensure_ascii=False)}\n\n"
 
-        if intent.target == "plan_execute":
-            plan_agent = request.app.state.plan_execute_agent
-            async for chunk in plan_agent.run_stream(
+            if intent.target == "plan_execute":
+                plan_agent = request.app.state.plan_execute_agent
+                async for chunk in plan_agent.run_stream(
+                    resolve_query,
+                    history=history,
+                    scenario=intent.scenario,
+                    tool_context=tool_context,
+                ):
+                    if chunk.get("event") == "error":
+                        yield f"data: {json.dumps(_stream_error_event(request), ensure_ascii=False)}\n\n"
+                        return
+
+                    yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+                    if chunk.get("event") == "done":
+                        data = chunk.get("data", {})
+                        stream_res["answer"] = data.get("answer", "")
+                        stream_res["total_steps"] = len(data.get("plan", []))
+                        stream_res["total_tokens"] = data.get("total_tokens", 0)
+                        stream_completed = True
+
+                if stream_completed:
+                    await session.add_turn(
+                        session_id,
+                        user_id,
+                        resolve_query,
+                        LoopResult(
+                            answer=stream_res["answer"],
+                            total_steps=stream_res["total_steps"],
+                            total_latency_ms=(time.perf_counter() - start_t) * 1000,
+                            last_entities=last_entities,
+                        ),
+                    )
+                return
+
+            # 消费 agent 的消息流，逐个处理事件
+            async for event in agent.run_stream(
                 resolve_query,
+                context=context,
                 history=history,
-                scenario=intent.scenario,
+                system_prompt_extra=extra_prompt,
                 tool_context=tool_context,
             ):
-                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
-                if chunk.get("event") == "done":
-                    data = chunk.get("data", {})
-                    stream_res["answer"] = data.get("answer", "")
-                    stream_res["total_steps"] = len(data.get("plan", []))
-                    stream_res["total_tokens"] = data.get("total_tokens", 0)
+                if event.get("event") == "error":
+                    yield f"data: {json.dumps(_stream_error_event(request), ensure_ascii=False)}\n\n"
+                    return
 
-            await session.add_turn(
-                session_id,
-                user_id,
-                resolve_query,
-                LoopResult(
-                    answer=stream_res["answer"],
-                    total_steps=stream_res["total_steps"],
-                    total_latency_ms=(time.perf_counter() - start_t) * 1000,
-                    last_entities=last_entities,
-                ),
-            )
-            return
+                if event.get("event") == "tool_call":
+                    args = event.get("args", {})
+                    if "product_name" in args:
+                        last_entities["product"] = str(args["product_name"])
+                    if "order_id" in args:
+                        last_entities["order"] = str(args["order_id"])
 
-        # 消费 agent 的消息流，逐个处理事件
-        async for event in agent.run_stream(
-            resolve_query,
-            context=context,
-            history=history,
-            system_prompt_extra=extra_prompt,
-            tool_context=tool_context,
-        ):
-            # event 可能的值：
-            #   {"event": "thinking", ...}
-            #   {"event": "tool_call", "name": "search_product", "args": {...}}
-            #   {"event": "tool_result", ...}
-            #   {"event": "token", "content": "..."}
-            #   {"event": "error", "message": "..."}
-            #   {"event": "done", "answer": "...", ...}
-            if event["event"] == "tool_call":
-                args = event.get("args", {})
-                if "product_name" in args:
-                    last_entities["product"] = str(args["product_name"])
-                if "order_id" in args:
-                    last_entities["order"] = str(args["order_id"])
+                if event.get("event") == "done":
+                    stream_res["answer"] = event.get("answer", "")
+                    stream_res["total_steps"] = event.get("total_steps", 0)
+                    stream_completed = True
 
-            if event["event"] == "done":
-                stream_res["answer"] = event.get("answer", "")
-                stream_res["total_steps"] = event.get("total_steps", 0)
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
-            # 把事件序列化成 SSE 格式推给前端
-            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-
-        await session.add_turn(
-            session_id,
-            user_id,
-            resolve_query,
-            LoopResult(
-                answer=stream_res["answer"],
-                total_steps=stream_res["total_steps"],
-                total_latency_ms=(time.perf_counter() - start_t) * 1000,
-                last_entities=last_entities,
-            ),
-        )
+            if stream_completed:
+                await session.add_turn(
+                    session_id,
+                    user_id,
+                    resolve_query,
+                    LoopResult(
+                        answer=stream_res["answer"],
+                        total_steps=stream_res["total_steps"],
+                        total_latency_ms=(time.perf_counter() - start_t) * 1000,
+                        last_entities=last_entities,
+                    ),
+                )
+        except asyncio.CancelledError:
+            raise
+        except (DependencyUnavailableError, LLMError):
+            yield f"data: {json.dumps(_stream_error_event(request), ensure_ascii=False)}\n\n"
+        except Exception:
+            _chat_logger.exception("chat stream generation failed")
+            yield f"data: {json.dumps(_stream_error_event(request), ensure_ascii=False)}\n\n"
 
     return StreamingResponse(content=generate(), media_type="text/event-stream")

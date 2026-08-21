@@ -188,3 +188,10 @@ class AuthenticationError(BaseAppException):
         detail: dict[str, Any] | None = None,
     ):
         super().__init__(message, error_code=error_code, detail=detail)
+
+
+class DependencyUnavailableError(BaseAppException):
+    """外部依赖不可用，不能把它伪装成认证失败。"""
+
+    def __init__(self, message: str, detail: dict[str, Any] | None = None):
+        super().__init__(message, error_code="DEPENDENCY_UNAVAILABLE", detail=detail)

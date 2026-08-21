@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -34,13 +35,17 @@ from api.tickets import ticket_router
 from config import settings
 from exceptions import BaseAppException
 from infra.casbin_enforcer import init_casbin
+from infra.circuit_breaker import CircuitBreaker
 from infra.db_pool import close_pool, init_pool
 from infra.redis_client import close_redis, health_check, init_redis
 from log_config import setup_logging
 from middleware.auth import AuthMiddleware
 from middleware.metrics import MetricsMiddleware
+from middleware.rate_limit import RateLimitMiddleware
 from middleware.request_id import RequestIDMiddleware
 from store.user_store import seed_users
+
+_logger = logging.getLogger(__name__)
 
 
 async def _seed_demo_users_if_enabled() -> None:
@@ -77,10 +82,20 @@ async def lifespan(app: FastAPI):
     await health_check()
     await _seed_demo_users_if_enabled()
     init_casbin()
+    llm_circuit_breaker = CircuitBreaker(
+        failure_threshold=settings.llm_circuit_failure_threshold,
+        open_seconds=settings.llm_circuit_open_seconds,
+    )
     llm = LLMClient(
         api_key=settings.llm_api_key.get_secret_value(),
         base_url=settings.llm_base_url,
         model=settings.llm_model,
+        timeout=settings.llm_timeout_seconds,
+        max_attempts=settings.llm_max_attempts,
+        retry_backoff_seconds=settings.llm_retry_backoff_seconds,
+        sdk_max_retries=settings.llm_sdk_max_retries,
+        stream_timeout=settings.llm_stream_timeout_seconds,
+        circuit_breaker=llm_circuit_breaker,
     )
     intent_router = IntentRouter(llm)
     registry = ToolRegistry()
@@ -100,11 +115,25 @@ async def lifespan(app: FastAPI):
 
     mcp_managers: list[MCPClientManager] = []
     for url in settings.mcp_servers:
-        manager = MCPClientManager(url)
-        await manager.connect()
-        for tool_info in await manager.list_tools():
-            registry.register(MCPTool(manager, tool_info))
-        mcp_managers.append(manager)
+        manager = MCPClientManager(
+            url,
+            connect_timeout_seconds=settings.mcp_connect_timeout_seconds,
+            list_tools_timeout_seconds=settings.mcp_list_tools_timeout_seconds,
+            call_timeout_seconds=settings.mcp_call_timeout_seconds,
+            circuit_breaker=CircuitBreaker(
+                failure_threshold=settings.mcp_circuit_failure_threshold,
+                open_seconds=settings.mcp_circuit_open_seconds,
+            ),
+        )
+        try:
+            await manager.connect()
+            for tool_info in await manager.list_tools():
+                registry.register(MCPTool(manager, tool_info))
+            mcp_managers.append(manager)
+        except Exception:
+            # 单个 MCP 不可用时跳过它，不能阻塞整个 HTTP 服务启动。
+            _logger.warning("MCP server unavailable during startup", extra={"reason": "startup_failed"})
+            await manager.disconnect()
 
     app.state.llm_client = llm
     app.state.intent_router = intent_router
@@ -136,6 +165,7 @@ app.include_router(metrics_router)
 app.include_router(auth_router)
 
 
+app.add_middleware(RateLimitMiddleware)
 app.add_middleware(AuthMiddleware)
 app.add_middleware(RequestIDMiddleware)
 app.add_middleware(MetricsMiddleware)

@@ -3,9 +3,10 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
 from api.errors import error_response_body
-from exceptions import AuthenticationError
+from exceptions import AuthenticationError, DependencyUnavailableError
 from infra.casbin_enforcer import enforce
 from log_config import get_request_id
+from middleware.rate_limit import check_pre_auth_rate_limit
 from service.auth_service import verify_token
 
 ALLOWLIST_PATHS = {
@@ -26,6 +27,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
         auth_header = request.headers.get("Authorization")
         if not auth_header:
+            rate_limit_response = await check_pre_auth_rate_limit(request)
+            if rate_limit_response is not None:
+                return rate_limit_response
             return self._error_response(
                 code="AUTHENTICATION_REQUIRED",
                 message="需要登录后访问",
@@ -47,7 +51,16 @@ class AuthMiddleware(BaseHTTPMiddleware):
                         message="无权访问该资源",
                         status_code=403,
                     )
+        except DependencyUnavailableError:
+            return self._error_response(
+                code="DEPENDENCY_UNAVAILABLE",
+                message="认证依赖服务暂时不可用，请稍后重试",
+                status_code=503,
+            )
         except AuthenticationError:
+            rate_limit_response = await check_pre_auth_rate_limit(request)
+            if rate_limit_response is not None:
+                return rate_limit_response
             return self._error_response(
                 code="TOKEN_INVALID",
                 message="登录状态无效，请重新登录",

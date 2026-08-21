@@ -46,6 +46,13 @@ class Settings(BaseSettings):
     llm_api_key: SecretStr = SecretStr("")
     llm_base_url: str = "https://api.deepseek.com/v1"
     llm_model: str = "deepseek-chat"
+    llm_timeout_seconds: float = Field(default=10.0, gt=0, description="LLM 单次请求超时(秒)")
+    llm_max_attempts: int = Field(default=2, ge=1, description="LLM 整个调用最多尝试次数")
+    llm_retry_backoff_seconds: float = Field(default=0.5, ge=0, description="LLM 重试退避基数(秒)")
+    llm_sdk_max_retries: int = Field(default=0, ge=0, description="LLM SDK 内部最大重试次数")
+    llm_stream_timeout_seconds: float = Field(default=30.0, gt=0, description="LLM 流式调用超时(秒)")
+    llm_circuit_failure_threshold: int = Field(default=3, ge=1, description="LLM 熔断连续失败阈值")
+    llm_circuit_open_seconds: float = Field(default=30.0, gt=0, description="LLM 熔断冷却时间(秒)")
 
     # ---- 内部 Metrics 端点 ----
     metrics_bearer_token: SecretStr = SecretStr("")
@@ -62,6 +69,11 @@ class Settings(BaseSettings):
 
     # ---- MCP Server 端点 ----
     mcp_servers: list[str] = []  # 如 ["http://localhost:8081/sse"]
+    mcp_connect_timeout_seconds: float = Field(default=5.0, gt=0, description="MCP 连接超时(秒)")
+    mcp_list_tools_timeout_seconds: float = Field(default=5.0, gt=0, description="MCP 工具发现超时(秒)")
+    mcp_call_timeout_seconds: float = Field(default=10.0, gt=0, description="MCP 工具调用超时(秒)")
+    mcp_circuit_failure_threshold: int = Field(default=3, ge=1, description="MCP 熔断连续失败阈值")
+    mcp_circuit_open_seconds: float = Field(default=30.0, gt=0, description="MCP 熔断冷却时间(秒)")
 
     # ---- PLAN and EXECUTE 参数 ----
     max_iterations: int = Field(default=3, ge=1, le=20, description="judge失败重试的最大次数")
@@ -70,6 +82,15 @@ class Settings(BaseSettings):
     # ---- Redis ----
     redis_url: str = "redis://localhost:6379/0"
     session_ttl: int = Field(default=86400, ge=3600, le=2592000, description="会话过期时间(秒)，默认24小时")
+
+    # ---- Rate limit ----
+    rate_limit_login_per_minute: int = Field(default=5, ge=1, description="登录接口每 IP 每分钟最大请求数")
+    rate_limit_chat_per_minute: int = Field(default=20, ge=1, description="普通聊天每用户/IP 每分钟最大请求数")
+    rate_limit_chat_stream_per_minute: int = Field(
+        default=10,
+        ge=1,
+        description="流式聊天每用户/IP 每分钟最大请求数",
+    )
 
     class Config:
         # 从项目根目录的 .env 文件读取（环境变量优先级更高）

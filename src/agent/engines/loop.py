@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import time
@@ -7,7 +8,7 @@ from typing import Any
 from agent.llm.llm_client import LLMClient, ToolCall
 from agent.tools_registry import ToolContext, ToolRegistry
 from config import settings
-from exceptions import AgentLoopError
+from exceptions import AgentLoopError, DependencyUnavailableError, LLMError
 
 logger = logging.getLogger(__name__)
 
@@ -332,12 +333,25 @@ class AgentLoop:
                 "total_steps": self.max_steps,
             }
 
+        except asyncio.CancelledError:
+            raise
+        except (DependencyUnavailableError, LLMError):
+            logger.warning("run_stream dependency unavailable")
+            yield {
+                "event": "error",
+                "code": "DEPENDENCY_UNAVAILABLE",
+                "message": "智能服务暂时不可用，请稍后重试",
+            }
         except AgentLoopError as e:
             logger.error("run_stream error: %s", str(e))
             yield {"event": "error", "message": str(e)}
-        except Exception as e:
-            logger.error("run_stream error: %s", str(e))
-            yield {"event": "error", "message": "服务暂时不可用"}
+        except Exception:
+            logger.exception("run_stream unexpected error")
+            yield {
+                "event": "error",
+                "code": "DEPENDENCY_UNAVAILABLE",
+                "message": "智能服务暂时不可用，请稍后重试",
+            }
 
     def _assistant_message(self, tool_calls: list[ToolCall]) -> dict[str, Any]:
         """构建带 tool_calls 的 assistant 消息"""

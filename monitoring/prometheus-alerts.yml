@@ -1,0 +1,125 @@
+groups:
+  - name: ecommerce-agent.s2-03
+    rules:
+      - alert: Http5xxRateHigh
+        expr: |
+          (
+            sum(rate(http_requests_total{status_code=~"5.."}[5m]))
+            /
+            clamp_min(sum(rate(http_requests_total[5m])), 0.001)
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: HTTP 5xx 比例持续过高
+          description: HTTP 5xx 比例在 5 分钟窗口内持续超过 5%。
+
+      - alert: NonAIHttpP95LatencyHigh
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (
+              rate(
+                http_request_duration_seconds_bucket{
+                  route!~"/api/v1/chat(/stream)?|/internal/metrics"
+                }[5m]
+              )
+            )
+          ) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 非 AI 接口 P95 延迟过高
+          description: 非聊天接口 P95 延迟持续超过 500ms。
+
+      - alert: LLMCircuitOpen
+        expr: increase(llm_circuit_open_total{dependency="llm"}[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: LLM 熔断器打开或拒绝请求
+          description: 最近 5 分钟内 LLM 熔断器发生打开或拒绝事件。
+
+      - alert: LLMTimeoutsSustained
+        expr: increase(llm_timeout_total{dependency="llm"}[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: LLM 持续超时
+          description: LLM 在连续 5 分钟窗口内持续出现超时。
+
+      - alert: LLMRetriesHigh
+        expr: sum(increase(llm_retry_total{dependency="llm"}[5m])) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: LLM 重试次数持续过高
+          description: LLM 最近 5 分钟重试次数超过 5 次，并持续 5 分钟。
+
+      - alert: LLMDegraded
+        expr: increase(llm_degraded_total{dependency="llm"}[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: LLM 请求发生降级
+          description: 最近 5 分钟出现 LLM 依赖故障降级。
+
+      - alert: RedisRateLimitDependencyFailure
+        expr: increase(rate_limit_dependency_failures_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Redis 限流依赖失败
+          description: Redis 限流操作在最近 5 分钟内发生失败；认证链路仍应保持 fail-closed。
+
+      - alert: MCPStartupFailure
+        expr: increase(mcp_degraded_total{dependency="mcp",operation="connect"}[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 可选 MCP Server 不可用
+          description: MCP 连接或工具发现失败，主应用仍可继续提供核心 HTTP 能力。
+
+      - alert: MCPCircuitOpen
+        expr: increase(mcp_circuit_open_total{dependency="mcp"}[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: MCP 熔断器打开
+          description: 可选 MCP Server 最近发生熔断拒绝。
+
+      - alert: MCPCallTimeouts
+        expr: increase(mcp_timeout_total{dependency="mcp",operation="call_tool"}[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: MCP 工具调用持续超时
+          description: 最近 5 分钟出现 MCP 工具调用超时。
+
+      - alert: MCPCallFailures
+        expr: increase(mcp_call_failure_total{dependency="mcp",operation="call_tool"}[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: MCP 工具调用持续失败
+          description: 最近 5 分钟出现 MCP 工具调用失败。
+
+      - alert: MCPToolDegraded
+        expr: increase(mcp_degraded_total{dependency="mcp",operation="call_tool"}[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: MCP 工具调用发生降级
+          description: 最近 5 分钟出现 MCP 工具受控降级结果。

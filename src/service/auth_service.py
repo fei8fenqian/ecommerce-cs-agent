@@ -1,8 +1,9 @@
 import logging
 
 import jwt
+from redis.exceptions import RedisError
 
-from exceptions import AuthenticationError
+from exceptions import AuthenticationError, DependencyUnavailableError
 from infra.redis_client import get_redis
 from store.user_store import get_user_by_id, get_user_by_username
 from utils.jwt_utils import generate_jwt, parse_jwt
@@ -11,6 +12,14 @@ from utils.password_utils import verify_hashed_password
 logger = logging.getLogger(__name__)
 
 _KEY_PREFIX = "login:user"
+
+
+def _is_redis_failure(exc: Exception) -> bool:
+    return isinstance(exc, (RedisError, ConnectionError, TimeoutError, OSError, RuntimeError))
+
+
+def _redis_dependency_error() -> DependencyUnavailableError:
+    return DependencyUnavailableError("认证依赖 Redis 暂时不可用")
 
 
 def _key(user_id: int) -> str:
@@ -45,8 +54,13 @@ async def login(username: str, password: str) -> tuple[str, dict]:
     else:
         user_type = "external"
     token = generate_jwt(user_id, role, user_type)
-    redis = get_redis()
-    await redis.set(_key(user_id), token, ex=3600)  # 1h
+    try:
+        redis = get_redis()
+        await redis.set(_key(user_id), token, ex=3600)  # 1h
+    except Exception as exc:
+        if _is_redis_failure(exc):
+            raise _redis_dependency_error() from exc
+        raise
 
     user_info.pop("password_hash", None)
     logger.info("login success: user_id=%s username=%s", user_id, username)
@@ -68,8 +82,13 @@ async def logout(token: str) -> None:
     if not user_id:
         raise AuthenticationError("token 无效，缺少用户标识")
 
-    redis = get_redis()
-    await redis.delete(_key(int(user_id)))
+    try:
+        redis = get_redis()
+        await redis.delete(_key(int(user_id)))
+    except Exception as exc:
+        if _is_redis_failure(exc):
+            raise _redis_dependency_error() from exc
+        raise
     logger.info("logout success: user_id=%s", user_id)
 
 
@@ -90,8 +109,13 @@ async def verify_token(token: str) -> tuple[dict, str]:
     if not user_id:
         raise AuthenticationError("token 无效，缺少用户标识")
 
-    redis = get_redis()
-    saved_token = await redis.get(_key(int(user_id)))
+    try:
+        redis = get_redis()
+        saved_token = await redis.get(_key(int(user_id)))
+    except Exception as exc:
+        if _is_redis_failure(exc):
+            raise _redis_dependency_error() from exc
+        raise
     if saved_token is None:
         raise AuthenticationError("登录已过期，请重新登录")
     saved_token_value = saved_token.decode() if isinstance(saved_token, bytes) else saved_token

@@ -13,6 +13,7 @@ HTTP_EXCEPTION_MAP = {
     403: "FORBIDDEN",
     404: "RESOURCE_NOT_AVAILABLE",
     409: "INVALID_STATE",
+    429: "RATE_LIMITED",
     500: "INTERNAL_ERROR",
     503: "DEPENDENCY_UNAVAILABLE",
 }
@@ -43,6 +44,7 @@ APP_EXCEPTION_STATUS_MAP = {
     "RETRIEVAL_ERROR": 503,
     "LLM_ERROR": 503,
     "TOOL_ERROR": 503,
+    "DEPENDENCY_UNAVAILABLE": 503,
     "AGENT_LOOP_ERROR": 500,
     "INTERNAL_ERROR": 500,
 }
@@ -52,6 +54,7 @@ APP_EXCEPTION_MESSAGE_MAP = {
     "RETRIEVAL_ERROR": "检索服务暂时不可用",
     "LLM_ERROR": "智能服务暂时不可用",
     "TOOL_ERROR": "相关服务暂时不可用",
+    "DEPENDENCY_UNAVAILABLE": "依赖服务暂时不可用，请稍后重试",
     "AGENT_LOOP_ERROR": "服务器内部错误，请稍后重试",
     "INTERNAL_ERROR": "服务器内部错误，请稍后重试",
 }
@@ -101,6 +104,9 @@ async def handle_http_exceptions(request: Request, exc: HTTPException) -> JSONRe
     elif exc.status_code == 503:
         code = "DEPENDENCY_UNAVAILABLE"
         message = DEPENDENCY_UNAVAILABLE_MESSAGE
+    elif exc.status_code == 429:
+        code = "RATE_LIMITED"
+        message = "请求过于频繁，请稍后重试"
     elif isinstance(exc.detail, str) and exc.detail:
         message = exc.detail
     else:
