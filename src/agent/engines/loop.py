@@ -343,10 +343,10 @@ class AgentLoop:
                 "message": "智能服务暂时不可用，请稍后重试",
             }
         except AgentLoopError as e:
-            logger.error("run_stream error: %s", str(e))
+            logger.error("run_stream error")
             yield {"event": "error", "message": str(e)}
         except Exception:
-            logger.exception("run_stream unexpected error")
+            logger.error("run_stream unexpected error")
             yield {
                 "event": "error",
                 "code": "DEPENDENCY_UNAVAILABLE",

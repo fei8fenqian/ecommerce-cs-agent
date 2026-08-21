@@ -75,8 +75,6 @@ class TrackOrder(BaseTool):
 
             return ToolResult(name=self.name, status="success", data=data)
 
-        except Exception as e:
-            label = "order_id" if order_id else "phone"
-            value = order_id if order_id else phone
-            logger.error("track_order 查询失败: %s=%s error=%s", label, value, str(e))
-            return ToolResult(name=self.name, status="error", error=f"订单查询失败: {str(e)}")
+        except Exception:
+            logger.error("track_order 查询失败")
+            return ToolResult(name=self.name, status="error", error="订单查询失败")

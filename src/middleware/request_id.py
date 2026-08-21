@@ -71,7 +71,11 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         t_start = time.perf_counter()
         incoming_request_id = request.headers.get("X-Request-ID")
-        request_id = incoming_request_id if _is_valid_request_id(incoming_request_id) else _new_request_id()
+        if _is_valid_request_id(incoming_request_id):
+            assert incoming_request_id is not None
+            request_id = incoming_request_id
+        else:
+            request_id = _new_request_id()
 
         incoming_trace = parse_traceparent(request.headers.get("traceparent"))
         trace_id = incoming_trace.trace_id if incoming_trace else _new_trace_id()

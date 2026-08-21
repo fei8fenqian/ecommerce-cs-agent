@@ -96,7 +96,7 @@ def detect_sentiment(
     # ---- 1. 投诉词 — 命中即 escalate ----
     hit = _find_hits(query, COMPLAINT_KEYWORDS)
     if hit:
-        logger.info("投诉关键词触发: %s", hit)
+        logger.info("投诉关键词触发")
         return SentimentResult(
             is_negative=True,
             should_escalate=True,
@@ -107,7 +107,7 @@ def detect_sentiment(
     # ---- 2. 愤怒词 ----
     hit_anger = _find_hits(query, ANGER_KEYWORDS)
     if hit_anger:
-        logger.info("愤怒关键词触发: %s", hit_anger)
+        logger.info("愤怒关键词触发")
 
     # ---- 3. 否定词 — 本轮 ----
     hit_neg_now = _find_hits(query, NEGATION_KEYWORDS)

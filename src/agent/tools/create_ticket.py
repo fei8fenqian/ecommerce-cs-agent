@@ -101,6 +101,6 @@ class CreateTicket(BaseTool):
                 },
             )
 
-        except Exception as e:
-            logger.error("工单创建失败: %s", str(e))
-            return ToolResult(name=self.name, status="error", error=f"工单创建失败: {str(e)}")
+        except Exception:
+            logger.error("工单创建失败")
+            return ToolResult(name=self.name, status="error", error="工单创建失败")

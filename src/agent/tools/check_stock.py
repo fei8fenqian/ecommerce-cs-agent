@@ -74,14 +74,9 @@ class CheckStock(BaseTool):
                 data={"count": len(results), "results": results},
             )
 
-        except Exception as e:
-            logger.error(
-                "check_stock 查询失败: name=%s table=%s error=%s",
-                product_name,
-                table,
-                str(e),
-            )
-            return ToolResult(name=self.name, status="error", error=f"库存查询失败: {str(e)}")
+        except Exception:
+            logger.error("check_stock 查询失败")
+            return ToolResult(name=self.name, status="error", error="库存查询失败")
 
         finally:
             if "conn" in locals():

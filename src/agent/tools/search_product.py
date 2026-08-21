@@ -67,11 +67,6 @@ class SearchProduct(BaseTool):
                 status="success",
                 data={"count": len(candidates), "results": results},
             )
-        except Exception as e:
-            logger.error(
-                "search_product 检索失败: query=%s table=%s error=%s",
-                query,
-                table,
-                str(e),
-            )
-            return ToolResult(name=self.name, status="error", error=f"检索失败: {str(e)}")
+        except Exception:
+            logger.error("search_product 检索失败")
+            return ToolResult(name=self.name, status="error", error="检索失败")

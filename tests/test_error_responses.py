@@ -13,6 +13,7 @@ from api.errors import (
     handle_unexpected_exception,
     handle_validation_error,
 )
+from api.health import health as health_endpoint
 from exceptions import AuthenticationError, BaseAppException
 from infra.casbin_enforcer import init_casbin
 from middleware.auth import AuthMiddleware
@@ -32,8 +33,8 @@ def make_app() -> FastAPI:
     app.add_middleware(AuthMiddleware)
 
     @app.get("/health")
-    async def health():
-        return {"status": "ok"}
+    async def health_route():
+        return await health_endpoint()
 
     @app.get("/api/v1/raises-404")
     async def raises_404():
@@ -233,6 +234,39 @@ async def test_http_503_does_not_expose_detail():
     assert response.json()["error"]["code"] == "DEPENDENCY_UNAVAILABLE"
     assert response.json()["error"]["message"] == "服务暂时不可用，请稍后重试"
     assert "dependency-secret" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_health_redis_failure_uses_unified_dependency_error():
+    app = make_app()
+    with (
+        patch("api.health.health_check", new=AsyncMock(return_value=False)),
+        patch("api.health.check_alive", new=AsyncMock(return_value=True)),
+    ):
+        response = await request(app, "GET", "/health")
+
+    body = response.json()
+    assert response.status_code == 503
+    assert body["error"]["code"] == "DEPENDENCY_UNAVAILABLE"
+    assert body["error"]["message"] == "依赖服务暂时不可用，请稍后重试"
+    assert body["error"]["details"] == {}
+    assert set(body["error"]) == {"code", "message", "details", "request_id"}
+
+
+@pytest.mark.asyncio
+async def test_health_postgres_failure_uses_unified_dependency_error():
+    app = make_app()
+    with (
+        patch("api.health.health_check", new=AsyncMock(return_value=True)),
+        patch("api.health.check_alive", new=AsyncMock(return_value=False)),
+    ):
+        response = await request(app, "GET", "/health")
+
+    body = response.json()
+    assert response.status_code == 503
+    assert body["error"]["code"] == "DEPENDENCY_UNAVAILABLE"
+    assert body["error"]["details"] == {}
+    assert "postgres" not in response.text
 
 
 @pytest.mark.asyncio

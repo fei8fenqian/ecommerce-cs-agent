@@ -1,6 +1,7 @@
 """tests/test_tools_track_order.py — 订单追踪工具测试"""
 
 import uuid
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
@@ -156,6 +157,25 @@ class TestTrackOrderExecute:
 # execute — 异常路径
 # =============================================================================
 class TestTrackOrderErrors:
+    @pytest.mark.asyncio
+    async def test_failure_log_does_not_include_order_id(self, caplog):
+        order_id = "ORDER-SECRET-12345"
+        tool = TrackOrder()
+
+        with patch(
+            "agent.tools.track_order.find_orders",
+            new=AsyncMock(side_effect=RuntimeError(f"database failed for order_id={order_id}")),
+        ):
+            with caplog.at_level("ERROR", logger="agent.tools.track_order"):
+                result = await tool.execute(
+                    order_id=order_id,
+                    tool_context=ToolContext(user_id=101, role="customer"),
+                )
+
+        assert result.is_success is False
+        assert order_id not in caplog.text
+        assert order_id not in result.error
+
     @pytest.mark.asyncio
     async def test_missing_context_returns_error(self, _pool):
         result = await TrackOrder().execute(order_id=_pool["order_a"])

@@ -97,7 +97,7 @@ class Settings(BaseSettings):
         env_file = str(Path(__file__).parent.parent / ".env")
         env_file_encoding = "utf-8"
 
-    def validate(self) -> None:
+    def validate_required_config(self) -> None:
         """启动时校验。缺必填配置直接退出，不带错误运行。"""
         missing = []
         if not self.pg_password.get_secret_value():

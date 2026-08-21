@@ -39,12 +39,12 @@ async def login(username: str, password: str) -> tuple[str, dict]:
 
     # 不区分"用户不存在"和"密码错误"——防止攻击者通过错误信息枚举用户
     if not user_info:
-        logger.warning("login failed: user not found username=%s", username)
+        logger.warning("login failed: credentials rejected")
         raise AuthenticationError("账号或密码错误")
 
     hashed_password = user_info.get("password_hash", "")
     if not verify_hashed_password(password, hashed_password):
-        logger.warning("login failed: password mismatch username=%s", username)
+        logger.warning("login failed: credentials rejected")
         raise AuthenticationError("账号或密码错误")
 
     user_id = user_info["id"]
@@ -63,7 +63,7 @@ async def login(username: str, password: str) -> tuple[str, dict]:
         raise
 
     user_info.pop("password_hash", None)
-    logger.info("login success: user_id=%s username=%s", user_id, username)
+    logger.info("login success")
     return token, user_info
 
 
@@ -89,7 +89,7 @@ async def logout(token: str) -> None:
         if _is_redis_failure(exc):
             raise _redis_dependency_error() from exc
         raise
-    logger.info("logout success: user_id=%s", user_id)
+    logger.info("logout success")
 
 
 async def verify_token(token: str) -> tuple[dict, str]:

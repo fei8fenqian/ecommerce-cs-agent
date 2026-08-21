@@ -55,7 +55,7 @@ async def create_ticket(
             """,
             (ticket_id, customer_user_id, customer_name, phone, issue, urgency),
         )
-        logger.info("工单创建: %s urgency=%s", ticket_id, urgency)
+        logger.info("工单创建成功: urgency=%s", urgency)
     finally:
         await put_connection(conn)
 

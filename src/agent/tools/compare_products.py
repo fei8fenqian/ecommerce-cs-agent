@@ -80,12 +80,6 @@ class CompareProducts(BaseTool):
                     },
                 },
             )
-        except Exception as e:
-            logger.error(
-                "compare_products 失败: a=%s b=%s table=%s error=%s",
-                product_a,
-                product_b,
-                table,
-                str(e),
-            )
-            return ToolResult(name=self.name, status="error", error=f"商品对比失败: {str(e)}")
+        except Exception:
+            logger.error("compare_products 失败")
+            return ToolResult(name=self.name, status="error", error="商品对比失败")

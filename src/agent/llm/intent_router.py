@@ -123,9 +123,9 @@ class IntentRouter:
                     confidence=confidence,
                 )
 
-            except (json.JSONDecodeError, ValueError, KeyError) as e:
+            except (json.JSONDecodeError, ValueError, KeyError):
                 if attempt < 2:
                     continue
-                logger.warning("意图分类 3 次重试均失败: %s，降级为 RAG", str(e))
+                logger.warning("意图分类重试失败，降级为 RAG")
 
         return Intent(target="rag", table="knowledge_chunks", query=query, confidence=0.0)

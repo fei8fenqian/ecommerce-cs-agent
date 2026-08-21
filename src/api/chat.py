@@ -127,15 +127,14 @@ async def chat(chat_req: ChatRequest, request: Request):
         raise
     except LLMError as e:
         _chat_logger.error(
-            "LLM 调用失败: query=%s retry=%d status=%s reason=%s",
-            chat_req.query,
+            "LLM 调用失败: retry=%d status=%s reason=%s",
             e.retry_count,
             e.status_code,
             e.last_response,
         )
         raise DependencyUnavailableError("智能服务暂时不可用") from e
     except Exception:
-        _chat_logger.exception("chat 端点异常: query=%s", chat_req.query)
+        _chat_logger.error("chat 端点异常")
         raise
 
 
@@ -256,7 +255,7 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
         except (DependencyUnavailableError, LLMError):
             yield f"data: {json.dumps(_stream_error_event(request), ensure_ascii=False)}\n\n"
         except Exception:
-            _chat_logger.exception("chat stream generation failed")
+            _chat_logger.error("chat stream generation failed")
             yield f"data: {json.dumps(_stream_error_event(request), ensure_ascii=False)}\n\n"
 
     return StreamingResponse(content=generate(), media_type="text/event-stream")

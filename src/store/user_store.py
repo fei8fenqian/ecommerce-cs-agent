@@ -136,7 +136,7 @@ async def create_initial_admin(username: str, password: str) -> bool:
         )
         row = await cursor.fetchone()
         if row is not None:
-            logger.info("首个管理员创建成功: username=%s", username)
+            logger.info("首个管理员创建成功")
             return True
 
         cursor = await conn.execute(
@@ -148,7 +148,7 @@ async def create_initial_admin(username: str, password: str) -> bool:
             raise RuntimeError("管理员初始化失败：用户状态未知")
         if existing[0] != "admin":
             raise ValueError(f"用户名 {username!r} 已被非管理员账号占用")
-        logger.info("管理员已存在，保持原密码不变: username=%s", username)
+        logger.info("管理员已存在，保持原密码不变")
         return False
     finally:
         if conn is not None:

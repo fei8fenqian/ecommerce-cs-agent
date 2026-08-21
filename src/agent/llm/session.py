@@ -175,7 +175,7 @@ class SessionManager:
         """
         if session_id is None:
             record = await create_session(owner_user_id)
-            logger.info("Session created: %s", record["id"])
+            logger.info("Session created")
             return self._record_to_context(record, [])
 
         return await self._load_context(session_id, owner_user_id)

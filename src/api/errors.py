@@ -91,7 +91,7 @@ async def handle_http_exceptions(request: Request, exc: HTTPException) -> JSONRe
             message = TOKEN_INVALID_MESSAGE
     elif exc.status_code == 422:
         business_code = exc.detail.get("code") if isinstance(exc.detail, dict) else None
-        if business_code in BUSINESS_422_MESSAGE_MAP:
+        if business_code is not None and business_code in BUSINESS_422_MESSAGE_MAP:
             code = business_code
             message = BUSINESS_422_MESSAGE_MAP[business_code]
         else:

@@ -3,7 +3,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 import httpx
 from openai import APIConnectionError, APITimeoutError, AsyncOpenAI
@@ -177,7 +177,7 @@ class LLMClient:
         for attempt in range(self.max_attempts):
             try:
                 response = await asyncio.wait_for(
-                    self._client.chat.completions.create(
+                    cast(Any, self._client.chat.completions.create)(
                         messages=messages,
                         model=self.model,
                         tools=tools,
@@ -333,7 +333,7 @@ class LLMClient:
             try:
                 # 这个 timeout 覆盖建连和整个流的读取过程。
                 async with asyncio.timeout(self.stream_timeout):
-                    response = await self._client.chat.completions.create(
+                    response = await cast(Any, self._client.chat.completions.create)(
                         messages=messages,
                         model=self.model,
                         tools=tools,
