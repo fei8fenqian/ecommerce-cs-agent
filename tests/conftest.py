@@ -11,7 +11,7 @@ import pytest_asyncio
 
 from config import settings
 
-EXPECTED_SCHEMA_REVISION = "6aa6adbb7084"
+EXPECTED_SCHEMA_REVISION = "a7d1e8f4c902"
 REQUIRED_TABLES = {
     "component_products",
     "knowledge_chunks",
@@ -21,6 +21,10 @@ REQUIRED_TABLES = {
     "order_items",
     "tickets",
     "users",
+    "after_sale_requests",
+    "refunds",
+    "audit_events",
+    "outbox_events",
 }
 
 
