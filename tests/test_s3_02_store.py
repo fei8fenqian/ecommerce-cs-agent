@@ -202,6 +202,18 @@ async def test_after_sale_claim_is_atomic_and_has_version_guard():
 
 
 @pytest.mark.asyncio
+async def test_after_sale_active_order_binds_order_id_as_string():
+    connection = FakeConnection()
+    repository = PsycopgAfterSaleRepository(connection)
+
+    assert await repository.find_active_by_order(LegacyOrderId("ORD-S3-TEST-2")) is None
+
+    _query, params = connection.calls[0]
+    assert params[0] == "ORD-S3-TEST-2"
+    assert type(params[0]) is str
+
+
+@pytest.mark.asyncio
 async def test_refund_repository_locks_by_after_sale_and_checks_callback_facts():
     connection = FakeConnection(None, None)
     repository = PsycopgRefundRepository(connection)

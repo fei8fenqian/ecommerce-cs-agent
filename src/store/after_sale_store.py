@@ -229,7 +229,7 @@ class PsycopgAfterSaleRepository:
                 WHERE order_id = %s AND status IN ({placeholders})
                 ORDER BY created_at DESC
                 LIMIT 1""",
-            (order_id, *_ACTIVE_STATUSES),
+            (str(order_id), *_ACTIVE_STATUSES),
         )
 
     async def insert_submitted(self, record: NewAfterSaleRecord) -> AfterSaleRecord:
