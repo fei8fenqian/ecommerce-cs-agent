@@ -135,6 +135,14 @@ class ResourceType(StrEnum):
     COMMAND = "COMMAND"
 
 
+class ConflictKind(StrEnum):
+    """审计中允许记录的冲突类别。"""
+
+    VERSION = "VERSION"
+    IDEMPOTENCY = "IDEMPOTENCY"
+    UNIQUE_CONSTRAINT = "UNIQUE_CONSTRAINT"
+
+
 class DomainErrorCode(StrEnum):
     VERSION_CONFLICT = "VERSION_CONFLICT"
     IDEMPOTENCY_CONFLICT = "IDEMPOTENCY_CONFLICT"
@@ -199,11 +207,23 @@ class _ValidatedValue:
     def __str__(self) -> str:
         return self.value
 
+    def __eq__(self, other: object) -> bool:
+        return type(self) is type(other) and self.value == other.value  # type: ignore[attr-defined]
+
+    def __hash__(self) -> int:
+        return hash((type(self), self.value))
+
 
 class _CodeValue(_ValidatedValue):
     __slots__ = ()
     max_length = 64
     pattern = re.compile(r"[A-Za-z0-9_.-]+")
+
+
+class AuditAction(_CodeValue):
+    """审计动作标识，禁止使用任意包含空白或控制字符的文本。"""
+
+    __slots__ = ()
 
 
 class IdempotencyKey(_ValidatedValue):
@@ -261,6 +281,39 @@ class PaymentTransactionRef(_ValidatedValue):
     max_length = 128
 
 
+class ExternalEventId(_ValidatedValue):
+    __slots__ = ()
+    max_length = 128
+
+
+class MerchantRefundRequestNo(_ValidatedValue):
+    __slots__ = ()
+    max_length = 128
+
+
+class ExternalRefundId(_ValidatedValue):
+    __slots__ = ()
+    max_length = 128
+
+
+class NormalizedExternalStatus(_CodeValue):
+    """已经由 callback 适配器规范化的外部状态。"""
+
+    __slots__ = ()
+    max_length = 64
+
+
+class OutboxEventType(StrEnum):
+    REFUND_REQUEST_AUTHORIZED = "REFUND_REQUEST_AUTHORIZED"
+
+
+class OutboxStatus(StrEnum):
+    PENDING = "PENDING"
+    PROCESSING = "PROCESSING"
+    SUCCEEDED = "SUCCEEDED"
+    DEAD = "DEAD"
+
+
 class _Cents:
     """金额或非负整数的基础值对象，避免把负数或 bool 当成版本/金额。"""
 
@@ -290,6 +343,12 @@ class _Cents:
     def __repr__(self) -> str:
         return f"{type(self).__name__}({self.value})"
 
+    def __eq__(self, other: object) -> bool:
+        return type(self) is type(other) and self.value == other.value  # type: ignore[attr-defined]
+
+    def __hash__(self) -> int:
+        return hash((type(self), self.value))
+
 
 class NonNegativeCents(_Cents):
     __slots__ = ()
@@ -304,6 +363,13 @@ class PositiveCents(_Cents):
 class NonNegativeInt(_Cents):
     __slots__ = ()
     minimum = 0
+
+
+class PositiveInt(_Cents):
+    """必须大于零的受控整数，例如 Outbox 投递尝试次数。"""
+
+    __slots__ = ()
+    minimum = 1
 
 
 class EvidenceMediaType(StrEnum):

@@ -392,9 +392,10 @@ S3 首版只承诺应用层追加式审计：应用角色没有更新/删除入�
 `first_audit_event_id`、`outbox_event_id`、`retry_attempt`、`provider_reason_code`。键和值均由
 内部枚举/类型构造，禁止 API、Agent、worker 传入任意 dict。
 
-`outbox_events.payload` 必须由固定内部类型生成，且只允许 `refund_id`、
-`merchant_refund_request_no`、`payment_transaction_ref`、`amount_cents`、`currency`；不允许
-任意 JSON、PII、证据、聊天内容或支付签名。
+`outbox_events.payload` 必须由固定内部类型生成，至少包含 `outbox_event_id`、`refund_id`、
+`after_sale_request_id`、`merchant_refund_request_no`、`payment_transaction_ref`、
+`amount_cents`、`currency`、`attempt` 和 `created_at`；不允许任意 JSON、PII、证据、聊天内容
+或支付签名。
 
 ## 9. Outbox 编排边界
 
