@@ -9,6 +9,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from agent.engines.loop import LoopResult
+from agent.llm.resolve import resolve_stock_follow_up
 from agent.llm.sentiment import build_escalation_prompt, detect_sentiment
 from agent.rag.retrieve import hybrid_search
 from agent.tools_registry import ToolContext
@@ -96,6 +97,11 @@ async def chat(chat_req: ChatRequest, request: Request):
 
         # 判断指代词对应的实体
         resolved_query = await session.resolve(chat_req.query, ctx.session_id, user_id)
+        resolved_query = resolve_stock_follow_up(
+            resolved_query,
+            ctx.last_entities,
+            ctx.history,
+        )
 
         # 单次轻量调用同时完成上下文 query 重写和意图路由，不增加额外模型往返。
         intent = await intent_router.route(resolved_query, history=ctx.history)
@@ -184,6 +190,11 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
         history = session_ctx.history
         session_id = session_ctx.session_id
         resolve_query = await session.resolve(chat_req.query, session_id, user_id)
+        resolve_query = resolve_stock_follow_up(
+            resolve_query,
+            session_ctx.last_entities,
+            history,
+        )
         intent = await intent_router.route(resolve_query, history=history)
         effective_query = intent.query or resolve_query
         sentiment = detect_sentiment(effective_query, history=history)

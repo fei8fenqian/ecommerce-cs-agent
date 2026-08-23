@@ -7,7 +7,7 @@ import pytest_asyncio
 
 from agent.engines.loop import LoopResult, StepResult
 from agent.llm.llm_client import ToolCall
-from agent.llm.resolve import resolve_pronouns
+from agent.llm.resolve import resolve_pronouns, resolve_stock_follow_up
 from agent.llm.session import SessionContext, SessionManager
 from infra.db_pool import close_pool, get_connection, init_pool, put_connection
 
@@ -63,6 +63,22 @@ class TestResolvePronouns:
     def test_implicit_purchase_uses_recent_product(self):
         result = resolve_pronouns("下单", {"product": "惠普锐Pro"})
         assert result == "下单，商品为 惠普锐Pro"
+
+    def test_stock_confirmation_uses_last_recommended_product(self):
+        result = resolve_stock_follow_up(
+            "需要",
+            {"product": "惠普锐Pro"},
+            [{"role": "assistant", "content": "需要我查询这款的实时库存吗？"}],
+        )
+        assert result == "查询 惠普锐Pro 的实时库存"
+
+    def test_stock_confirmation_without_inventory_prompt_stays_unchanged(self):
+        result = resolve_stock_follow_up(
+            "需要",
+            {"product": "惠普锐Pro"},
+            [{"role": "assistant", "content": "还需要了解其他参数吗？"}],
+        )
+        assert result == "需要"
 
     def test_replace_ta_male(self):
         result = resolve_pronouns("他有什么颜色", {"product": "iPhone 15"})

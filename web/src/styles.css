@@ -39,8 +39,8 @@ html, body, #root { height: 100%; overflow: hidden; }
 
 /* 聊天主体保留内容层级，不再放抢眼的小头像。 */
 .chatgpt-history .bubble { display: block; width: 100%; gap: 0; }
-.chatgpt-history .bubble.user { display: block; width: min(82%, 680px); }
-.chatgpt-history .bubble.user .message-content { display: block; justify-self: auto; }
+.chatgpt-history .bubble.user { display: block; width: fit-content; max-width: min(82%, 680px); }
+.chatgpt-history .bubble.user .message-content { display: block; width: fit-content; max-width: 100%; justify-self: auto; }
 
 /* 客户侧栏只保留导航和会话；售后入口由 Agent 在对话中按需触发。 */
 .customer-chat-app { font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif; }

@@ -76,6 +76,9 @@ class IntentRouter:
         Returns:
             包含安全改写后 query 与路由目标的 Intent。
         """
+        if self._is_inventory_query(query):
+            return Intent(target="agent", query=query, confidence=1.0)
+
         messages: list[dict[str, Any]] = [{"role": "system", "content": self.system_prompt}]
         messages.append({"role": "user", "content": self._build_router_input(query, history)})
 
@@ -144,6 +147,12 @@ class IntentRouter:
                 logger.warning("意图分类重试失败，降级为 RAG")
 
         return Intent(target="rag", table="knowledge_chunks", query=query, confidence=0.0)
+
+    @staticmethod
+    def _is_inventory_query(query: str) -> bool:
+        """识别明确库存请求，避免再等待一次分类模型调用。"""
+        normalized = "".join(query.split()).lower()
+        return "库存" in normalized and any(marker in normalized for marker in ("查", "有", "现货", "多少"))
 
     @staticmethod
     def _safe_rewritten_query(candidate: object, original_query: str) -> str:

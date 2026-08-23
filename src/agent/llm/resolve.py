@@ -19,6 +19,7 @@ PRONOUN_MAP: dict[str, str] = {
 }
 
 _IMPLICIT_PRODUCT_ACTIONS = ("下单", "购买", "买下", "就买", "要这个")
+_STOCK_CONFIRMATIONS = frozenset({"需要", "要", "查一下", "查下", "查询一下", "好的，需要", "好的，查一下"})
 
 
 def resolve_pronouns(query: str, entities: dict[str, str]) -> str:
@@ -33,4 +34,34 @@ def resolve_pronouns(query: str, entities: dict[str, str]) -> str:
     product = entities.get("product", "")
     if product and product not in query and any(action in query for action in _IMPLICIT_PRODUCT_ACTIONS):
         query = f"{query}，商品为 {product}"
+    return query
+
+
+def resolve_stock_follow_up(
+    query: str,
+    entities: dict[str, str],
+    history: list[dict[str, object]],
+) -> str:
+    """将客服刚提出的“要查库存吗”承接为明确库存查询。
+
+    Args:
+        query: 当前用户输入。
+        entities: 会话中已确认的实体，例如最近推荐的商品。
+        history: 当前会话的可见历史，用于确认上一轮确实在询问库存。
+
+    Returns:
+        能确定上下文时返回完整库存查询；其他情况保持用户原话。
+    """
+    normalized = "".join(query.split()).lower()
+    product = entities.get("product", "").strip()
+    if normalized not in _STOCK_CONFIRMATIONS or not product:
+        return query
+
+    for message in reversed(history):
+        if message.get("role") != "assistant":
+            continue
+        content = message.get("content")
+        if isinstance(content, str) and "库存" in content and "查询" in content:
+            return f"查询 {product} 的实时库存"
+        break
     return query

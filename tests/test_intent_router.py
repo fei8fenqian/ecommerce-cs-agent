@@ -79,6 +79,14 @@ class TestRouteNormal:
         assert intent.table == ""  # agent 强制置空
 
     @pytest.mark.asyncio
+    async def test_inventory_query_bypasses_classifier_and_uses_agent(self):
+        router = _router("not valid JSON")
+        intent = await router.route("查询 惠普锐Pro 的实时库存")
+        assert intent.target == "agent"
+        assert intent.query == "查询 惠普锐Pro 的实时库存"
+        assert intent.confidence == 1.0
+
+    @pytest.mark.asyncio
     async def test_ticket_target(self):
         router = _router('{"target": "ticket", "table": "", "confidence": 0.88}')
         intent = await router.route("我要退款")
