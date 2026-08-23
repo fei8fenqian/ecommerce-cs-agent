@@ -33,9 +33,29 @@ const STORAGE_KEY = "ecommerce-agent.auth";
 function loadAuth(): AuthState | null {
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
-    return raw ? (JSON.parse(raw) as AuthState) : null;
+    const auth = raw ? (JSON.parse(raw) as AuthState) : null;
+    if (!auth?.token || !auth.user || isJwtExpired(auth.token)) {
+      window.localStorage.removeItem(STORAGE_KEY);
+      return null;
+    }
+    return auth;
   } catch {
+    window.localStorage.removeItem(STORAGE_KEY);
     return null;
+  }
+}
+
+/** 仅用于避免把已过期的本地缓存渲染成“已登录”，不把前端解析当成认证依据。 */
+function isJwtExpired(token: string): boolean {
+  try {
+    const encodedPayload = token.split(".")[1];
+    if (!encodedPayload) return true;
+    const base64 = encodedPayload.replace(/-/g, "+").replace(/_/g, "/");
+    const paddedBase64 = base64.padEnd(Math.ceil(base64.length / 4) * 4, "=");
+    const payload = JSON.parse(atob(paddedBase64)) as { exp?: unknown };
+    return typeof payload.exp !== "number" || payload.exp * 1000 <= Date.now();
+  } catch {
+    return true;
   }
 }
 
@@ -52,6 +72,15 @@ function formatDate(value: string | number): string {
 /** MVP 入口：按登录身份加载客户服务台或内部客服工作台。 */
 export function App() {
   const [auth, setAuth] = useState<AuthState | null>(loadAuth);
+
+  useEffect(() => {
+    const discardExpiredAuth = (): void => {
+      saveAuth(null);
+      setAuth(null);
+    };
+    window.addEventListener("ecommerce-agent.auth-invalid", discardExpiredAuth);
+    return () => window.removeEventListener("ecommerce-agent.auth-invalid", discardExpiredAuth);
+  }, []);
 
   const onSignedIn = (nextAuth: AuthState): void => {
     saveAuth(nextAuth);

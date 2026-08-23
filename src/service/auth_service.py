@@ -3,6 +3,7 @@ import logging
 import jwt
 from redis.exceptions import RedisError
 
+from config import settings
 from exceptions import AuthenticationError, DependencyUnavailableError
 from infra.redis_client import get_redis
 from store.user_store import create_customer, get_user_by_id, get_user_by_username
@@ -53,10 +54,17 @@ async def login(username: str, password: str) -> tuple[str, dict]:
         user_type = "internal"
     else:
         user_type = "external"
-    token = generate_jwt(user_id, role, user_type)
+    # 浏览器登录态与 Redis 中的服务端会话使用同一有效期。以前二者被硬编码为
+    # 1 小时，导致正常用户频繁看到“登录状态无效”。
+    token = generate_jwt(
+        user_id,
+        role,
+        user_type,
+        expires_in_seconds=settings.auth_session_ttl_seconds,
+    )
     try:
         redis = get_redis()
-        await redis.set(_key(user_id), token, ex=3600)  # 1h
+        await redis.set(_key(user_id), token, ex=settings.auth_session_ttl_seconds)
     except Exception as exc:
         if _is_redis_failure(exc):
             raise _redis_dependency_error() from exc

@@ -68,6 +68,13 @@ class TestJWTUtils:
             assert payload["role"] == role
             assert payload["user_type"] == utype
 
+    def test_token_honors_requested_lifetime(self):
+        from datetime import datetime, timezone
+
+        before = datetime.now(timezone.utc).timestamp()
+        payload = parse_jwt(generate_jwt(42, "customer", "external", expires_in_seconds=3600))
+        assert 3595 <= payload["exp"] - before <= 3605
+
     def test_expired_token_raises(self):
         """故意改 exp 为过去时间，验证 PyJWT 抛过期异常"""
         # JWT exp 最小粒度为秒，所以过期 1 秒就检验

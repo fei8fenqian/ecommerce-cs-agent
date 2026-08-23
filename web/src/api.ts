@@ -98,16 +98,36 @@ interface ErrorBody {
   detail?: string;
 }
 
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code?: string,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
+function notifyAuthenticationExpired(): void {
+  window.dispatchEvent(new Event("ecommerce-agent.auth-invalid"));
+}
+
 /** 将统一 API 错误转换为可直接显示给用户的短消息。 */
 async function api<T>(path: string, options: RequestInit = {}, token?: string): Promise<T> {
   const headers = new Headers(options.headers);
   if (options.body) headers.set("Content-Type", "application/json");
   if (token) headers.set("Authorization", `Bearer ${token}`);
 
-  const response = await fetch(path, { ...options, headers });
+  const response = await fetch(path, { ...options, credentials: "same-origin", headers });
   if (!response.ok) {
     const body = (await response.json().catch(() => ({}))) as ErrorBody;
-    throw new Error(body.error?.message ?? body.detail ?? "请求暂时无法完成");
+    if (token && response.status === 401) notifyAuthenticationExpired();
+    throw new ApiError(
+      body.error?.message ?? body.detail ?? "请求暂时无法完成",
+      response.status,
+      body.error?.code,
+    );
   }
   return response.json() as Promise<T>;
 }
@@ -146,12 +166,18 @@ export async function streamChat(
 ): Promise<void> {
   const response = await fetch("/api/v1/chat/stream", {
     method: "POST",
+    credentials: "same-origin",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}`, Accept: "text/event-stream" },
     body: JSON.stringify({ query, session_id: sessionId }),
   });
   if (!response.ok || !response.body) {
     const body = (await response.json().catch(() => ({}))) as ErrorBody;
-    throw new Error(body.error?.message ?? body.detail ?? "智能客服暂时不可用");
+    if (response.status === 401) notifyAuthenticationExpired();
+    throw new ApiError(
+      body.error?.message ?? body.detail ?? "智能客服暂时不可用",
+      response.status,
+      body.error?.code,
+    );
   }
 
   const reader = response.body.getReader();

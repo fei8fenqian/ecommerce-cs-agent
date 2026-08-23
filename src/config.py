@@ -90,6 +90,12 @@ class Settings(BaseSettings):
     # ---- Redis ----
     redis_url: str = "redis://localhost:6379/0"
     session_ttl: int = Field(default=86400, ge=3600, le=2592000, description="会话过期时间(秒)，默认24小时")
+    auth_session_ttl_seconds: int = Field(
+        default=2_592_000,
+        ge=3600,
+        le=7_776_000,
+        description="浏览器登录态有效期(秒)，默认 30 天",
+    )
 
     # ---- Rate limit ----
     rate_limit_login_per_minute: int = Field(default=5, ge=1, description="登录接口每 IP 每分钟最大请求数")

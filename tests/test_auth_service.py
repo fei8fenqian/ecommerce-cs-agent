@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 import jwt
 import pytest
 
+from config import settings
 from exceptions import AuthenticationError
 from service.auth_service import login, logout, verify_token
 from utils.jwt_utils import generate_jwt
@@ -42,7 +43,11 @@ class TestLogin:
         assert isinstance(token, str)
         assert info["username"] == "admin"
         assert "password_hash" not in info
-        mock_redis.set.assert_awaited_once()
+        mock_redis.set.assert_awaited_once_with(
+            "login:user:1",
+            token,
+            ex=settings.auth_session_ttl_seconds,
+        )
 
     @pytest.mark.asyncio
     async def test_login_user_not_found(self):
