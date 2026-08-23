@@ -37,6 +37,16 @@ export interface ChatResponse {
   total_tokens: number;
 }
 
+export interface ChatStreamEvent {
+  event: string;
+  session_id?: string;
+  content?: string;
+  answer?: string;
+  data?: { answer?: string };
+  code?: string;
+  message?: string;
+}
+
 export interface SessionItem {
   session_id: string;
   title: string;
@@ -119,6 +129,42 @@ export function sendChat(token: string, query: string, sessionId?: string): Prom
     method: "POST",
     body: JSON.stringify({ query, session_id: sessionId }),
   }, token);
+}
+
+/** 消费 FastAPI 的 SSE 聊天流；每条事件在到达浏览器时立即交给页面渲染。 */
+export async function streamChat(
+  token: string,
+  query: string,
+  sessionId: string | undefined,
+  onEvent: (event: ChatStreamEvent) => void,
+): Promise<void> {
+  const response = await fetch("/api/v1/chat/stream", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}`, Accept: "text/event-stream" },
+    body: JSON.stringify({ query, session_id: sessionId }),
+  });
+  if (!response.ok || !response.body) {
+    const body = (await response.json().catch(() => ({}))) as ErrorBody;
+    throw new Error(body.error?.message ?? body.detail ?? "智能客服暂时不可用");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let pending = "";
+  while (true) {
+    const chunk = await reader.read();
+    if (chunk.done) break;
+    pending += decoder.decode(chunk.value, { stream: true });
+    const messages = pending.split("\n\n");
+    pending = messages.pop() ?? "";
+    for (const message of messages) {
+      const data = message.split("\n").find((line) => line.startsWith("data: "))?.slice(6);
+      if (!data) continue;
+      const event = JSON.parse(data) as ChatStreamEvent;
+      onEvent(event);
+      if (event.event === "error") throw new Error(event.message ?? "智能客服暂时不可用");
+    }
+  }
 }
 
 export async function listProducts(token: string, category: "laptops" | "phones", query = ""): Promise<Product[]> {

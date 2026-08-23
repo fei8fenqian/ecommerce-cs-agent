@@ -18,10 +18,10 @@ import {
   requestReplyDraft,
   register,
   sendAgentTicketMessage,
-  sendChat,
   sendCustomerTicketMessage,
   signIn,
   signOut,
+  streamChat,
 } from "./api";
 
 const STORAGE_KEY = "ecommerce-agent.auth";
@@ -121,7 +121,7 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
   const [page, setPage] = useState<"service" | "catalog" | "orders">("service");
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [sessionId, setSessionId] = useState<string | undefined>();
-  const [chatMessages, setChatMessages] = useState<Array<{ role: "user" | "assistant"; content: string }>>([]);
+  const [chatMessages, setChatMessages] = useState<Array<{ id: string; role: "user" | "assistant"; content: string }>>([]);
   const [query, setQuery] = useState("");
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [selectedTicket, setSelectedTicket] = useState<Ticket | null>(null);
@@ -129,6 +129,7 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
   const [followUp, setFollowUp] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [streamStatus, setStreamStatus] = useState("");
 
   const refreshTickets = async (): Promise<void> => setTickets(await listTickets(auth.token));
   const openTicket = async (ticketId: string): Promise<void> => {
@@ -146,15 +147,31 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
     event.preventDefault();
     const text = query.trim();
     if (!text || busy) return;
-    setBusy(true); setError(""); setQuery("");
-    setChatMessages((items) => [...items, { role: "user", content: text }]);
+    setBusy(true); setError(""); setStreamStatus("正在连接智能客服…"); setQuery("");
+    const assistantId = `assistant-${Date.now()}`;
+    setChatMessages((items) => [...items, { id: `user-${Date.now()}`, role: "user", content: text }, { id: assistantId, role: "assistant", content: "" }]);
     try {
-      const response = await sendChat(auth.token, text, sessionId);
-      setSessionId(response.session_id);
-      setChatMessages((items) => [...items, { role: "assistant", content: response.answer }]);
+      await streamChat(auth.token, text, sessionId, (event) => {
+        if (event.event === "start") {
+          setSessionId(event.session_id); setStreamStatus("正在分析问题…"); return;
+        }
+        if (event.event === "tool_call") { setStreamStatus("正在查询业务数据…"); return; }
+        if (event.event === "token") {
+          setStreamStatus("正在生成回答…");
+          setChatMessages((items) => items.map((message) => message.id === assistantId ? { ...message, content: message.content + (event.content ?? "") } : message));
+          return;
+        }
+        if (event.event === "done") {
+          const completedAnswer = event.answer ?? event.data?.answer;
+          if (completedAnswer) setChatMessages((items) => items.map((message) => message.id === assistantId && !message.content ? { ...message, content: completedAnswer } : message));
+          setStreamStatus("");
+        }
+      });
       setSessions(await listSessions(auth.token));
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "智能客服暂时不可用"); }
-    finally { setBusy(false); }
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "智能客服暂时不可用");
+      setChatMessages((items) => items.filter((message) => message.id !== assistantId || message.content));
+    } finally { setBusy(false); setStreamStatus(""); }
   };
 
   const submitFollowUp = async (event: FormEvent): Promise<void> => {
@@ -173,8 +190,8 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
     {page === "catalog" ? <ProductCatalog auth={auth} onAsk={(product) => { setPage("service"); setQuery(`我想了解 ${product.product_name}，请介绍它的配置、适用场景和库存情况。`); }} /> : page === "orders" ? <OrderList auth={auth} /> : <>
     <div className="customer-grid">
       <section className="panel chat-panel"><div className="section-title"><h2>智能客服</h2><span>{sessionId ? "当前会话" : "新会话"}</span></div>
-        <div className="chat-history">{chatMessages.length === 0 ? <p className="empty">告诉我你想查询的商品、订单或售后问题。</p> : chatMessages.map((message, index) => <article className={`bubble ${message.role}`} key={index}>{message.content}</article>)}</div>
-        <form className="composer" onSubmit={submitChat}><textarea value={query} onChange={(event) => setQuery(event.target.value)} placeholder="例如：帮我查一下订单物流" maxLength={2000} /><button disabled={busy}>{busy ? "处理中…" : "发送"}</button></form>
+        <div className="chat-history">{chatMessages.length === 0 ? <p className="empty">告诉我你想查询的商品、订单或售后问题。</p> : chatMessages.map((message) => <article className={`bubble ${message.role}${!message.content ? " thinking" : ""}`} key={message.id}>{message.content || streamStatus || "正在思考…"}</article>)}</div>
+        <form className="composer" onSubmit={submitChat}><textarea value={query} onChange={(event) => setQuery(event.target.value)} placeholder="例如：帮我查一下订单物流" maxLength={2000} /><button disabled={busy}>{busy ? "生成中…" : "发送"}</button></form>
       </section>
       <aside className="side-stack"><section className="panel compact"><div className="section-title"><h2>历史会话</h2><span>{sessions.length}</span></div>{sessions.length ? sessions.slice(0, 6).map((session) => <button className="list-row" key={session.session_id} onClick={() => setSessionId(session.session_id)}><strong>{session.title || "未命名会话"}</strong><small>{session.message_count} 条消息</small></button>) : <p className="empty">暂时没有历史会话</p>}</section>
       <section className="panel compact"><div className="section-title"><h2>我的工单</h2><span>{tickets.length}</span></div>{tickets.length ? tickets.map((ticket) => <button className="list-row" key={ticket.ticket_id} onClick={() => void openTicket(ticket.ticket_id)}><strong>{ticket.ticket_id}</strong><small>{ticket.status} · {ticket.urgency}</small></button>) : <p className="empty">暂时没有工单</p>}</section></aside>
