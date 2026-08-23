@@ -62,6 +62,16 @@ class TestRouteNormal:
         assert intent.confidence == 0.95
 
     @pytest.mark.asyncio
+    async def test_contextual_rewrite_uses_same_routing_call(self):
+        router = _router('{"query": "购买 惠普锐Pro", "target": "agent", "table": "", "confidence": 0.95}')
+        intent = await router.route(
+            "下单",
+            history=[{"role": "assistant", "content": "推荐首选：惠普锐Pro"}],
+        )
+        assert intent.query == "购买 惠普锐Pro"
+        assert intent.target == "agent"
+
+    @pytest.mark.asyncio
     async def test_agent_target(self):
         router = _router('{"target": "agent", "table": "", "confidence": 0.92}')
         intent = await router.route("拯救者还有货吗")

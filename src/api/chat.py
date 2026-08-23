@@ -97,17 +97,16 @@ async def chat(chat_req: ChatRequest, request: Request):
         # 判断指代词对应的实体
         resolved_query = await session.resolve(chat_req.query, ctx.session_id, user_id)
 
-        # 用户情感判断
-        sentiment = detect_sentiment(resolved_query, history=ctx.history)
+        # 单次轻量调用同时完成上下文 query 重写和意图路由，不增加额外模型往返。
+        intent = await intent_router.route(resolved_query, history=ctx.history)
+        effective_query = intent.query or resolved_query
+        sentiment = detect_sentiment(effective_query, history=ctx.history)
         sentiment_ctx = build_escalation_prompt(sentiment)
-
-        # 意图路由
-        intent = await intent_router.route(resolved_query)
 
         if intent.target == "plan_execute":
             plan_agent = request.app.state.plan_execute_agent
             plan_state = await plan_agent.run(
-                resolved_query,
+                effective_query,
                 history=ctx.history,
                 scenario=intent.scenario,
                 tool_context=tool_context,
@@ -122,14 +121,14 @@ async def chat(chat_req: ChatRequest, request: Request):
             )
         elif intent.target == "rag":
             docs = await hybrid_search(
-                resolved_query,
+                effective_query,
                 table=intent.table,
-                use_rerank=_should_rerank(resolved_query, intent.table),
+                use_rerank=_should_rerank(effective_query, intent.table),
             )
             context = _build_context(docs)
             retrieved_entities = _entities_from_retrieval(intent.table, docs)
             loop_result = await agent.run(
-                resolved_query,
+                effective_query,
                 context=context,
                 history=ctx.history,
                 system_prompt_extra=sentiment_ctx,
@@ -138,7 +137,7 @@ async def chat(chat_req: ChatRequest, request: Request):
             loop_result.last_entities = {**retrieved_entities, **loop_result.last_entities}
         else:
             loop_result = await agent.run(
-                resolved_query,
+                effective_query,
                 history=ctx.history,
                 system_prompt_extra=sentiment_ctx,
                 tool_context=tool_context,
@@ -185,15 +184,16 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
         history = session_ctx.history
         session_id = session_ctx.session_id
         resolve_query = await session.resolve(chat_req.query, session_id, user_id)
-        sentiment = detect_sentiment(resolve_query, history=history)
+        intent = await intent_router.route(resolve_query, history=history)
+        effective_query = intent.query or resolve_query
+        sentiment = detect_sentiment(effective_query, history=history)
         extra_prompt = build_escalation_prompt(sentiment)
-        intent = await intent_router.route(resolve_query)
         context = ""
         if intent.target == "rag":
             docs = await hybrid_search(
-                resolve_query,
+                effective_query,
                 table=intent.table,
-                use_rerank=_should_rerank(resolve_query, intent.table),
+                use_rerank=_should_rerank(effective_query, intent.table),
             )
             context = _build_context(docs)
             last_entities = _entities_from_retrieval(intent.table, docs)
@@ -215,7 +215,7 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
             if intent.target == "plan_execute":
                 plan_agent = request.app.state.plan_execute_agent
                 async for chunk in plan_agent.run_stream(
-                    resolve_query,
+                    effective_query,
                     history=history,
                     scenario=intent.scenario,
                     tool_context=tool_context,
@@ -236,7 +236,7 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                     await session.add_turn(
                         session_id,
                         user_id,
-                        resolve_query,
+                        chat_req.query,
                         LoopResult(
                             answer=stream_res["answer"],
                             total_steps=stream_res["total_steps"],
@@ -248,7 +248,7 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
 
             # 消费 agent 的消息流，逐个处理事件
             async for event in agent.run_stream(
-                resolve_query,
+                effective_query,
                 context=context,
                 history=history,
                 system_prompt_extra=extra_prompt,
@@ -276,7 +276,7 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                 await session.add_turn(
                     session_id,
                     user_id,
-                    resolve_query,
+                    chat_req.query,
                     LoopResult(
                         answer=stream_res["answer"],
                         total_steps=stream_res["total_steps"],

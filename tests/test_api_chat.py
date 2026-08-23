@@ -39,7 +39,7 @@ with patch.object(tiktoken, "get_encoding", return_value=object()):
 class _MockIntentRouter:
     """总是返回 agent（走 AgentLoop，不调 hybrid_search）"""
 
-    async def route(self, query: str = "") -> Intent:
+    async def route(self, query: str = "", history=None) -> Intent:
         return Intent(
             target="agent",
             table="",
