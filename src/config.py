@@ -67,6 +67,12 @@ class Settings(BaseSettings):
     max_same_tools: int = Field(default=10, ge=0, le=100, description="最大连续调用同一工具次数")
     max_steps: int = Field(default=5, ge=1, le=100, description="llm最大调用轮数")
 
+    # ---- 工单 Agent ----
+    # 默认关闭，避免旧环境在未明确启用时自动处理历史工单。
+    ai_ticket_worker_enabled: bool = False
+    ai_ticket_worker_interval_seconds: float = Field(default=5.0, gt=0, le=300)
+    ai_ticket_claim_timeout_seconds: int = Field(default=120, ge=30, le=3600)
+
     # ---- MCP Server 端点 ----
     mcp_servers: list[str] = []  # 如 ["http://localhost:8081/sse"]
     mcp_connect_timeout_seconds: float = Field(default=5.0, gt=0, description="MCP 连接超时(秒)")

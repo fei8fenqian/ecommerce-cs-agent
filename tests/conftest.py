@@ -11,7 +11,8 @@ import pytest_asyncio
 
 from config import settings
 
-EXPECTED_SCHEMA_REVISION = "a7d1e8f4c902"
+# 默认测试库跟随当前可演示的客服 Agent 分支；Harness 仍是独立、未启用分支。
+EXPECTED_SCHEMA_REVISION = "f2a6b8c4d903"
 REQUIRED_TABLES = {
     "component_products",
     "knowledge_chunks",
@@ -20,6 +21,7 @@ REQUIRED_TABLES = {
     "orders",
     "order_items",
     "tickets",
+    "ticket_messages",
     "users",
     "after_sale_requests",
     "refunds",

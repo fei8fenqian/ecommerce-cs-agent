@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -11,6 +12,7 @@ from agent.llm.intent_router import IntentRouter
 from agent.llm.llm_client import LLMClient
 from agent.llm.session import SessionManager
 from agent.mcp_tool import MCPClientManager, MCPTool
+from agent.ticket_resolution import TicketResolutionAgent, TicketResolutionWorker
 from agent.tools import (
     check_stock,
     compare_products,
@@ -143,9 +145,29 @@ async def lifespan(app: FastAPI):
     app.state.session = session
     app.state.mcp_managers = mcp_managers
 
+    ticket_worker_task: asyncio.Task[None] | None = None
+    if settings.ai_ticket_worker_enabled:
+        ticket_resolution_agent = TicketResolutionAgent(
+            llm,
+            claim_timeout_seconds=settings.ai_ticket_claim_timeout_seconds,
+        )
+        ticket_worker = TicketResolutionWorker(
+            ticket_resolution_agent,
+            interval_seconds=settings.ai_ticket_worker_interval_seconds,
+        )
+        ticket_worker_task = asyncio.create_task(ticket_worker.run(), name="ai-ticket-worker")
+        app.state.ticket_resolution_worker = ticket_worker
+        _logger.info("AI ticket worker enabled")
+
     yield
 
     # shutdown
+    if ticket_worker_task is not None:
+        ticket_worker_task.cancel()
+        try:
+            await ticket_worker_task
+        except asyncio.CancelledError:
+            pass
     await close_pool()
     await close_redis()
     for manager in mcp_managers:

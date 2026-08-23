@@ -1,10 +1,15 @@
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from agent.rag.retrieve import hybrid_search
 from log_config import redact_text
+from store.ticket_message_store import (
+    create_agent_ticket_message,
+    list_agent_ticket_messages,
+    list_customer_ticket_messages,
+)
 from store.ticket_store import (
     claim_ticket,
     get_agent_ticket,
@@ -97,6 +102,32 @@ class SupportReplyDraftResponse(BaseModel):
     needs_human_follow_up: bool
 
 
+class TicketMessageItem(BaseModel):
+    """工单对话中的一条客户可见消息。"""
+
+    message_id: int
+    author_role: str
+    content: str
+    ai_assisted: bool = Field(description="客服提交时标记的 AI 辅助来源，不代表可验证的模型调用审计。")
+    created_at: str
+
+
+class TicketMessageListResponse(BaseModel):
+    """按时间顺序返回的工单消息记录。"""
+
+    messages: list[TicketMessageItem]
+
+
+class TicketMessageCreateRequest(BaseModel):
+    """客服提交给客户的工单回复。"""
+
+    content: str = Field(max_length=4000)
+    ai_assisted: bool = Field(
+        default=False,
+        description="客服自行标记是否采用 AI 草稿；MVP 不验证草稿来源。",
+    )
+
+
 ticket_router = APIRouter(prefix="/api/v1", tags=["工单"])
 
 
@@ -179,6 +210,43 @@ async def create_support_reply_draft(ticket_id: str, request: Request) -> Suppor
         knowledge_references=references,
         needs_human_follow_up="需要人工补充" in draft,
     )
+
+
+@ticket_router.get("/tickets/{ticket_id}/messages", response_model=TicketMessageListResponse)
+async def ticket_messages(ticket_id: str, request: Request) -> TicketMessageListResponse:
+    """返回当前客户自己的、或当前客服已认领工单的消息历史。"""
+    user = request.state.user
+    if user["role"] == "customer":
+        messages = await list_customer_ticket_messages(ticket_id, user["id"])
+    elif user["role"] == "agent":
+        messages = await list_agent_ticket_messages(ticket_id, user["id"])
+    else:
+        raise HTTPException(status_code=403, detail="当前帐号无权查询工单消息")
+
+    if messages is None:
+        raise HTTPException(status_code=404, detail="工单不存在")
+    return TicketMessageListResponse(messages=[TicketMessageItem(**message) for message in messages])
+
+
+@ticket_router.post("/tickets/{ticket_id}/messages", response_model=TicketMessageItem)
+async def send_ticket_message(
+    ticket_id: str,
+    request: Request,
+    message: TicketMessageCreateRequest,
+) -> TicketMessageItem:
+    """由已认领客服发送客户可见回复；不会修改工单状态。"""
+    user = request.state.user
+    if user["role"] != "agent":
+        raise HTTPException(status_code=403, detail="只有客服可以发送工单回复")
+
+    content = message.content.strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="回复内容不能为空")
+
+    created = await create_agent_ticket_message(ticket_id, user["id"], content, message.ai_assisted)
+    if created is None:
+        raise HTTPException(status_code=404, detail="工单不存在")
+    return TicketMessageItem(**created)
 
 
 @ticket_router.get(
