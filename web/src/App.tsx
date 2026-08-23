@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, KeyboardEvent, useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -206,21 +206,20 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
     }
   };
 
-  const submitChat = async (event: FormEvent): Promise<void> => {
-    event.preventDefault();
+  const submitChatMessage = async (): Promise<void> => {
     const text = query.trim();
     if (!text || busy) return;
-    setBusy(true); setError(""); setStreamStatus("正在分析需求并检索相关信息…"); setQuery("");
+    setBusy(true); setError(""); setStreamStatus("正在思考…"); setQuery("");
     const assistantId = `assistant-${Date.now()}`;
     setChatMessages((items) => [...items, { id: `user-${Date.now()}`, role: "user", content: text }, { id: assistantId, role: "assistant", content: "" }]);
     try {
       await streamChat(auth.token, text, sessionId, (event) => {
         if (event.event === "start") {
-          setSessionId(event.session_id); setStreamStatus("正在分析需求并准备回答…"); return;
+          setSessionId(event.session_id); setStreamStatus("正在思考…"); return;
         }
-        if (event.event === "tool_call") { setStreamStatus("正在查询业务数据…"); return; }
+        if (event.event === "tool_call") { setStreamStatus("正在思考…"); return; }
         if (event.event === "token") {
-          setStreamStatus("正在生成回答…");
+          setStreamStatus("正在思考…");
           setChatMessages((items) => items.map((message) => message.id === assistantId ? { ...message, content: message.content + (event.content ?? "") } : message));
           return;
         }
@@ -235,6 +234,22 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
       setError(reason instanceof Error ? reason.message : "智能客服暂时不可用");
       setChatMessages((items) => items.filter((message) => message.id !== assistantId || message.content));
     } finally { setBusy(false); setStreamStatus(""); }
+  };
+
+  const submitChat = (event: FormEvent): void => {
+    event.preventDefault();
+    void submitChatMessage();
+  };
+
+  const handleChatKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>): void => {
+    if (
+      event.key !== "Enter"
+      || event.shiftKey
+      || event.altKey
+      || event.nativeEvent.isComposing
+    ) return;
+    event.preventDefault();
+    void submitChatMessage();
   };
 
   const submitFollowUp = async (event: FormEvent): Promise<void> => {
@@ -278,8 +293,8 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
     <section className="chat-main">
       <header className="chat-main-header"><div><strong>{page === "service" ? "智能客服" : page === "catalog" ? "商品目录" : "我的订单"}</strong><span>{page === "service" ? (sessionId ? "当前会话" : "新对话") : "Geex Digital"}</span></div><span className="role-badge">客户服务台</span></header>
       {page === "catalog" ? <ProductCatalog auth={auth} onAsk={(product) => { setPage("service"); setQuery(`我想了解 ${product.product_name}，请介绍它的配置、适用场景和库存情况。`); }} /> : page === "orders" ? <OrderList auth={auth} /> : <section className="chat-canvas">
-        <div className="chat-history chatgpt-history">{chatMessages.length === 0 ? <div className="chat-welcome"><p className="eyebrow">GEEX DIGITAL · AI ASSISTANT</p><h1>今天想解决什么问题？</h1><p>我可以介绍商品、查询已归属订单，也能帮你发起售后工单。</p><div className="prompt-grid"><button className="prompt-card" onClick={() => setQuery("帮我推荐一台预算 5000 元左右的笔记本")}>推荐一台预算 5000 元的笔记本</button><button className="prompt-card" onClick={() => setQuery("帮我查询订单物流")}>查询我的订单物流</button><button className="prompt-card" onClick={() => setQuery("哪些手机目前有库存？")}>查询有库存的手机</button></div></div> : chatMessages.map((message) => <article className={`bubble ${message.role}${!message.content ? " thinking" : ""}`} key={message.id}><span className="message-avatar">{message.role === "user" ? auth.user.username.slice(0, 1).toUpperCase() : "G"}</span><div className="message-content">{message.content ? message.role === "assistant" ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown> : message.content : streamStatus || "正在思考…"}</div></article>)}</div>
-        <form className="composer chatgpt-composer" onSubmit={submitChat}><textarea value={query} onChange={(event) => setQuery(event.target.value)} placeholder="给 Geex AI 发送消息" maxLength={2000} rows={1} /><button aria-label="发送消息" disabled={busy || !query.trim()}>{busy ? "…" : "↑"}</button></form><p className="chat-disclaimer">AI 可能出错；订单和售后结果请以系统记录为准。</p>
+        <div className="chat-history chatgpt-history">{chatMessages.length === 0 ? <div className="chat-welcome"><p className="eyebrow">GEEX DIGITAL · AI ASSISTANT</p><h1>今天想解决什么问题？</h1><p>我可以介绍商品、查询已归属订单，也能帮你发起售后工单。</p><div className="prompt-grid"><button className="prompt-card" onClick={() => setQuery("帮我推荐一台预算 5000 元左右的笔记本")}>推荐一台预算 5000 元的笔记本</button><button className="prompt-card" onClick={() => setQuery("帮我查询订单物流")}>查询我的订单物流</button><button className="prompt-card" onClick={() => setQuery("哪些手机目前有库存？")}>查询有库存的手机</button></div></div> : chatMessages.map((message) => <article className={`bubble ${message.role}${!message.content ? " thinking" : ""}`} key={message.id}><div className="message-content">{message.content ? message.role === "assistant" ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown> : message.content : streamStatus || "正在思考…"}</div></article>)}</div>
+        <form className="composer chatgpt-composer" onSubmit={submitChat}><textarea value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={handleChatKeyDown} placeholder="给 Geex AI 发送消息" maxLength={2000} rows={1} /><button aria-label="发送消息" disabled={busy || !query.trim()}>{busy ? "…" : "↑"}</button></form><p className="chat-disclaimer">Enter 发送 · Shift / Alt + Enter 换行</p>
       </section>}
     </section>
     {selectedTicket && <TicketConversation title={`工单 ${selectedTicket.ticket_id}`} messages={ticketMessages} error={error} onClose={() => setSelectedTicket(null)} composer={{ value: followUp, placeholder: "继续补充问题，AI 会重新处理未认领工单", submitLabel: "补充问题", disabled: busy, onChange: setFollowUp, onSubmit: submitFollowUp }} />}

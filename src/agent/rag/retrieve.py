@@ -6,6 +6,9 @@
     # → [(id, content, score), ...]
 """
 
+import asyncio
+import logging
+
 from sentence_transformers import SentenceTransformer
 
 from agent.rag.bm25 import BM25Index
@@ -16,6 +19,7 @@ from infra.db_pool import get_connection, put_connection
 from infra.model_device import resolve_model_device
 
 _model: SentenceTransformer | None = None
+logger = logging.getLogger(__name__)
 
 
 def _get_model() -> SentenceTransformer:
@@ -57,6 +61,20 @@ async def _get_bm25(table: str) -> BM25Index:
         await put_connection(conn)
     _bm25_cache[table] = bm25
     return bm25
+
+
+async def warmup_customer_catalog_retrieval() -> None:
+    """在服务启动期加载客户商品咨询会使用的检索缓存。
+
+    不预热 reranker：普通商品咨询已经跳过精排，避免额外占用 GPU/内存。预热完成后，
+    首个“预算推荐”请求只需执行查询，不再承担 embedding 模型和 BM25 索引初始化。
+    """
+    await asyncio.to_thread(_get_model)
+    await asyncio.gather(
+        _get_bm25("laptop_products"),
+        _get_bm25("phone_products"),
+    )
+    logger.info("customer catalog retrieval warmed")
 
 
 async def vector_search(

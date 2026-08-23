@@ -12,6 +12,7 @@ from agent.llm.intent_router import IntentRouter
 from agent.llm.llm_client import LLMClient
 from agent.llm.session import SessionManager
 from agent.mcp_tool import MCPClientManager, MCPTool
+from agent.rag.retrieve import warmup_customer_catalog_retrieval
 from agent.ticket_resolution import TicketResolutionAgent, TicketResolutionWorker
 from agent.tools import (
     check_stock,
@@ -161,6 +162,12 @@ async def lifespan(app: FastAPI):
     app.state.agent = agent
     app.state.session = session
     app.state.mcp_managers = mcp_managers
+
+    # 把首次商品咨询的模型/索引冷启动移到服务启动期；失败只记录，不阻塞基础服务。
+    try:
+        await warmup_customer_catalog_retrieval()
+    except Exception:
+        _logger.warning("customer catalog retrieval warmup failed")
 
     ticket_worker_task: asyncio.Task[None] | None = None
     if settings.ai_ticket_worker_enabled:
