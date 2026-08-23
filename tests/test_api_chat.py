@@ -285,6 +285,33 @@ class TestChatEndpoint:
             )
         assert response.status_code == 404
 
+    @pytest.mark.asyncio
+    async def test_short_confirmation_gets_targeted_clarification(self, client):
+        """“需要”不能丢失上轮的库存/对比语境并退回通用菜单。"""
+        session = client.app.state.session
+        session._sessions["follow-up-session"] = SessionContext(
+            session_id="follow-up-session",
+            messages=[
+                {
+                    "role": "assistant",
+                    "content": "需要我帮你对比其他型号或查询库存吗？",
+                }
+            ],
+            last_entities={"product": "微星魔影15"},
+        )
+        transport = httpx.ASGITransport(app=client.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+            response = await http_client.post(
+                "/api/v1/chat",
+                json={"query": "需要", "session_id": "follow-up-session"},
+            )
+
+        assert response.status_code == 200
+        assert (
+            response.json()["answer"]
+            == "可以。你是希望我查询 “微星魔影15” 的实时库存，还是把它和其他游戏本做一次对比？"
+        )
+
     def test_empty_query_rejected(self, client):
         """空 query → 400 (pydantic 校验 min_length=1)"""
         resp = client.post("/api/v1/chat", json={"query": ""})
@@ -318,6 +345,34 @@ class TestChatEndpoint:
 # POST /chat/stream
 # =============================================================================
 class TestChatStreamEndpoint:
+    @pytest.mark.asyncio
+    async def test_stream_short_confirmation_keeps_targeted_context(self, client):
+        """短确认直接得到上轮相关澄清，不再调用 Agent 输出通用菜单。"""
+        session = client.app.state.session
+        session._sessions["stream-follow-up"] = SessionContext(
+            session_id="stream-follow-up",
+            messages=[
+                {
+                    "role": "assistant",
+                    "content": "需要我帮你对比其他型号或查询库存吗？",
+                }
+            ],
+            last_entities={"product": "微星魔影15"},
+        )
+        client.app.state.agent.run_stream = AsyncMock()
+
+        transport = httpx.ASGITransport(app=client.app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+            response = await http_client.post(
+                "/api/v1/chat/stream",
+                json={"query": "需要", "session_id": "stream-follow-up"},
+            )
+
+        assert response.status_code == 200
+        assert "微星魔影15” 的实时库存" in response.text
+        assert "其他游戏本做一次对比" in response.text
+        client.app.state.agent.run_stream.assert_not_awaited()
+
     @pytest.mark.asyncio
     async def test_stream_cancellation_does_not_continue_or_save(self, client):
         from starlette.requests import Request
