@@ -29,6 +29,36 @@ _ORDER_QUERY = """
 """
 
 
+def _to_orders(rows: list[tuple[Any, ...]]) -> list[dict[str, Any]]:
+    """将订单与订单项的连接查询结果组装为前端和工具共享的订单结构。"""
+    orders_by_id: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        current_order_id = row[0]
+        if current_order_id not in orders_by_id:
+            orders_by_id[current_order_id] = {
+                "order_id": current_order_id,
+                "status": row[1],
+                "tracking": {"company": row[2], "number": row[3]},
+                "total_amount": float(row[4]) if row[4] else 0.0,
+                "paid_amount": float(row[5]) if row[5] else 0.0,
+                "payment_method": row[6],
+                "order_date": str(row[7]),
+                "delivered_at": str(row[8]) if row[8] else None,
+                "items": [],
+            }
+
+        if row[9] is not None:
+            orders_by_id[current_order_id]["items"].append(
+                {
+                    "product_name": row[9],
+                    "brand": row[10],
+                    "price": float(row[11]) if row[11] else 0.0,
+                    "quantity": row[12],
+                }
+            )
+    return list(orders_by_id.values())
+
+
 async def find_orders(
     customer_user_id: int,
     *,
@@ -54,33 +84,19 @@ async def find_orders(
         cursor = await conn.execute(_ORDER_QUERY.format(where_clause=where_clause), params)
         rows = await cursor.fetchall()
 
-        orders_by_id: dict[str, dict[str, Any]] = {}
-        for row in rows:
-            current_order_id = row[0]
-            if current_order_id not in orders_by_id:
-                orders_by_id[current_order_id] = {
-                    "order_id": current_order_id,
-                    "status": row[1],
-                    "tracking": {"company": row[2], "number": row[3]},
-                    "total_amount": float(row[4]) if row[4] else 0.0,
-                    "paid_amount": float(row[5]) if row[5] else 0.0,
-                    "payment_method": row[6],
-                    "order_date": str(row[7]),
-                    "delivered_at": str(row[8]) if row[8] else None,
-                    "items": [],
-                }
-
-            if row[9] is not None:
-                orders_by_id[current_order_id]["items"].append(
-                    {
-                        "product_name": row[9],
-                        "brand": row[10],
-                        "price": float(row[11]) if row[11] else 0.0,
-                        "quantity": row[12],
-                    }
-                )
-
-        return list(orders_by_id.values())
+        return _to_orders(rows)
     finally:
         if conn is not None:
             await put_connection(conn)
+
+
+async def list_customer_orders(customer_user_id: int, limit: int = 30) -> list[dict[str, Any]]:
+    """读取当前客户的已归属订单列表，不接受手机号等跨资源查询条件。"""
+    sql = _ORDER_QUERY.format(where_clause="o.customer_user_id = %s") + " LIMIT %s"
+    connection = await get_connection()
+    try:
+        await connection.set_autocommit(True)
+        cursor = await connection.execute(sql, (customer_user_id, limit))
+        return _to_orders(await cursor.fetchall())
+    finally:
+        await put_connection(connection)

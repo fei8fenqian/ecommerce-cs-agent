@@ -58,6 +58,18 @@ export interface Product {
   image_url: string | null;
 }
 
+export interface CustomerOrder {
+  order_id: string;
+  status: string | null;
+  tracking: { company: string | null; number: string | null };
+  total_amount: number;
+  paid_amount: number;
+  payment_method: string | null;
+  order_date: string;
+  delivered_at: string | null;
+  items: Array<{ product_name: string; brand: string | null; price: number; quantity: number | null }>;
+}
+
 export interface SupportReplyDraft {
   ticket_id: string;
   draft: string;
@@ -107,6 +119,11 @@ export async function listProducts(token: string, category: "laptops" | "phones"
   if (query.trim()) parameters.set("query", query.trim());
   const response = await api<{ products: Product[] }>(`/api/v1/products?${parameters}`, {}, token);
   return response.products;
+}
+
+export async function listMyOrders(token: string): Promise<CustomerOrder[]> {
+  const response = await api<{ orders: CustomerOrder[] }>("/api/v1/orders/my", {}, token);
+  return response.orders;
 }
 
 export async function listSessions(token: string): Promise<SessionItem[]> {

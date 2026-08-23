@@ -1,6 +1,7 @@
 # ========== customer (external) ==========
 p, customer, /api/v1/chat, POST
 p, customer, /api/v1/products/*, GET
+p, customer, /api/v1/orders/my, GET
 p, customer, /api/v1/orders/my/*, GET
 p, customer, /api/v1/tickets, GET
 p, customer, /api/v1/tickets/*, GET

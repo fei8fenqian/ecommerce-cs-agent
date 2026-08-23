@@ -3,6 +3,7 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import {
   AuthState,
   Product,
+  CustomerOrder,
   SessionItem,
   SupportReplyDraft,
   Ticket,
@@ -11,6 +12,7 @@ import {
   getTicket,
   listSessions,
   listProducts,
+  listMyOrders,
   listTicketMessages,
   listTickets,
   requestReplyDraft,
@@ -113,7 +115,7 @@ function Shell({ title, subtitle, auth, onSignOut, children }: { title: string; 
 }
 
 function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: () => Promise<void> }) {
-  const [page, setPage] = useState<"service" | "catalog">("service");
+  const [page, setPage] = useState<"service" | "catalog" | "orders">("service");
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [sessionId, setSessionId] = useState<string | undefined>();
   const [chatMessages, setChatMessages] = useState<Array<{ role: "user" | "assistant"; content: string }>>([]);
@@ -164,8 +166,8 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
   };
 
   return <Shell title="我的 AI 服务台" subtitle="先由智能客服处理；需要时，工单会进入客服协作流程。" auth={auth} onSignOut={onSignOut}>
-    <nav className="page-nav"><button className={page === "service" ? "active" : "secondary"} onClick={() => setPage("service")}>AI 服务</button><button className={page === "catalog" ? "active" : "secondary"} onClick={() => setPage("catalog")}>商品目录</button></nav>
-    {page === "catalog" ? <ProductCatalog auth={auth} onAsk={(product) => { setPage("service"); setQuery(`我想了解 ${product.product_name}，请介绍它的配置、适用场景和库存情况。`); }} /> : <>
+    <nav className="page-nav"><button className={page === "service" ? "active" : "secondary"} onClick={() => setPage("service")}>AI 服务</button><button className={page === "catalog" ? "active" : "secondary"} onClick={() => setPage("catalog")}>商品目录</button><button className={page === "orders" ? "active" : "secondary"} onClick={() => setPage("orders")}>我的订单</button></nav>
+    {page === "catalog" ? <ProductCatalog auth={auth} onAsk={(product) => { setPage("service"); setQuery(`我想了解 ${product.product_name}，请介绍它的配置、适用场景和库存情况。`); }} /> : page === "orders" ? <OrderList auth={auth} /> : <>
     <div className="customer-grid">
       <section className="panel chat-panel"><div className="section-title"><h2>智能客服</h2><span>{sessionId ? "当前会话" : "新会话"}</span></div>
         <div className="chat-history">{chatMessages.length === 0 ? <p className="empty">告诉我你想查询的商品、订单或售后问题。</p> : chatMessages.map((message, index) => <article className={`bubble ${message.role}`} key={index}>{message.content}</article>)}</div>
@@ -197,6 +199,17 @@ function ProductCatalog({ auth, onAsk }: { auth: AuthState; onAsk: (product: Pro
   const search = (event: FormEvent): void => { event.preventDefault(); void load(); };
 
   return <section className="catalog"><header className="catalog-header"><div><p className="eyebrow">PRODUCT CATALOG</p><h2>发现适合你的数码产品</h2><p className="muted">实时展示已入库商品；库存与价格以当前系统数据为准。</p></div><form className="catalog-search" onSubmit={search}><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索品牌或商品名称" maxLength={100} /><button>搜索</button></form></header><div className="catalog-tabs"><button className={category === "laptops" ? "active" : "secondary"} onClick={() => setCategory("laptops")}>笔记本</button><button className={category === "phones" ? "active" : "secondary"} onClick={() => setCategory("phones")}>手机</button></div>{error && <p className="error">{error}</p>}<div className="product-grid">{loading ? <p className="empty">正在读取商品目录…</p> : products.length ? products.map((product) => <article className="product-card" key={product.id}>{product.image_url ? <img src={product.image_url} alt="" /> : <div className="product-visual"><span>{product.brand.slice(0, 1) || "G"}</span></div>}<div className="product-info"><span className="product-type">{product.product_type || (category === "laptops" ? "笔记本" : "手机")}</span><h3>{product.product_name}</h3><p>{product.description.slice(0, 84) || "查看 AI 客服了解详细配置。"}</p><div className="product-bottom"><strong>{product.price === null ? "价格待询" : `¥${product.price.toLocaleString("zh-CN")}`}</strong><span className={product.stock > 0 ? "in-stock" : "out-stock"}>{product.stock > 0 ? `现货 ${product.stock}` : "暂时缺货"}</span></div><button className="secondary" onClick={() => onAsk(product)}>问 AI 了解这款</button></div></article>) : <p className="empty">没有找到匹配商品，换个关键词试试。</p>}</div></section>;
+}
+
+function OrderList({ auth }: { auth: AuthState }) {
+  const [orders, setOrders] = useState<CustomerOrder[]>([]);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [expandedOrder, setExpandedOrder] = useState<string | null>(null);
+  const load = async (): Promise<void> => { setLoading(true); setError(""); try { setOrders(await listMyOrders(auth.token)); } catch (reason) { setError(reason instanceof Error ? reason.message : "订单暂时无法读取"); } finally { setLoading(false); } };
+  useEffect(() => { void load(); }, [auth.token]);
+
+  return <section className="orders panel"><div className="section-title"><div><p className="eyebrow">MY ORDERS</p><h2>我的订单</h2><p className="muted">只显示已完成账户归属确认的订单。</p></div><button className="secondary" onClick={() => void load()}>刷新</button></div>{error && <p className="error">{error}</p>}{loading ? <p className="empty">正在读取订单…</p> : orders.length ? <div className="order-list">{orders.map((order) => <article className="order-card" key={order.order_id}><header><div><strong>{order.order_id}</strong><small>{formatDate(order.order_date)}</small></div><span className="status">{order.status || "处理中"}</span></header><div className="order-products">{order.items.slice(0, expandedOrder === order.order_id ? undefined : 2).map((item, index) => <p key={index}>{item.brand ? `${item.brand} · ` : ""}{item.product_name}<span>×{item.quantity ?? 1}</span></p>)}</div><footer><div><strong>实付 ¥{order.paid_amount.toLocaleString("zh-CN")}</strong><small>{order.tracking.company && order.tracking.number ? `${order.tracking.company} · ${order.tracking.number}` : "暂无物流信息"}</small></div>{order.items.length > 2 && <button className="secondary" onClick={() => setExpandedOrder(expandedOrder === order.order_id ? null : order.order_id)}>{expandedOrder === order.order_id ? "收起" : `查看 ${order.items.length} 件商品`}</button>}</footer></article>)}</div> : <p className="empty">暂无已归属订单。历史订单无法核验时不会在这里展示。</p>}</section>;
 }
 
 function AgentWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: () => Promise<void> }) {
