@@ -1,4 +1,5 @@
 from typing import Any
+from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -13,6 +14,7 @@ from store.ticket_message_store import (
 )
 from store.ticket_store import (
     claim_ticket,
+    create_ticket,
     get_agent_ticket,
     get_customer_ticket,
     list_agent_tickets,
@@ -135,6 +137,12 @@ class CustomerTicketMessageCreateRequest(BaseModel):
     content: str = Field(min_length=1, max_length=4000)
 
 
+class CustomerTicketCreateRequest(BaseModel):
+    """客户直接发起售后工单；身份和紧急度不由浏览器决定。"""
+
+    issue: str = Field(min_length=1, max_length=4000)
+
+
 ticket_router = APIRouter(prefix="/api/v1", tags=["工单"])
 
 
@@ -151,6 +159,32 @@ def _knowledge_context(documents: list[dict[str, Any]]) -> tuple[str, list[Knowl
         references.append(KnowledgeReference(title=title, reference=reference))
         excerpts.append(f"资料 {len(references)}（{title}）：\n{content[:1200]}")
     return "\n\n".join(excerpts), references
+
+
+@ticket_router.post("/tickets", response_model=CustomerTicketDetailResponse, status_code=201)
+async def create_customer_ticket(
+    request: Request,
+    payload: CustomerTicketCreateRequest,
+) -> CustomerTicketDetailResponse:
+    """由客户创建工单，并交给现有 AI 工单 Worker 或客服队列处理。"""
+    user = request.state.user
+    if user["role"] != "customer":
+        raise HTTPException(status_code=403, detail="只有客户可以创建工单")
+    issue = payload.issue.strip()
+    if not issue:
+        raise HTTPException(status_code=400, detail="工单内容不能为空")
+
+    ticket_id = f"TK{uuid4().hex[:14].upper()}"
+    await create_ticket(
+        ticket_id=ticket_id,
+        issue=issue,
+        urgency="medium",
+        customer_user_id=user["id"],
+    )
+    ticket_data = await get_customer_ticket(ticket_id, user["id"])
+    if ticket_data is None:
+        raise HTTPException(status_code=500, detail="工单创建后无法读取")
+    return CustomerTicketDetailResponse(**ticket_data)
 
 
 @ticket_router.post(

@@ -223,3 +223,10 @@ export function sendCustomerTicketMessage(token: string, ticketId: string, conte
     body: JSON.stringify({ content }),
   }, token);
 }
+
+export function createCustomerTicket(token: string, issue: string): Promise<Ticket> {
+  return api("/api/v1/tickets", {
+    method: "POST",
+    body: JSON.stringify({ issue }),
+  }, token);
+}

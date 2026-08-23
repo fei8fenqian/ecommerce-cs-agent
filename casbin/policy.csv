@@ -5,6 +5,7 @@ p, customer, /api/v1/products/*, GET
 p, customer, /api/v1/orders/my, GET
 p, customer, /api/v1/orders/my/*, GET
 p, customer, /api/v1/tickets, GET
+p, customer, /api/v1/tickets, POST
 p, customer, /api/v1/tickets/*, GET
 p, customer, /api/v1/tickets/*, PATCH
 p, customer, /api/v1/tickets/*/customer-messages, POST

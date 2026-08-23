@@ -9,6 +9,7 @@ import {
   Ticket,
   TicketMessage,
   claimTicket,
+  createCustomerTicket,
   getTicket,
   listSessions,
   listProducts,
@@ -128,6 +129,7 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
   const [selectedTicket, setSelectedTicket] = useState<Ticket | null>(null);
   const [ticketMessages, setTicketMessages] = useState<TicketMessage[]>([]);
   const [followUp, setFollowUp] = useState("");
+  const [newTicketIssue, setNewTicketIssue] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [streamStatus, setStreamStatus] = useState("");
@@ -186,6 +188,20 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
     finally { setBusy(false); }
   };
 
+  const createTicket = async (event: FormEvent): Promise<void> => {
+    event.preventDefault();
+    const issue = newTicketIssue.trim();
+    if (!issue || busy) return;
+    setBusy(true); setError("");
+    try {
+      const ticket = await createCustomerTicket(auth.token, issue);
+      setNewTicketIssue("");
+      await refreshTickets();
+      await openTicket(ticket.ticket_id);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "工单创建失败"); }
+    finally { setBusy(false); }
+  };
+
   return <Shell title="我的 AI 服务台" subtitle="先由智能客服处理；需要时，工单会进入客服协作流程。" auth={auth} onSignOut={onSignOut}>
     <nav className="page-nav"><button className={page === "service" ? "active" : "secondary"} onClick={() => setPage("service")}>AI 服务</button><button className={page === "catalog" ? "active" : "secondary"} onClick={() => setPage("catalog")}>商品目录</button><button className={page === "orders" ? "active" : "secondary"} onClick={() => setPage("orders")}>我的订单</button></nav>
     {page === "catalog" ? <ProductCatalog auth={auth} onAsk={(product) => { setPage("service"); setQuery(`我想了解 ${product.product_name}，请介绍它的配置、适用场景和库存情况。`); }} /> : page === "orders" ? <OrderList auth={auth} /> : <>
@@ -195,7 +211,7 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
         <form className="composer" onSubmit={submitChat}><textarea value={query} onChange={(event) => setQuery(event.target.value)} placeholder="例如：帮我查一下订单物流" maxLength={2000} /><button disabled={busy}>{busy ? "生成中…" : "发送"}</button></form>
       </section>
       <aside className="side-stack"><section className="panel compact"><div className="section-title"><h2>历史会话</h2><span>{sessions.length}</span></div>{sessions.length ? sessions.slice(0, 6).map((session) => <button className="list-row" key={session.session_id} onClick={() => setSessionId(session.session_id)}><strong>{session.title || "未命名会话"}</strong><small>{session.message_count} 条消息</small></button>) : <p className="empty">暂时没有历史会话</p>}</section>
-      <section className="panel compact"><div className="section-title"><h2>我的工单</h2><span>{tickets.length}</span></div>{tickets.length ? tickets.map((ticket) => <button className="list-row" key={ticket.ticket_id} onClick={() => void openTicket(ticket.ticket_id)}><strong>{ticket.ticket_id}</strong><small>{ticket.status} · {ticket.urgency}</small></button>) : <p className="empty">暂时没有工单</p>}</section></aside>
+      <section className="panel compact"><div className="section-title"><h2>我的工单</h2><span>{tickets.length}</span></div>{tickets.length ? tickets.map((ticket) => <button className="list-row" key={ticket.ticket_id} onClick={() => void openTicket(ticket.ticket_id)}><strong>{ticket.ticket_id}</strong><small>{ticket.status} · {ticket.urgency}</small></button>) : <p className="empty">暂时没有工单</p>}<form className="ticket-create" onSubmit={createTicket}><label>需要售后协助？</label><textarea value={newTicketIssue} onChange={(event) => setNewTicketIssue(event.target.value)} placeholder="直接描述问题，AI 会优先处理" maxLength={4000} /><button disabled={busy || !newTicketIssue.trim()}>提交工单</button></form></section></aside>
     </div>
     {selectedTicket && <TicketConversation title={`工单 ${selectedTicket.ticket_id}`} messages={ticketMessages} error={error} onClose={() => setSelectedTicket(null)} composer={{ value: followUp, placeholder: "继续补充问题，AI 会重新处理未认领工单", submitLabel: "补充问题", disabled: busy, onChange: setFollowUp, onSubmit: submitFollowUp }} />}
     {error && <p className="toast error">{error}</p>}
