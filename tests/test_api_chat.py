@@ -18,7 +18,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from agent.engines.loop import LoopResult
 from agent.llm.intent_router import Intent
 from agent.llm.resolve import resolve_pronouns
-from api.chat import ChatRequest, chat_router, chat_stream
+from api.chat import ChatRequest, _entities_from_retrieval, chat_router, chat_stream
 from api.errors import (
     handle_app_exception,
     handle_http_exceptions,
@@ -72,6 +72,14 @@ class _MockAgentLoop:
             "answer": self._answer,
             "total_steps": 1,
         }
+
+
+def test_product_retrieval_records_current_product_for_next_turn():
+    assert _entities_from_retrieval(
+        "laptop_products",
+        [{"title": "惠普 惠普锐Pro"}],
+    ) == {"product": "惠普 惠普锐Pro"}
+    assert _entities_from_retrieval("knowledge_chunks", [{"title": "售后政策"}]) == {}
 
 
 class _MockSessionManager:

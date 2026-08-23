@@ -11,7 +11,6 @@ import {
   Ticket,
   TicketMessage,
   claimTicket,
-  createCustomerTicket,
   getSession,
   getTicket,
   listSessions,
@@ -22,7 +21,6 @@ import {
   requestReplyDraft,
   register,
   sendAgentTicketMessage,
-  sendCustomerTicketMessage,
   signIn,
   signOut,
   streamChat,
@@ -157,26 +155,13 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
   const [sessionId, setSessionId] = useState<string | undefined>();
   const [chatMessages, setChatMessages] = useState<Array<{ id: string; role: "user" | "assistant"; content: string }>>([]);
   const [query, setQuery] = useState("");
-  const [tickets, setTickets] = useState<Ticket[]>([]);
-  const [selectedTicket, setSelectedTicket] = useState<Ticket | null>(null);
-  const [ticketMessages, setTicketMessages] = useState<TicketMessage[]>([]);
-  const [followUp, setFollowUp] = useState("");
-  const [newTicketIssue, setNewTicketIssue] = useState("");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sessionsExpanded, setSessionsExpanded] = useState(true);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [streamStatus, setStreamStatus] = useState("");
 
-  const refreshTickets = async (): Promise<void> => setTickets(await listTickets(auth.token));
-  const openTicket = async (ticketId: string): Promise<void> => {
-    setError("");
-    try {
-      const [ticket, messages] = await Promise.all([getTicket(auth.token, ticketId), listTicketMessages(auth.token, ticketId)]);
-      setSelectedTicket(ticket);
-      setTicketMessages(messages);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "无法读取工单"); }
-  };
-
-  useEffect(() => { void listSessions(auth.token).then(setSessions).catch(() => undefined); void refreshTickets().catch(() => undefined); }, [auth.token]);
+  useEffect(() => { void listSessions(auth.token).then(setSessions).catch(() => undefined); }, [auth.token]);
 
   const startNewChat = (): void => {
     setPage("service");
@@ -252,42 +237,15 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
     void submitChatMessage();
   };
 
-  const submitFollowUp = async (event: FormEvent): Promise<void> => {
-    event.preventDefault();
-    if (!selectedTicket || !followUp.trim()) return;
-    setBusy(true); setError("");
-    try {
-      const created = await sendCustomerTicketMessage(auth.token, selectedTicket.ticket_id, followUp.trim());
-      setTicketMessages((items) => [...items, created]); setFollowUp(""); await refreshTickets();
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "发送失败"); }
-    finally { setBusy(false); }
-  };
-
-  const createTicket = async (event: FormEvent): Promise<void> => {
-    event.preventDefault();
-    const issue = newTicketIssue.trim();
-    if (!issue || busy) return;
-    setBusy(true); setError("");
-    try {
-      const ticket = await createCustomerTicket(auth.token, issue);
-      setNewTicketIssue("");
-      await refreshTickets();
-      await openTicket(ticket.ticket_id);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "工单创建失败"); }
-    finally { setBusy(false); }
-  };
-
-  return <main className="customer-chat-app">
+  return <main className={`customer-chat-app${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
     <aside className="chat-sidebar">
-      <div className="chat-brand"><span>G</span><strong>Geex AI</strong></div>
+      <div className="chat-brand"><span>G</span><strong>Geex AI</strong><button className="sidebar-toggle" aria-label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"} onClick={() => setSidebarCollapsed((value) => !value)}>{sidebarCollapsed ? "›" : "‹"}</button></div>
       <button className="new-chat-button" onClick={startNewChat}>＋ 新建对话</button>
       <nav className="chat-page-nav" aria-label="客户服务导航">
-        <button className={page === "service" ? "active" : "secondary"} onClick={() => setPage("service")}>✦ AI 服务</button>
         <button className={page === "catalog" ? "active" : "secondary"} onClick={() => setPage("catalog")}>商品目录</button>
         <button className={page === "orders" ? "active" : "secondary"} onClick={() => setPage("orders")}>我的订单</button>
       </nav>
-      <section className="sidebar-sessions"><p className="sidebar-label">最近对话</p>{sessions.length ? sessions.slice(0, 10).map((session) => <button className={`session-row ${sessionId === session.session_id ? "active" : ""}`} key={session.session_id} onClick={() => void openSession(session.session_id)}><strong>{session.title || "新对话"}</strong><small>{session.message_count} 条消息</small></button>) : <p className="sidebar-empty">暂无历史对话</p>}</section>
-      <section className="sidebar-tickets"><p className="sidebar-label">我的工单</p>{tickets.slice(0, 3).map((ticket) => <button className="session-row" key={ticket.ticket_id} onClick={() => void openTicket(ticket.ticket_id)}><strong>{ticket.ticket_id}</strong><small>{ticket.status} · {ticket.urgency}</small></button>)}<form className="ticket-create" onSubmit={createTicket}><label>需要售后协助？</label><textarea value={newTicketIssue} onChange={(event) => setNewTicketIssue(event.target.value)} placeholder="描述问题，AI 会优先处理" maxLength={4000} /><button disabled={busy || !newTicketIssue.trim()}>提交工单</button></form></section>
+      <section className="sidebar-sessions"><button className="sidebar-section-toggle" onClick={() => setSessionsExpanded((value) => !value)}><span>最近对话</span><span>{sessionsExpanded ? "⌃" : "⌄"}</span></button>{sessionsExpanded && (sessions.length ? sessions.slice(0, 10).map((session) => <button className={`session-row ${sessionId === session.session_id ? "active" : ""}`} key={session.session_id} onClick={() => void openSession(session.session_id)}><span>{session.title || "新对话"}</span><small>{session.message_count} 条消息</small></button>) : <p className="sidebar-empty">暂无历史对话</p>)}</section>
       <div className="chat-account"><span>{auth.user.username}</span><button className="text-button" onClick={() => void onSignOut()}>退出</button></div>
     </aside>
     <section className="chat-main">
@@ -297,7 +255,6 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
         <form className="composer chatgpt-composer" onSubmit={submitChat}><textarea value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={handleChatKeyDown} placeholder="给 Geex AI 发送消息" maxLength={2000} rows={1} /><button aria-label="发送消息" disabled={busy || !query.trim()}>{busy ? "…" : "↑"}</button></form><p className="chat-disclaimer">Enter 发送 · Shift / Alt + Enter 换行</p>
       </section>}
     </section>
-    {selectedTicket && <TicketConversation title={`工单 ${selectedTicket.ticket_id}`} messages={ticketMessages} error={error} onClose={() => setSelectedTicket(null)} composer={{ value: followUp, placeholder: "继续补充问题，AI 会重新处理未认领工单", submitLabel: "补充问题", disabled: busy, onChange: setFollowUp, onSubmit: submitFollowUp }} />}
     {error && <p className="toast error">{error}</p>}
   </main>;
 }
@@ -419,10 +376,6 @@ function AgentWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: () =>
       <section className="panel ticket-detail">{selectedTicket ? <><div className="section-title"><div><h2>{selectedTicket.ticket_id}</h2><p className="muted">{selectedTicket.issue || "尚未认领，先认领后查看详情"}</p></div>{!owned && <button onClick={() => void claim()} disabled={busy}>认领工单</button>}</div>{owned ? <><div className="message-history">{messages.map((message) => <Message key={message.message_id} message={message} />)}</div><div className="draft-actions"><button className="secondary" onClick={() => void createDraft()} disabled={busy}>✨ 生成 AI 回复草稿</button>{draft && <span className="hint">引用 {draft.knowledge_references.length} 条知识资料{draft.needs_human_follow_up ? " · 需补充依据" : ""}</span>}</div><form className="composer" onSubmit={send}><textarea value={content} onChange={(event) => setContent(event.target.value)} placeholder="编辑后发送给客户" maxLength={4000} /><button disabled={busy}>{busy ? "处理中…" : "发送回复"}</button></form></> : <p className="empty">认领后可查看消息、生成 AI 草稿并回复客户。</p>}</> : <p className="empty">从左侧选择一张工单开始处理。</p>}</section>
     </div>{error && <p className="toast error">{error}</p>}
   </Shell>;
-}
-
-function TicketConversation({ title, messages, error, onClose, composer }: { title: string; messages: TicketMessage[]; error: string; onClose: () => void; composer: { value: string; placeholder: string; submitLabel: string; disabled: boolean; onChange: (value: string) => void; onSubmit: (event: FormEvent) => Promise<void> } }) {
-  return <section className="modal-backdrop"><section className="modal panel"><div className="section-title"><h2>{title}</h2><button className="secondary" onClick={onClose}>关闭</button></div><div className="message-history">{messages.map((message) => <Message key={message.message_id} message={message} />)}</div><form className="composer" onSubmit={(event) => void composer.onSubmit(event)}><textarea value={composer.value} onChange={(event) => composer.onChange(event.target.value)} placeholder={composer.placeholder} maxLength={4000} /><button disabled={composer.disabled}>{composer.submitLabel}</button></form>{error && <p className="error">{error}</p>}</section></section>;
 }
 
 function Message({ message }: { message: TicketMessage }) {

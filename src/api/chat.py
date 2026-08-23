@@ -58,6 +58,14 @@ def _build_context(docs: list[dict]) -> str:
     return "\n-----\n".join(lines)
 
 
+def _entities_from_retrieval(table: str, docs: list[dict]) -> dict[str, str]:
+    """把商品检索首选结果保存为下一轮可解析的会话事实。"""
+    if table not in {"laptop_products", "phone_products"} or not docs:
+        return {}
+    title = str(docs[0].get("title") or "").strip()
+    return {"product": title} if title else {}
+
+
 def _should_rerank(query: str, table: str) -> bool:
     """仅在精排确实能改善答案时承担额外 CPU 延迟。
 
@@ -119,6 +127,7 @@ async def chat(chat_req: ChatRequest, request: Request):
                 use_rerank=_should_rerank(resolved_query, intent.table),
             )
             context = _build_context(docs)
+            retrieved_entities = _entities_from_retrieval(intent.table, docs)
             loop_result = await agent.run(
                 resolved_query,
                 context=context,
@@ -126,6 +135,7 @@ async def chat(chat_req: ChatRequest, request: Request):
                 system_prompt_extra=sentiment_ctx,
                 tool_context=tool_context,
             )
+            loop_result.last_entities = {**retrieved_entities, **loop_result.last_entities}
         else:
             loop_result = await agent.run(
                 resolved_query,
@@ -159,6 +169,7 @@ async def chat(chat_req: ChatRequest, request: Request):
 
 @chat_router.post("/chat/stream")
 async def chat_stream(chat_req: ChatRequest, request: Request):
+    last_entities: dict[str, str] = {}
     try:
         agent = request.app.state.agent
         session = request.app.state.session
@@ -185,13 +196,13 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                 use_rerank=_should_rerank(resolve_query, intent.table),
             )
             context = _build_context(docs)
+            last_entities = _entities_from_retrieval(intent.table, docs)
     except DependencyUnavailableError:
         raise
     except LLMError as exc:
         raise DependencyUnavailableError("智能服务暂时不可用") from exc
 
     stream_res = {"answer": "", "total_steps": 0, "total_tokens": 0}
-    last_entities: dict[str, str] = {}
     start_t = time.perf_counter()
 
     async def generate():

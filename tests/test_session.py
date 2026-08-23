@@ -60,6 +60,10 @@ class TestResolvePronouns:
         result = resolve_pronouns("它的价格是多少", {"product": "拯救者Y9000P"})
         assert result == "拯救者Y9000P的价格是多少"
 
+    def test_implicit_purchase_uses_recent_product(self):
+        result = resolve_pronouns("下单", {"product": "惠普锐Pro"})
+        assert result == "下单，商品为 惠普锐Pro"
+
     def test_replace_ta_male(self):
         result = resolve_pronouns("他有什么颜色", {"product": "iPhone 15"})
         assert result == "iPhone 15有什么颜色"
