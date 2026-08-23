@@ -291,7 +291,7 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
   };
 
   const removeSession = async (targetSessionId: string): Promise<void> => {
-    if (busy || !window.confirm("删除这条会话记录？此操作无法恢复。")) return;
+    if (busy) return;
     try {
       await deleteSession(auth.token, targetSessionId);
       setSessions((items) => items.filter((item) => item.session_id !== targetSessionId));
