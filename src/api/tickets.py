@@ -1,6 +1,10 @@
+from typing import Any
+
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from agent.rag.retrieve import hybrid_search
+from log_config import redact_text
 from store.ticket_store import (
     claim_ticket,
     get_agent_ticket,
@@ -77,7 +81,104 @@ class ClaimResponse(BaseModel):
     created_at: str
 
 
+class KnowledgeReference(BaseModel):
+    """客服草稿所依据的一条知识资料。"""
+
+    title: str
+    reference: str
+
+
+class SupportReplyDraftResponse(BaseModel):
+    """只返回给已认领工单客服的回复草稿，不会写回工单。"""
+
+    ticket_id: str
+    draft: str
+    knowledge_references: list[KnowledgeReference]
+    needs_human_follow_up: bool
+
+
 ticket_router = APIRouter(prefix="/api/v1", tags=["工单"])
+
+
+def _knowledge_context(documents: list[dict[str, Any]]) -> tuple[str, list[KnowledgeReference]]:
+    """将检索结果缩短为可安全传给模型的知识上下文和公开引用。"""
+    references: list[KnowledgeReference] = []
+    excerpts: list[str] = []
+    for index, document in enumerate(documents[:3], start=1):
+        title = str(document.get("title") or "知识资料")
+        reference = str(document.get("source") or document.get("id") or f"knowledge-{index}")
+        content = str(document.get("content") or "").strip()
+        if not content:
+            continue
+        references.append(KnowledgeReference(title=title, reference=reference))
+        excerpts.append(f"资料 {len(references)}（{title}）：\n{content[:1200]}")
+    return "\n\n".join(excerpts), references
+
+
+@ticket_router.post(
+    "/agent/support-reply-drafts/{ticket_id}",
+    response_model=SupportReplyDraftResponse,
+)
+async def create_support_reply_draft(ticket_id: str, request: Request) -> SupportReplyDraftResponse:
+    """为当前客服已认领工单生成仅供内部查看的知识依据回复草稿。"""
+    user = request.state.user
+    if user["role"] != "agent":
+        raise HTTPException(status_code=403, detail="只有客服可以生成回复草稿")
+
+    ticket_data = await get_agent_ticket(ticket_id, user["id"])
+    if ticket_data is None or ticket_data.get("assigned_agent_id") != user["id"]:
+        # 未认领、他人认领和不存在都统一为 404，避免泄露工单存在或归属。
+        raise HTTPException(status_code=404, detail="工单不存在")
+
+    issue = str(ticket_data.get("issue") or "").strip()
+    if not issue:
+        raise HTTPException(status_code=404, detail="工单不存在")
+    # issue 是客户自由输入；仅让脱敏后的副本离开工单边界进入检索和模型。
+    safe_issue = redact_text(issue)
+
+    documents = await hybrid_search(safe_issue, table="knowledge_chunks")
+    knowledge_context, references = _knowledge_context(documents)
+    if not knowledge_context:
+        return SupportReplyDraftResponse(
+            ticket_id=ticket_id,
+            draft="当前知识库中没有足够依据，需要人工补充后再回复客户。",
+            knowledge_references=[],
+            needs_human_follow_up=True,
+        )
+
+    llm_response = await request.app.state.llm_client.chat(
+        [
+            {
+                "role": "system",
+                "content": (
+                    "你是内部客服助手。仅根据给定知识资料起草一段可供客服人工审核的回复。"
+                    "不得编造政策、订单、物流、支付或退款事实；资料不足时必须写“需要人工补充”。"
+                    "不要复述、推断或索要客户姓名、手机号等个人信息。只输出回复草稿正文。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"工单问题：\n{safe_issue}\n\n可用知识资料：\n{knowledge_context}",
+            },
+        ],
+        temperature=0.0,
+        max_tokens=500,
+    )
+    draft = (llm_response.content or "").strip()
+    if not draft:
+        return SupportReplyDraftResponse(
+            ticket_id=ticket_id,
+            draft="当前知识库不足以生成可靠回复，需要人工补充后再回复客户。",
+            knowledge_references=references,
+            needs_human_follow_up=True,
+        )
+
+    return SupportReplyDraftResponse(
+        ticket_id=ticket_id,
+        draft=draft,
+        knowledge_references=references,
+        needs_human_follow_up="需要人工补充" in draft,
+    )
 
 
 @ticket_router.get(

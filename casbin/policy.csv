@@ -14,6 +14,7 @@ p, agent, /api/v1/tickets, GET
 p, agent, /api/v1/tickets/*, GET
 p, agent, /api/v1/tickets/*, PATCH
 p, agent, /api/v1/tickets/*/claim, POST
+p, agent, /api/v1/agent/support-reply-drafts/*, POST
 p, agent, /api/v1/orders/*, GET
 
 # ========== operator (internal) ==========
