@@ -26,6 +26,7 @@ RUN apt-get update \
 COPY pyproject.toml .
 COPY requirements-demo-cpu.txt .
 COPY src/ src/
+COPY data/products/raw/ data/products/raw/
 COPY casbin/ casbin/
 COPY alembic/ alembic/
 COPY alembic.ini ./

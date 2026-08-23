@@ -3,6 +3,7 @@
 from typing import Any, Literal
 
 from infra.db_pool import get_connection, put_connection
+from infra.product_image_catalog import product_image_urls
 
 ProductCategory = Literal["laptops", "phones"]
 
@@ -12,12 +13,12 @@ _PRODUCT_TABLES: dict[ProductCategory, str] = {
 }
 
 
-def _image_url(metadata: Any) -> str | None:
-    """从已有商品元数据取可选图片链接；没有时让前端使用统一占位视觉。"""
+def _image_url(product_id: str, metadata: Any) -> str | None:
+    """优先使用元数据图片；旧数据则从源数据索引补齐公开缩略图。"""
     if not isinstance(metadata, dict):
-        return None
+        return product_image_urls().get(product_id)
     value = metadata.get("image_url") or metadata.get("thumbnail_url")
-    return str(value) if value else None
+    return str(value) if value else product_image_urls().get(product_id)
 
 
 async def list_products(
@@ -74,7 +75,7 @@ async def list_products(
                     "status": str(status or ""),
                     "stock": int(stock or 0),
                     "warehouse": str(warehouse or ""),
-                    "image_url": _image_url(metadata),
+                    "image_url": _image_url(str(product_id), metadata),
                 }
             )
         return products
