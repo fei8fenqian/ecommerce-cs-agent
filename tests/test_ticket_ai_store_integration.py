@@ -7,7 +7,7 @@ import pytest
 import pytest_asyncio
 
 from infra.db_pool import close_pool, get_connection, init_pool, put_connection
-from store.ticket_message_store import list_customer_ticket_messages
+from store.ticket_message_store import create_customer_ticket_message, list_customer_ticket_messages
 from store.ticket_store import (
     claim_next_ticket_for_ai,
     claim_ticket,
@@ -88,3 +88,22 @@ async def test_ai_can_return_unresolved_ticket_to_human_queue(ai_ticket_data: di
     claimed_by_human = await claim_ticket(ticket_id, human_agent_id)
     assert claimed_by_human is not None
     assert claimed_by_human["assigned_agent_id"] == human_agent_id
+
+
+@pytest.mark.asyncio
+async def test_customer_follow_up_reopens_resolved_ticket_for_ai(ai_ticket_data: dict[str, int | str]) -> None:
+    """客户追问后，下一次 AI 领取应读取新问题而不是旧 issue。"""
+    ticket_id = str(ai_ticket_data["ticket_id"])
+    customer_id = int(ai_ticket_data["customer"])
+
+    assert await claim_next_ticket_for_ai(claim_timeout_seconds=120) is not None
+    assert await complete_ai_ticket(ticket_id, "请检查电源连接。") is True
+
+    follow_up = "我已经检查过电源，还是无法开机。"
+    created = await create_customer_ticket_message(ticket_id, customer_id, follow_up)
+    assert created is not None
+
+    claimed_again = await claim_next_ticket_for_ai(claim_timeout_seconds=120)
+    assert claimed_again is not None
+    assert claimed_again["ticket_id"] == ticket_id
+    assert claimed_again["issue"] == follow_up

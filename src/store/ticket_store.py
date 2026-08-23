@@ -453,7 +453,6 @@ async def claim_next_ticket_for_ai(claim_timeout_seconds: int) -> dict[str, Any]
                 FROM public.tickets
                 WHERE assigned_agent_id IS NULL
                   AND customer_user_id IS NOT NULL
-                  AND ai_processed_at IS NULL
                   AND (
                       status = '待处理'
                       OR (
@@ -469,7 +468,17 @@ async def claim_next_ticket_for_ai(claim_timeout_seconds: int) -> dict[str, Any]
             SET status = 'AI处理中', ai_claimed_at = NOW()
             FROM candidate
             WHERE ticket.ticket_id = candidate.ticket_id
-            RETURNING ticket.ticket_id, ticket.customer_user_id, ticket.issue, ticket.urgency
+            RETURNING ticket.ticket_id,
+                      ticket.customer_user_id,
+                      (
+                          SELECT message.content
+                          FROM public.ticket_messages AS message
+                          WHERE message.ticket_id = ticket.ticket_id
+                            AND message.author_role = 'customer'
+                          ORDER BY message.created_at DESC, message.id DESC
+                          LIMIT 1
+                      ),
+                      ticket.urgency
             """,
             (claim_timeout_seconds,),
         )

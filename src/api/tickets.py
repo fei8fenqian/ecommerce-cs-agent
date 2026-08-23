@@ -7,6 +7,7 @@ from agent.rag.retrieve import hybrid_search
 from log_config import redact_text
 from store.ticket_message_store import (
     create_agent_ticket_message,
+    create_customer_ticket_message,
     list_agent_ticket_messages,
     list_customer_ticket_messages,
 )
@@ -128,6 +129,12 @@ class TicketMessageCreateRequest(BaseModel):
     )
 
 
+class CustomerTicketMessageCreateRequest(BaseModel):
+    """客户向自己工单补充的后续问题。"""
+
+    content: str = Field(min_length=1, max_length=4000)
+
+
 ticket_router = APIRouter(prefix="/api/v1", tags=["工单"])
 
 
@@ -244,6 +251,23 @@ async def send_ticket_message(
         raise HTTPException(status_code=400, detail="回复内容不能为空")
 
     created = await create_agent_ticket_message(ticket_id, user["id"], content, message.ai_assisted)
+    if created is None:
+        raise HTTPException(status_code=404, detail="工单不存在")
+    return TicketMessageItem(**created)
+
+
+@ticket_router.post("/tickets/{ticket_id}/customer-messages", response_model=TicketMessageItem)
+async def send_customer_ticket_message(
+    ticket_id: str,
+    request: Request,
+    message: CustomerTicketMessageCreateRequest,
+) -> TicketMessageItem:
+    """客户补充自己工单的问题；未认领工单会重新进入 AI 队列。"""
+    user = request.state.user
+    if user["role"] != "customer":
+        raise HTTPException(status_code=403, detail="只有客户可以补充工单消息")
+
+    created = await create_customer_ticket_message(ticket_id, user["id"], message.content.strip())
     if created is None:
         raise HTTPException(status_code=404, detail="工单不存在")
     return TicketMessageItem(**created)

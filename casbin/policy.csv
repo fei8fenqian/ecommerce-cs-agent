@@ -5,6 +5,7 @@ p, customer, /api/v1/orders/my/*, GET
 p, customer, /api/v1/tickets, GET
 p, customer, /api/v1/tickets/*, GET
 p, customer, /api/v1/tickets/*, PATCH
+p, customer, /api/v1/tickets/*/customer-messages, POST
 
 # ========== agent (internal) ==========
 p, agent, /api/v1/chat, POST

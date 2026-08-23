@@ -103,3 +103,57 @@ async def create_agent_ticket_message(
     finally:
         if conn is not None:
             await put_connection(conn)
+
+
+async def create_customer_ticket_message(
+    ticket_id: str,
+    customer_user_id: int,
+    content: str,
+) -> dict[str, Any] | None:
+    """写入客户追问，并重新激活尚未由人工认领的 AI 工单。
+
+    Returns:
+        新消息；若工单不存在或不属于该客户则返回 None。
+    """
+    conn = None
+    try:
+        conn = await get_connection()
+        await conn.set_autocommit(False)
+        cursor = await conn.execute(
+            """
+            UPDATE public.tickets
+            SET status = CASE
+                    WHEN assigned_agent_id IS NULL THEN '待处理'
+                    ELSE status
+                END,
+                ai_claimed_at = CASE
+                    WHEN assigned_agent_id IS NULL THEN NULL
+                    ELSE ai_claimed_at
+                END
+            WHERE ticket_id = %s AND customer_user_id = %s
+            RETURNING ticket_id
+            """,
+            (ticket_id, customer_user_id),
+        )
+        if await cursor.fetchone() is None:
+            await conn.rollback()
+            return None
+        cursor = await conn.execute(
+            """
+            INSERT INTO public.ticket_messages
+                (ticket_id, author_role, author_user_id, content, ai_assisted)
+            VALUES (%s, 'customer', %s, %s, false)
+            RETURNING id, author_role, content, ai_assisted, created_at
+            """,
+            (ticket_id, customer_user_id, content),
+        )
+        row = await cursor.fetchone()
+        await conn.commit()
+        return _message_from_row(row)
+    except Exception:
+        if conn is not None:
+            await conn.rollback()
+        raise
+    finally:
+        if conn is not None:
+            await put_connection(conn)

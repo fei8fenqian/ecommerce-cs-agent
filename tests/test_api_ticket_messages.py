@@ -143,6 +143,53 @@ async def test_other_agent_cannot_send_ticket_reply() -> None:
 
 
 @pytest.mark.asyncio
+async def test_customer_can_add_follow_up_to_own_ticket() -> None:
+    """客户追问写入自己的工单，并由 Store 决定是否重新进入 AI 队列。"""
+    app = make_app()
+    follow_up = {
+        "message_id": 3,
+        "author_role": "customer",
+        "content": "还是无法开机。",
+        "ai_assisted": False,
+        "created_at": "2026-08-24T10:10:00+00:00",
+    }
+    created = AsyncMock(return_value=follow_up)
+
+    with patch("api.tickets.create_customer_ticket_message", new=created):
+        response = await request(
+            app,
+            "customer-a-token",
+            "POST",
+            "/api/v1/tickets/ticket-a/customer-messages",
+            json={"content": "还是无法开机。"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == follow_up
+    created.assert_awaited_once_with("ticket-a", 101, "还是无法开机。")
+
+
+@pytest.mark.asyncio
+async def test_customer_cannot_add_follow_up_to_another_ticket() -> None:
+    """越权客户统一拿到安全 404，不泄露工单存在。"""
+    app = make_app()
+    created = AsyncMock(return_value=None)
+
+    with patch("api.tickets.create_customer_ticket_message", new=created):
+        response = await request(
+            app,
+            "customer-b-token",
+            "POST",
+            "/api/v1/tickets/ticket-a/customer-messages",
+            json={"content": "越权追问"},
+        )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "RESOURCE_NOT_AVAILABLE"
+    created.assert_awaited_once_with("ticket-a", 202, "越权追问")
+
+
+@pytest.mark.asyncio
 async def test_ticket_reply_rejects_content_over_4000_characters() -> None:
     app = make_app()
     created = AsyncMock()
