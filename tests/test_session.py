@@ -278,6 +278,34 @@ class TestSessionManager:
         assert updated is not None
         assert updated.last_active > ctx.last_active
 
+    @pytest.mark.asyncio
+    async def test_truncate_from_user_message_discards_following_turns(self, manager):
+        """编辑用户消息时，保留前文并删除目标消息及之后的记录。"""
+        session_manager, owner_id, _ = manager
+        ctx = await session_manager.get_or_create(None, owner_id)
+        assert ctx is not None
+        await session_manager.add_turn(
+            ctx.session_id,
+            owner_id,
+            "第一个问题",
+            _make_loop_result(answer="第一个回答", last_entities={"product": "惠普锐Pro"}),
+        )
+        await session_manager.add_turn(
+            ctx.session_id,
+            owner_id,
+            "第二个问题",
+            _make_loop_result(answer="第二个回答"),
+        )
+
+        success = await session_manager.truncate_from(ctx.session_id, owner_id, 2)
+        edited = await session_manager.get(ctx.session_id, owner_id)
+
+        assert success is True
+        assert edited is not None
+        assert [message["content"] for message in edited.messages] == ["第一个问题", "第一个回答"]
+        assert edited.last_entities == {}
+        assert await session_manager.truncate_from(ctx.session_id, owner_id, 1) is False
+
     # -- add_turn --------------------------------------------------------------
     @pytest.mark.asyncio
     async def test_add_turn_with_tool_call(self, manager):

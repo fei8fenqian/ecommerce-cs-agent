@@ -58,7 +58,7 @@ export interface SessionItem {
 export interface SessionDetail {
   session_id: string;
   title: string;
-  messages: Array<{ role: string; content?: string }>;
+  messages: Array<{ role: string; content?: string; sequence_no?: number }>;
 }
 
 export interface Product {
@@ -163,12 +163,13 @@ export async function streamChat(
   query: string,
   sessionId: string | undefined,
   onEvent: (event: ChatStreamEvent) => void,
+  replaceFromSequence?: number,
 ): Promise<void> {
   const response = await fetch("/api/v1/chat/stream", {
     method: "POST",
     credentials: "same-origin",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}`, Accept: "text/event-stream" },
-    body: JSON.stringify({ query, session_id: sessionId }),
+    body: JSON.stringify({ query, session_id: sessionId, replace_from_sequence: replaceFromSequence }),
   });
   if (!response.ok || !response.body) {
     const body = (await response.json().catch(() => ({}))) as ErrorBody;
@@ -218,6 +219,10 @@ export async function listSessions(token: string): Promise<SessionItem[]> {
 
 export function getSession(token: string, sessionId: string): Promise<SessionDetail> {
   return api(`/api/v1/sessions/${encodeURIComponent(sessionId)}`, {}, token);
+}
+
+export function deleteSession(token: string, sessionId: string): Promise<{ ok: boolean }> {
+  return api(`/api/v1/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" }, token);
 }
 
 export async function listTickets(token: string): Promise<Ticket[]> {

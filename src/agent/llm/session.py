@@ -32,6 +32,9 @@ from store.session_store import (
 from store.session_store import (
     list_sessions as list_session_records,
 )
+from store.session_store import (
+    truncate_messages_from as truncate_session_messages,
+)
 
 from ..engines.loop import LoopResult
 from .resolve import resolve_pronouns
@@ -52,6 +55,7 @@ class SessionContext:
     session_id: str
     title: str = ""
     messages: list[dict[str, Any]] = field(default_factory=list)
+    message_sequence_numbers: list[int] = field(default_factory=list)
     last_entities: dict[str, str] = field(default_factory=dict)
     created_at: float = 0.0
     last_active: float = 0.0
@@ -135,6 +139,7 @@ class SessionManager:
             session_id=record["id"],
             title=record["title"],
             messages=[stored_message["payload"] for stored_message in stored_messages],
+            message_sequence_numbers=[stored_message["sequence_no"] for stored_message in stored_messages],
             last_entities=dict(record["last_entities"]),
             created_at=record["created_at"].timestamp(),
             last_active=record["last_active_at"].timestamp(),
@@ -205,6 +210,15 @@ class SessionManager:
     async def delete(self, session_id: str, owner_user_id: int) -> bool:
         """删除当前用户的会话及其消息。"""
         return await delete_session_record(session_id, owner_user_id)
+
+    async def truncate_from(
+        self,
+        session_id: str,
+        owner_user_id: int,
+        sequence_no: int,
+    ) -> bool:
+        """删除一条用户消息及其后续内容，供编辑后重新生成。"""
+        return await truncate_session_messages(session_id, owner_user_id, sequence_no)
 
     async def resolve(
         self,

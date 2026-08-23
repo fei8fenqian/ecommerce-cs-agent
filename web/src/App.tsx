@@ -11,6 +11,7 @@ import {
   Ticket,
   TicketMessage,
   claimTicket,
+  deleteSession,
   getSession,
   getTicket,
   listSessions,
@@ -27,6 +28,28 @@ import {
 } from "./api";
 
 const STORAGE_KEY = "ecommerce-agent.auth";
+
+type ChatMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  sequenceNo?: number;
+};
+
+function toChatMessages(
+  sessionId: string,
+  messages: Array<{ role: string; content?: string; sequence_no?: number }>,
+): ChatMessage[] {
+  // 将会话 API 的持久化消息转换为聊天页面需要的显示数据。
+  return messages
+    .filter((message) => (message.role === "user" || message.role === "assistant") && Boolean(message.content))
+    .map((message, index) => ({
+      id: `history-${sessionId}-${message.sequence_no ?? index}`,
+      role: message.role as "user" | "assistant",
+      content: message.content ?? "",
+      sequenceNo: message.sequence_no,
+    }));
+}
 
 function loadAuth(): AuthState | null {
   try {
@@ -153,13 +176,15 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
   const [page, setPage] = useState<"service" | "catalog" | "orders">("service");
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [sessionId, setSessionId] = useState<string | undefined>();
-  const [chatMessages, setChatMessages] = useState<Array<{ id: string; role: "user" | "assistant"; content: string }>>([]);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [query, setQuery] = useState("");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sessionsExpanded, setSessionsExpanded] = useState(true);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [streamStatus, setStreamStatus] = useState("");
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  const [editingValue, setEditingValue] = useState("");
   const chatHistoryRef = useRef<HTMLDivElement>(null);
   const smoothScrollOnNextMessageRef = useRef(false);
 
@@ -183,6 +208,7 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
     setChatMessages([]);
     setQuery("");
     setError("");
+    setEditingMessageId(null);
   };
 
   const openSession = async (nextSessionId: string): Promise<void> => {
@@ -190,13 +216,7 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
     setError("");
     try {
       const session = await getSession(auth.token, nextSessionId);
-      const restoredMessages = session.messages
-        .filter((message) => (message.role === "user" || message.role === "assistant") && Boolean(message.content))
-        .map((message, index) => ({
-          id: `history-${nextSessionId}-${index}`,
-          role: message.role as "user" | "assistant",
-          content: message.content ?? "",
-        }));
+      const restoredMessages = toChatMessages(session.session_id, session.messages);
       setSessionId(session.session_id);
       setChatMessages(restoredMessages);
       setPage("service");
@@ -205,17 +225,25 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
     }
   };
 
-  const submitChatMessage = async (): Promise<void> => {
-    const text = query.trim();
+  const submitChatMessage = async (
+    submittedText = query,
+    replaceFromSequence?: number,
+  ): Promise<void> => {
+    const text = submittedText.trim();
     if (!text || busy) return;
     // 用户发送后将当前会话平滑带到新消息；后续 SSE token 继续贴住最新回复。
     smoothScrollOnNextMessageRef.current = true;
-    setBusy(true); setError(""); setStreamStatus("正在思考…"); setQuery("");
+    setBusy(true); setError(""); setStreamStatus("正在思考…"); setQuery(""); setEditingMessageId(null);
     const assistantId = `assistant-${Date.now()}`;
+    if (replaceFromSequence !== undefined) {
+      setChatMessages((items) => items.filter((message) => (message.sequenceNo ?? -1) < replaceFromSequence));
+    }
     setChatMessages((items) => [...items, { id: `user-${Date.now()}`, role: "user", content: text }, { id: assistantId, role: "assistant", content: "" }]);
+    let activeSessionId = sessionId;
     try {
       await streamChat(auth.token, text, sessionId, (event) => {
         if (event.event === "start") {
+          activeSessionId = event.session_id;
           setSessionId(event.session_id); setStreamStatus("正在思考…"); return;
         }
         if (event.event === "tool_call") { setStreamStatus("正在思考…"); return; }
@@ -229,8 +257,12 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
           if (completedAnswer) setChatMessages((items) => items.map((message) => message.id === assistantId && !message.content ? { ...message, content: completedAnswer } : message));
           setStreamStatus("");
         }
-      });
+      }, replaceFromSequence);
       setSessions(await listSessions(auth.token));
+      if (activeSessionId) {
+        const persisted = await getSession(auth.token, activeSessionId);
+        setChatMessages(toChatMessages(persisted.session_id, persisted.messages));
+      }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "智能客服暂时不可用");
       setChatMessages((items) => items.filter((message) => message.id !== assistantId || message.content));
@@ -253,6 +285,22 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
     void submitChatMessage();
   };
 
+  const saveEditedMessage = (message: ChatMessage): void => {
+    if (message.sequenceNo === undefined) return;
+    void submitChatMessage(editingValue, message.sequenceNo);
+  };
+
+  const removeSession = async (targetSessionId: string): Promise<void> => {
+    if (busy || !window.confirm("删除这条会话记录？此操作无法恢复。")) return;
+    try {
+      await deleteSession(auth.token, targetSessionId);
+      setSessions((items) => items.filter((item) => item.session_id !== targetSessionId));
+      if (sessionId === targetSessionId) startNewChat();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "删除会话失败");
+    }
+  };
+
   return <main className={`customer-chat-app${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
     <aside className="chat-sidebar">
       <div className="chat-brand"><span>G</span><strong>Geex AI</strong><button className="sidebar-toggle" aria-label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"} onClick={() => setSidebarCollapsed((value) => !value)}>{sidebarCollapsed ? "›" : "‹"}</button></div>
@@ -261,13 +309,13 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
         <button className={page === "catalog" ? "active" : "secondary"} onClick={() => setPage("catalog")}>商品目录</button>
         <button className={page === "orders" ? "active" : "secondary"} onClick={() => setPage("orders")}>我的订单</button>
       </nav>
-      <section className="sidebar-sessions"><button className="sidebar-section-toggle" onClick={() => setSessionsExpanded((value) => !value)}><span>最近对话</span><span>{sessionsExpanded ? "⌃" : "⌄"}</span></button>{sessionsExpanded && (sessions.length ? sessions.slice(0, 10).map((session) => <button className={`session-row ${sessionId === session.session_id ? "active" : ""}`} key={session.session_id} onClick={() => void openSession(session.session_id)}><span>{session.title || "新对话"}</span><small>{session.message_count} 条消息</small></button>) : <p className="sidebar-empty">暂无历史对话</p>)}</section>
+      <section className="sidebar-sessions"><button className="sidebar-section-toggle" onClick={() => setSessionsExpanded((value) => !value)}><span>最近对话</span><span>{sessionsExpanded ? "⌃" : "⌄"}</span></button>{sessionsExpanded && (sessions.length ? sessions.slice(0, 10).map((session) => <div className={`session-item ${sessionId === session.session_id ? "active" : ""}`} key={session.session_id}><button className="session-row" onClick={() => void openSession(session.session_id)}><span>{session.title || "新对话"}</span><small>{session.message_count} 条消息</small></button><button className="session-delete" aria-label={`删除会话：${session.title || "新对话"}`} onClick={() => void removeSession(session.session_id)}>×</button></div>) : <p className="sidebar-empty">暂无历史对话</p>)}</section>
       <div className="chat-account"><span>{auth.user.username}</span><button className="text-button" onClick={() => void onSignOut()}>退出</button></div>
     </aside>
     <section className="chat-main">
       <header className="chat-main-header"><div><strong>{page === "service" ? "智能客服" : page === "catalog" ? "商品目录" : "我的订单"}</strong><span>{page === "service" ? (sessionId ? "当前会话" : "新对话") : "Geex Digital"}</span></div><span className="role-badge">客户服务台</span></header>
       {page === "catalog" ? <ProductCatalog auth={auth} onAsk={(product) => { setPage("service"); setQuery(`我想了解 ${product.product_name}，请介绍它的配置、适用场景和库存情况。`); }} /> : page === "orders" ? <OrderList auth={auth} /> : <section className="chat-canvas">
-        <div ref={chatHistoryRef} className="chat-history chatgpt-history">{chatMessages.length === 0 ? <div className="chat-welcome"><p className="eyebrow">GEEX DIGITAL · AI ASSISTANT</p><h1>今天想解决什么问题？</h1><p>我可以介绍商品、查询已归属订单，也能帮你发起售后工单。</p><div className="prompt-grid"><button className="prompt-card" onClick={() => setQuery("帮我推荐一台预算 5000 元左右的笔记本")}>推荐一台预算 5000 元的笔记本</button><button className="prompt-card" onClick={() => setQuery("帮我查询订单物流")}>查询我的订单物流</button><button className="prompt-card" onClick={() => setQuery("哪些手机目前有库存？")}>查询有库存的手机</button></div></div> : chatMessages.map((message) => <article className={`bubble ${message.role}${!message.content ? " thinking" : ""}`} key={message.id}><div className="message-content">{message.content ? message.role === "assistant" ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown> : message.content : streamStatus || "正在思考…"}</div></article>)}</div>
+        <div ref={chatHistoryRef} className="chat-history chatgpt-history">{chatMessages.length === 0 ? <div className="chat-welcome"><p className="eyebrow">GEEX DIGITAL · AI ASSISTANT</p><h1>今天想解决什么问题？</h1><p>我可以介绍商品、查询已归属订单，也能帮你发起售后工单。</p><div className="prompt-grid"><button className="prompt-card" onClick={() => setQuery("帮我推荐一台预算 5000 元左右的笔记本")}>推荐一台预算 5000 元的笔记本</button><button className="prompt-card" onClick={() => setQuery("帮我查询订单物流")}>查询我的订单物流</button><button className="prompt-card" onClick={() => setQuery("哪些手机目前有库存？")}>查询有库存的手机</button></div></div> : chatMessages.map((message) => <article className={`bubble ${message.role}${!message.content ? " thinking" : ""}`} key={message.id}><div className="message-content">{message.role === "user" && editingMessageId === message.id ? <div className="message-edit"><textarea value={editingValue} onChange={(event) => setEditingValue(event.target.value)} maxLength={2000} autoFocus /><div><button className="secondary" onClick={() => { setEditingMessageId(null); setEditingValue(""); }}>取消</button><button onClick={() => saveEditedMessage(message)} disabled={!editingValue.trim()}>保存并重新生成</button></div></div> : <>{message.content ? message.role === "assistant" ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown> : message.content : streamStatus || "正在思考…"}{message.role === "user" && message.sequenceNo !== undefined && !busy && <button className="message-edit-button" onClick={() => { setEditingMessageId(message.id); setEditingValue(message.content); }}>编辑</button>}</>}</div></article>)}</div>
         <form className="composer chatgpt-composer" onSubmit={submitChat}><textarea value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={handleChatKeyDown} placeholder="给 Geex AI 发送消息" maxLength={2000} rows={1} /><button aria-label="发送消息" disabled={busy || !query.trim()}>{busy ? "…" : "↑"}</button></form><p className="chat-disclaimer">Enter 发送 · Shift / Alt + Enter 换行</p>
       </section>}
     </section>

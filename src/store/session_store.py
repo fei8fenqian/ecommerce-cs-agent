@@ -172,6 +172,67 @@ async def delete_session(session_id: str, owner_user_id: int) -> bool:
             await put_connection(conn)
 
 
+async def truncate_messages_from(
+    session_id: str,
+    owner_user_id: int,
+    sequence_no: int,
+) -> bool:
+    """删除指定用户消息及其后的会话内容，供编辑后重新生成使用。"""
+    session_uuid = _parse_session_id(session_id)
+    if session_uuid is None or sequence_no < 0:
+        return False
+
+    conn = None
+    try:
+        conn = await get_connection()
+        async with conn.transaction():
+            cur = await conn.execute(
+                """
+                SELECT id
+                FROM public.sessions
+                WHERE id = %s AND owner_user_id = %s
+                FOR UPDATE
+                """,
+                (session_uuid, owner_user_id),
+            )
+            if await cur.fetchone() is None:
+                return False
+
+            cur = await conn.execute(
+                """
+                SELECT role
+                FROM public.session_messages
+                WHERE session_id = %s AND sequence_no = %s
+                """,
+                (session_uuid, sequence_no),
+            )
+            row = await cur.fetchone()
+            if row is None or row[0] != "user":
+                return False
+
+            await conn.execute(
+                """
+                DELETE FROM public.session_messages
+                WHERE session_id = %s AND sequence_no >= %s
+                """,
+                (session_uuid, sequence_no),
+            )
+            # 删除后不能保留可能由已删除回答产生的实体，避免下一轮错误指代。
+            await conn.execute(
+                """
+                UPDATE public.sessions
+                SET last_entities = '{}'::jsonb,
+                    last_active_at = now()
+                WHERE id = %s AND owner_user_id = %s
+                """,
+                (session_uuid, owner_user_id),
+            )
+            return True
+    finally:
+        if conn is not None:
+            await put_connection(conn)
+
+
 async def append_messages(
     session_id: str,
     owner_user_id: int,

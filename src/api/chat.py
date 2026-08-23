@@ -23,6 +23,11 @@ _chat_logger = logging.getLogger(__name__)
 class ChatRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=2000, description="用户消息")
     session_id: str | None = Field(None, description="不传则自动创建新会话")
+    replace_from_sequence: int | None = Field(
+        None,
+        ge=0,
+        description="编辑已有用户消息时，删除该条及之后的历史后再发送本消息",
+    )
 
 
 class ChatResponse(BaseModel):
@@ -89,6 +94,14 @@ async def chat(chat_req: ChatRequest, request: Request):
         intent_router = request.app.state.intent_router
         user_id = request.state.user["id"]
         tool_context = ToolContext(user_id=user_id, role=request.state.user["role"])
+
+        if chat_req.replace_from_sequence is not None:
+            if chat_req.session_id is None or not await session.truncate_from(
+                chat_req.session_id,
+                user_id,
+                chat_req.replace_from_sequence,
+            ):
+                raise HTTPException(status_code=404, detail="会话消息不可用")
 
         # 获取历史会话或创建新会话
         ctx = await session.get_or_create(chat_req.session_id, user_id)
@@ -183,6 +196,14 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
         tool_context = ToolContext(user_id=user_id, role=request.state.user["role"])
 
         # 这些步骤发生在 StreamingResponse 创建前，失败时可以正常返回 HTTP 503。
+        if chat_req.replace_from_sequence is not None:
+            if chat_req.session_id is None or not await session.truncate_from(
+                chat_req.session_id,
+                user_id,
+                chat_req.replace_from_sequence,
+            ):
+                raise HTTPException(status_code=404, detail="会话消息不可用")
+
         session_ctx = await session.get_or_create(chat_req.session_id, user_id)
         if session_ctx is None:
             raise HTTPException(status_code=404, detail="会话不存在")

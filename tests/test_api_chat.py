@@ -136,6 +136,19 @@ class _MockSessionManager:
             ctx.messages.append({"role": "user", "content": query})
             ctx.messages.append({"role": "assistant", "content": answer})
 
+    async def truncate_from(
+        self,
+        session_id: str,
+        owner_user_id: int,
+        sequence_no: int,
+    ) -> bool:
+        ctx = self._sessions.get(session_id)
+        if ctx is None or sequence_no < 0:
+            return False
+        ctx.messages = ctx.messages[:sequence_no]
+        ctx.last_entities = {}
+        return True
+
 
 # =============================================================================
 # TestClient fixture
@@ -237,6 +250,40 @@ class TestChatEndpoint:
         )
         assert resp2.status_code == 200
         assert resp2.json()["session_id"] == "my-session"
+
+    @pytest.mark.asyncio
+    async def test_edit_message_truncates_then_regenerates(self, client):
+        """编辑历史消息时，只保留其前文并以新问题重新生成。"""
+        transport = httpx.ASGITransport(app=client.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+            first = await http_client.post(
+                "/api/v1/chat",
+                json={"query": "旧问题", "session_id": "edit-session"},
+            )
+            assert first.status_code == 200
+            response = await http_client.post(
+                "/api/v1/chat",
+                json={
+                    "query": "新问题",
+                    "session_id": "edit-session",
+                    "replace_from_sequence": 0,
+                },
+            )
+
+        assert response.status_code == 200
+        messages = client.app.state.session._sessions["edit-session"].messages
+        assert messages[0]["content"] == "新问题"
+        assert all(message["content"] != "旧问题" for message in messages)
+
+    @pytest.mark.asyncio
+    async def test_edit_without_existing_session_returns_404(self, client):
+        transport = httpx.ASGITransport(app=client.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+            response = await http_client.post(
+                "/api/v1/chat",
+                json={"query": "新问题", "replace_from_sequence": 0},
+            )
+        assert response.status_code == 404
 
     def test_empty_query_rejected(self, client):
         """空 query → 400 (pydantic 校验 min_length=1)"""

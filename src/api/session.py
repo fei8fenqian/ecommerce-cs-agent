@@ -67,7 +67,17 @@ async def get_session(session_id: str, request: Request):
         title=session_ctx.title,
         created_at=session_ctx.created_at,
         last_active=session_ctx.last_active,
-        messages=session_ctx.messages,
+        messages=[
+            {
+                **message,
+                "sequence_no": (
+                    session_ctx.message_sequence_numbers[index]
+                    if index < len(session_ctx.message_sequence_numbers)
+                    else index
+                ),
+            }
+            for index, message in enumerate(session_ctx.messages)
+        ],
     )
 
 
