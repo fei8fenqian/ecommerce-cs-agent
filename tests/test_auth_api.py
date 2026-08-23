@@ -55,6 +55,7 @@ class TestLoginAPI:
         assert data["token"] == mock_token
         assert data["user"]["id"] == 1
         assert data["user"]["username"] == "admin"
+        assert data["user"]["role"] == "admin"
         # 不应暴露 password_hash
         assert "password_hash" not in data.get("user", {})
 

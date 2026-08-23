@@ -29,7 +29,12 @@ async def login(login_req: LoginRequest):
     return JSONResponse(
         content={
             "token": token,
-            "user": {"id": user.get("id"), "username": user.get("username")},
+            # 前端需要据此展示角色对应的工作台；不返回 password_hash 等账户敏感字段。
+            "user": {
+                "id": user.get("id"),
+                "username": user.get("username"),
+                "role": user.get("role"),
+            },
         },
         status_code=200,
     )

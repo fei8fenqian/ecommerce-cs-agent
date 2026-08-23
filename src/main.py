@@ -32,6 +32,7 @@ from api.errors import (
 )
 from api.health import health_router
 from api.metrics import metrics_router
+from api.products import product_router
 from api.session import session_router
 from api.tickets import ticket_router
 from config import settings
@@ -182,6 +183,7 @@ app.add_exception_handler(Exception, handle_unexpected_exception)
 app.include_router(chat_router)
 app.include_router(session_router)
 app.include_router(ticket_router)
+app.include_router(product_router)
 app.include_router(health_router)
 app.include_router(metrics_router)
 app.include_router(auth_router)
