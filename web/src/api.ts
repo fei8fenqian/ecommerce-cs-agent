@@ -55,6 +55,12 @@ export interface SessionItem {
   message_count: number;
 }
 
+export interface SessionDetail {
+  session_id: string;
+  title: string;
+  messages: Array<{ role: string; content?: string }>;
+}
+
 export interface Product {
   id: string;
   product_name: string;
@@ -182,6 +188,10 @@ export async function listMyOrders(token: string): Promise<CustomerOrder[]> {
 export async function listSessions(token: string): Promise<SessionItem[]> {
   const response = await api<{ sessions: SessionItem[] }>("/api/v1/sessions", {}, token);
   return response.sessions;
+}
+
+export function getSession(token: string, sessionId: string): Promise<SessionDetail> {
+  return api(`/api/v1/sessions/${encodeURIComponent(sessionId)}`, {}, token);
 }
 
 export async function listTickets(token: string): Promise<Ticket[]> {

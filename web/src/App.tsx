@@ -10,6 +10,7 @@ import {
   TicketMessage,
   claimTicket,
   createCustomerTicket,
+  getSession,
   getTicket,
   listSessions,
   listProducts,
@@ -146,6 +147,34 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
 
   useEffect(() => { void listSessions(auth.token).then(setSessions).catch(() => undefined); void refreshTickets().catch(() => undefined); }, [auth.token]);
 
+  const startNewChat = (): void => {
+    setPage("service");
+    setSessionId(undefined);
+    setChatMessages([]);
+    setQuery("");
+    setError("");
+  };
+
+  const openSession = async (nextSessionId: string): Promise<void> => {
+    if (busy) return;
+    setError("");
+    try {
+      const session = await getSession(auth.token, nextSessionId);
+      const restoredMessages = session.messages
+        .filter((message) => (message.role === "user" || message.role === "assistant") && Boolean(message.content))
+        .map((message, index) => ({
+          id: `history-${nextSessionId}-${index}`,
+          role: message.role as "user" | "assistant",
+          content: message.content ?? "",
+        }));
+      setSessionId(session.session_id);
+      setChatMessages(restoredMessages);
+      setPage("service");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "无法读取历史会话");
+    }
+  };
+
   const submitChat = async (event: FormEvent): Promise<void> => {
     event.preventDefault();
     const text = query.trim();
@@ -202,21 +231,29 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
     finally { setBusy(false); }
   };
 
-  return <Shell title="我的 AI 服务台" subtitle="先由智能客服处理；需要时，工单会进入客服协作流程。" auth={auth} onSignOut={onSignOut}>
-    <nav className="page-nav"><button className={page === "service" ? "active" : "secondary"} onClick={() => setPage("service")}>AI 服务</button><button className={page === "catalog" ? "active" : "secondary"} onClick={() => setPage("catalog")}>商品目录</button><button className={page === "orders" ? "active" : "secondary"} onClick={() => setPage("orders")}>我的订单</button></nav>
-    {page === "catalog" ? <ProductCatalog auth={auth} onAsk={(product) => { setPage("service"); setQuery(`我想了解 ${product.product_name}，请介绍它的配置、适用场景和库存情况。`); }} /> : page === "orders" ? <OrderList auth={auth} /> : <>
-    <div className="customer-grid">
-      <section className="panel chat-panel"><div className="section-title"><h2>智能客服</h2><span>{sessionId ? "当前会话" : "新会话"}</span></div>
-        <div className="chat-history">{chatMessages.length === 0 ? <p className="empty">告诉我你想查询的商品、订单或售后问题。</p> : chatMessages.map((message) => <article className={`bubble ${message.role}${!message.content ? " thinking" : ""}`} key={message.id}>{message.content || streamStatus || "正在思考…"}</article>)}</div>
-        <form className="composer" onSubmit={submitChat}><textarea value={query} onChange={(event) => setQuery(event.target.value)} placeholder="例如：帮我查一下订单物流" maxLength={2000} /><button disabled={busy}>{busy ? "生成中…" : "发送"}</button></form>
-      </section>
-      <aside className="side-stack"><section className="panel compact"><div className="section-title"><h2>历史会话</h2><span>{sessions.length}</span></div>{sessions.length ? sessions.slice(0, 6).map((session) => <button className="list-row" key={session.session_id} onClick={() => setSessionId(session.session_id)}><strong>{session.title || "未命名会话"}</strong><small>{session.message_count} 条消息</small></button>) : <p className="empty">暂时没有历史会话</p>}</section>
-      <section className="panel compact"><div className="section-title"><h2>我的工单</h2><span>{tickets.length}</span></div>{tickets.length ? tickets.map((ticket) => <button className="list-row" key={ticket.ticket_id} onClick={() => void openTicket(ticket.ticket_id)}><strong>{ticket.ticket_id}</strong><small>{ticket.status} · {ticket.urgency}</small></button>) : <p className="empty">暂时没有工单</p>}<form className="ticket-create" onSubmit={createTicket}><label>需要售后协助？</label><textarea value={newTicketIssue} onChange={(event) => setNewTicketIssue(event.target.value)} placeholder="直接描述问题，AI 会优先处理" maxLength={4000} /><button disabled={busy || !newTicketIssue.trim()}>提交工单</button></form></section></aside>
-    </div>
+  return <main className="customer-chat-app">
+    <aside className="chat-sidebar">
+      <div className="chat-brand"><span>G</span><strong>Geex AI</strong></div>
+      <button className="new-chat-button" onClick={startNewChat}>＋ 新建对话</button>
+      <nav className="chat-page-nav" aria-label="客户服务导航">
+        <button className={page === "service" ? "active" : "secondary"} onClick={() => setPage("service")}>✦ AI 服务</button>
+        <button className={page === "catalog" ? "active" : "secondary"} onClick={() => setPage("catalog")}>商品目录</button>
+        <button className={page === "orders" ? "active" : "secondary"} onClick={() => setPage("orders")}>我的订单</button>
+      </nav>
+      <section className="sidebar-sessions"><p className="sidebar-label">最近对话</p>{sessions.length ? sessions.slice(0, 10).map((session) => <button className={`session-row ${sessionId === session.session_id ? "active" : ""}`} key={session.session_id} onClick={() => void openSession(session.session_id)}><strong>{session.title || "新对话"}</strong><small>{session.message_count} 条消息</small></button>) : <p className="sidebar-empty">暂无历史对话</p>}</section>
+      <section className="sidebar-tickets"><p className="sidebar-label">我的工单</p>{tickets.slice(0, 3).map((ticket) => <button className="session-row" key={ticket.ticket_id} onClick={() => void openTicket(ticket.ticket_id)}><strong>{ticket.ticket_id}</strong><small>{ticket.status} · {ticket.urgency}</small></button>)}<form className="ticket-create" onSubmit={createTicket}><label>需要售后协助？</label><textarea value={newTicketIssue} onChange={(event) => setNewTicketIssue(event.target.value)} placeholder="描述问题，AI 会优先处理" maxLength={4000} /><button disabled={busy || !newTicketIssue.trim()}>提交工单</button></form></section>
+      <div className="chat-account"><span>{auth.user.username}</span><button className="text-button" onClick={() => void onSignOut()}>退出</button></div>
+    </aside>
+    <section className="chat-main">
+      <header className="chat-main-header"><div><strong>{page === "service" ? "智能客服" : page === "catalog" ? "商品目录" : "我的订单"}</strong><span>{page === "service" ? (sessionId ? "当前会话" : "新对话") : "Geex Digital"}</span></div><span className="role-badge">客户服务台</span></header>
+      {page === "catalog" ? <ProductCatalog auth={auth} onAsk={(product) => { setPage("service"); setQuery(`我想了解 ${product.product_name}，请介绍它的配置、适用场景和库存情况。`); }} /> : page === "orders" ? <OrderList auth={auth} /> : <section className="chat-canvas">
+        <div className="chat-history chatgpt-history">{chatMessages.length === 0 ? <div className="chat-welcome"><p className="eyebrow">GEEX DIGITAL · AI ASSISTANT</p><h1>今天想解决什么问题？</h1><p>我可以介绍商品、查询已归属订单，也能帮你发起售后工单。</p><div className="prompt-grid"><button className="prompt-card" onClick={() => setQuery("帮我推荐一台预算 5000 元左右的笔记本")}>推荐一台预算 5000 元的笔记本</button><button className="prompt-card" onClick={() => setQuery("帮我查询订单物流")}>查询我的订单物流</button><button className="prompt-card" onClick={() => setQuery("哪些手机目前有库存？")}>查询有库存的手机</button></div></div> : chatMessages.map((message) => <article className={`bubble ${message.role}${!message.content ? " thinking" : ""}`} key={message.id}><span className="message-avatar">{message.role === "user" ? auth.user.username.slice(0, 1).toUpperCase() : "G"}</span><div>{message.content || streamStatus || "正在思考…"}</div></article>)}</div>
+        <form className="composer chatgpt-composer" onSubmit={submitChat}><textarea value={query} onChange={(event) => setQuery(event.target.value)} placeholder="给 Geex AI 发送消息" maxLength={2000} rows={1} /><button aria-label="发送消息" disabled={busy || !query.trim()}>{busy ? "…" : "↑"}</button></form><p className="chat-disclaimer">AI 可能出错；订单和售后结果请以系统记录为准。</p>
+      </section>}
+    </section>
     {selectedTicket && <TicketConversation title={`工单 ${selectedTicket.ticket_id}`} messages={ticketMessages} error={error} onClose={() => setSelectedTicket(null)} composer={{ value: followUp, placeholder: "继续补充问题，AI 会重新处理未认领工单", submitLabel: "补充问题", disabled: busy, onChange: setFollowUp, onSubmit: submitFollowUp }} />}
     {error && <p className="toast error">{error}</p>}
-    </>}
-  </Shell>;
+  </main>;
 }
 
 function ProductCatalog({ auth, onAsk }: { auth: AuthState; onAsk: (product: Product) => void }) {
