@@ -1,4 +1,4 @@
-import { FormEvent, KeyboardEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -160,8 +160,22 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [streamStatus, setStreamStatus] = useState("");
+  const chatHistoryRef = useRef<HTMLDivElement>(null);
+  const smoothScrollOnNextMessageRef = useRef(false);
 
   useEffect(() => { void listSessions(auth.token).then(setSessions).catch(() => undefined); }, [auth.token]);
+
+  useEffect(() => {
+    if (!busy || chatMessages.length === 0) return;
+    const frame = window.requestAnimationFrame(() => {
+      chatHistoryRef.current?.scrollTo({
+        top: chatHistoryRef.current.scrollHeight,
+        behavior: smoothScrollOnNextMessageRef.current ? "smooth" : "auto",
+      });
+      smoothScrollOnNextMessageRef.current = false;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [busy, chatMessages]);
 
   const startNewChat = (): void => {
     setPage("service");
@@ -194,6 +208,8 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
   const submitChatMessage = async (): Promise<void> => {
     const text = query.trim();
     if (!text || busy) return;
+    // 用户发送后将当前会话平滑带到新消息；后续 SSE token 继续贴住最新回复。
+    smoothScrollOnNextMessageRef.current = true;
     setBusy(true); setError(""); setStreamStatus("正在思考…"); setQuery("");
     const assistantId = `assistant-${Date.now()}`;
     setChatMessages((items) => [...items, { id: `user-${Date.now()}`, role: "user", content: text }, { id: assistantId, role: "assistant", content: "" }]);
@@ -251,7 +267,7 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
     <section className="chat-main">
       <header className="chat-main-header"><div><strong>{page === "service" ? "智能客服" : page === "catalog" ? "商品目录" : "我的订单"}</strong><span>{page === "service" ? (sessionId ? "当前会话" : "新对话") : "Geex Digital"}</span></div><span className="role-badge">客户服务台</span></header>
       {page === "catalog" ? <ProductCatalog auth={auth} onAsk={(product) => { setPage("service"); setQuery(`我想了解 ${product.product_name}，请介绍它的配置、适用场景和库存情况。`); }} /> : page === "orders" ? <OrderList auth={auth} /> : <section className="chat-canvas">
-        <div className="chat-history chatgpt-history">{chatMessages.length === 0 ? <div className="chat-welcome"><p className="eyebrow">GEEX DIGITAL · AI ASSISTANT</p><h1>今天想解决什么问题？</h1><p>我可以介绍商品、查询已归属订单，也能帮你发起售后工单。</p><div className="prompt-grid"><button className="prompt-card" onClick={() => setQuery("帮我推荐一台预算 5000 元左右的笔记本")}>推荐一台预算 5000 元的笔记本</button><button className="prompt-card" onClick={() => setQuery("帮我查询订单物流")}>查询我的订单物流</button><button className="prompt-card" onClick={() => setQuery("哪些手机目前有库存？")}>查询有库存的手机</button></div></div> : chatMessages.map((message) => <article className={`bubble ${message.role}${!message.content ? " thinking" : ""}`} key={message.id}><div className="message-content">{message.content ? message.role === "assistant" ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown> : message.content : streamStatus || "正在思考…"}</div></article>)}</div>
+        <div ref={chatHistoryRef} className="chat-history chatgpt-history">{chatMessages.length === 0 ? <div className="chat-welcome"><p className="eyebrow">GEEX DIGITAL · AI ASSISTANT</p><h1>今天想解决什么问题？</h1><p>我可以介绍商品、查询已归属订单，也能帮你发起售后工单。</p><div className="prompt-grid"><button className="prompt-card" onClick={() => setQuery("帮我推荐一台预算 5000 元左右的笔记本")}>推荐一台预算 5000 元的笔记本</button><button className="prompt-card" onClick={() => setQuery("帮我查询订单物流")}>查询我的订单物流</button><button className="prompt-card" onClick={() => setQuery("哪些手机目前有库存？")}>查询有库存的手机</button></div></div> : chatMessages.map((message) => <article className={`bubble ${message.role}${!message.content ? " thinking" : ""}`} key={message.id}><div className="message-content">{message.content ? message.role === "assistant" ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown> : message.content : streamStatus || "正在思考…"}</div></article>)}</div>
         <form className="composer chatgpt-composer" onSubmit={submitChat}><textarea value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={handleChatKeyDown} placeholder="给 Geex AI 发送消息" maxLength={2000} rows={1} /><button aria-label="发送消息" disabled={busy || !query.trim()}>{busy ? "…" : "↑"}</button></form><p className="chat-disclaimer">Enter 发送 · Shift / Alt + Enter 换行</p>
       </section>}
     </section>
