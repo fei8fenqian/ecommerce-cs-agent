@@ -36,6 +36,7 @@ class Settings(BaseSettings):
 
     # ---- Embedding 模型 ----
     embedding_model: str = "BAAI/bge-large-zh-v1.5"
+    rag_device: str = "auto"  # auto | cpu | cuda | cuda:0
     embedding_dim: int = Field(
         default=1024,
         frozen=True,

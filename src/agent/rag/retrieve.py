@@ -13,6 +13,7 @@ from agent.rag.rerank import rerank
 from agent.rag.rrf import rrf_fuse
 from config import settings
 from infra.db_pool import get_connection, put_connection
+from infra.model_device import resolve_model_device
 
 _model: SentenceTransformer | None = None
 
@@ -21,7 +22,10 @@ def _get_model() -> SentenceTransformer:
     """首次实际向量检索时加载 Embedding 模型。"""
     global _model
     if _model is None:
-        _model = SentenceTransformer(settings.embedding_model)
+        _model = SentenceTransformer(
+            settings.embedding_model,
+            device=resolve_model_device(settings.rag_device),
+        )
     return _model
 
 
