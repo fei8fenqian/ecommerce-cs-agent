@@ -101,7 +101,21 @@ async def lifespan(app: FastAPI):
         stream_timeout=settings.llm_stream_timeout_seconds,
         circuit_breaker=llm_circuit_breaker,
     )
-    intent_router = IntentRouter(llm)
+    intent_llm = LLMClient(
+        api_key=settings.llm_api_key.get_secret_value(),
+        base_url=settings.llm_base_url,
+        model=settings.intent_llm_model,
+        timeout=settings.llm_timeout_seconds,
+        max_attempts=settings.llm_max_attempts,
+        retry_backoff_seconds=settings.llm_retry_backoff_seconds,
+        sdk_max_retries=settings.llm_sdk_max_retries,
+        stream_timeout=settings.llm_stream_timeout_seconds,
+        circuit_breaker=CircuitBreaker(
+            failure_threshold=settings.llm_circuit_failure_threshold,
+            open_seconds=settings.llm_circuit_open_seconds,
+        ),
+    )
+    intent_router = IntentRouter(intent_llm)
     registry = ToolRegistry()
     registry.register(search_product.SearchProduct())
     registry.register(check_stock.CheckStock())
@@ -140,6 +154,7 @@ async def lifespan(app: FastAPI):
             await manager.disconnect()
 
     app.state.llm_client = llm
+    app.state.intent_llm_client = intent_llm
     app.state.intent_router = intent_router
     app.state.registry = registry
     app.state.plan_execute_agent = plan_execute_agent

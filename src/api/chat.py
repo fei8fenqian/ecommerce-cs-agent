@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 import time
 
 from fastapi import APIRouter, HTTPException, Request
@@ -57,6 +58,20 @@ def _build_context(docs: list[dict]) -> str:
     return "\n-----\n".join(lines)
 
 
+def _should_rerank(query: str, table: str) -> bool:
+    """仅在精排确实能改善答案时承担额外 CPU 延迟。
+
+    商品单品咨询、参数查询和预算推荐首先要求快速出首字；向量检索与 BM25 融合
+    已足够作为候选。明确比较多个商品时，才为笔记本/手机启用交叉编码精排。
+    政策和组件类问题则保留精排，以降低把不相关依据带入回答的概率。
+    """
+    if table in {"laptop_products", "phone_products"}:
+        comparison_markers = ("对比", "区别", "哪个好", "哪款", " versus ", " vs ", "和")
+        normalized_query = f" {query.lower()} "
+        return any(re.search(re.escape(marker), normalized_query) for marker in comparison_markers)
+    return True
+
+
 @chat_router.post("/chat", response_model=ChatResponse)
 async def chat(chat_req: ChatRequest, request: Request):
     try:
@@ -98,7 +113,11 @@ async def chat(chat_req: ChatRequest, request: Request):
                 total_tokens=plan_state.get("total_tokens", 0),
             )
         elif intent.target == "rag":
-            docs = await hybrid_search(resolved_query, table=intent.table)
+            docs = await hybrid_search(
+                resolved_query,
+                table=intent.table,
+                use_rerank=_should_rerank(resolved_query, intent.table),
+            )
             context = _build_context(docs)
             loop_result = await agent.run(
                 resolved_query,
@@ -160,7 +179,11 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
         intent = await intent_router.route(resolve_query)
         context = ""
         if intent.target == "rag":
-            docs = await hybrid_search(resolve_query, table=intent.table)
+            docs = await hybrid_search(
+                resolve_query,
+                table=intent.table,
+                use_rerank=_should_rerank(resolve_query, intent.table),
+            )
             context = _build_context(docs)
     except DependencyUnavailableError:
         raise

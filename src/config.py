@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     llm_api_key: SecretStr = SecretStr("")
     llm_base_url: str = "https://api.deepseek.com/v1"
     llm_model: str = "deepseek-chat"
+    intent_llm_model: str = "deepseek-chat"
     llm_timeout_seconds: float = Field(default=10.0, gt=0, description="LLM 单次请求超时(秒)")
     llm_max_attempts: int = Field(default=2, ge=1, description="LLM 整个调用最多尝试次数")
     llm_retry_backoff_seconds: float = Field(default=0.5, ge=0, description="LLM 重试退避基数(秒)")
