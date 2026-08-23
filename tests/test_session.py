@@ -7,11 +7,7 @@ import pytest_asyncio
 
 from agent.engines.loop import LoopResult, StepResult
 from agent.llm.llm_client import ToolCall
-from agent.llm.resolve import (
-    build_ambiguous_follow_up_clarification,
-    resolve_pronouns,
-    resolve_stock_follow_up,
-)
+from agent.llm.resolve import resolve_pronouns, resolve_stock_follow_up
 from agent.llm.session import SessionContext, SessionManager
 from infra.db_pool import close_pool, get_connection, init_pool, put_connection
 
@@ -84,13 +80,18 @@ class TestResolvePronouns:
         )
         assert result == "需要"
 
-    def test_ambiguous_confirmation_keeps_recommendation_context(self):
-        result = build_ambiguous_follow_up_clarification(
+    def test_stock_confirmation_uses_recommendation_when_entity_is_missing(self):
+        result = resolve_stock_follow_up(
             "需要",
-            {"product": "微星魔影15"},
-            [{"role": "assistant", "content": "需要我帮你对比其他型号或查询库存吗？"}],
+            {},
+            [
+                {
+                    "role": "assistant",
+                    "content": "首选推荐：微星魔影15（i7/RTX4070）\n需要我帮你对比其他型号或查询库存吗？",
+                }
+            ],
         )
-        assert result == "可以。你是希望我查询 “微星魔影15” 的实时库存，还是把它和其他游戏本做一次对比？"
+        assert result == "查询 微星魔影15 的实时库存"
 
     def test_replace_ta_male(self):
         result = resolve_pronouns("他有什么颜色", {"product": "iPhone 15"})

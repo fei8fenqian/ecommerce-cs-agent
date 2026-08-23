@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from agent.engines.loop import LoopResult
-from agent.llm.resolve import build_ambiguous_follow_up_clarification, resolve_stock_follow_up
+from agent.llm.resolve import resolve_stock_follow_up
 from agent.llm.sentiment import build_escalation_prompt, detect_sentiment
 from agent.rag.retrieve import hybrid_search
 from agent.tools_registry import ToolContext
@@ -115,20 +115,6 @@ async def chat(chat_req: ChatRequest, request: Request):
             ctx.last_entities,
             ctx.history,
         )
-        clarification = build_ambiguous_follow_up_clarification(
-            chat_req.query,
-            ctx.last_entities,
-            ctx.history,
-        )
-        if clarification is not None:
-            await session.add_turn_simple(ctx.session_id, user_id, chat_req.query, clarification)
-            return ChatResponse(
-                answer=clarification,
-                session_id=ctx.session_id,
-                total_steps=0,
-                total_tokens=0,
-            )
-
         # 单次轻量调用同时完成上下文 query 重写和意图路由，不增加额外模型往返。
         intent = await intent_router.route(resolved_query, history=ctx.history)
         effective_query = intent.query or resolved_query
@@ -229,28 +215,6 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
             session_ctx.last_entities,
             history,
         )
-        clarification = build_ambiguous_follow_up_clarification(
-            chat_req.query,
-            session_ctx.last_entities,
-            history,
-        )
-        if clarification is not None:
-
-            async def generate_clarification():
-                start_event = {"event": "start", "session_id": session_id}
-                token_event = {"event": "token", "content": clarification}
-                done_event = {
-                    "event": "done",
-                    "answer": clarification,
-                    "total_steps": 0,
-                }
-                yield f"data: {json.dumps(start_event, ensure_ascii=False)}\n\n"
-                yield f"data: {json.dumps(token_event, ensure_ascii=False)}\n\n"
-                yield f"data: {json.dumps(done_event, ensure_ascii=False)}\n\n"
-                await session.add_turn_simple(session_id, user_id, chat_req.query, clarification)
-
-            return StreamingResponse(content=generate_clarification(), media_type="text/event-stream")
-
         intent = await intent_router.route(resolve_query, history=history)
         effective_query = intent.query or resolve_query
         sentiment = detect_sentiment(effective_query, history=history)

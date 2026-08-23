@@ -286,19 +286,27 @@ class TestChatEndpoint:
         assert response.status_code == 404
 
     @pytest.mark.asyncio
-    async def test_short_confirmation_gets_targeted_clarification(self, client):
-        """“需要”不能丢失上轮的库存/对比语境并退回通用菜单。"""
+    async def test_short_confirmation_defaults_to_stock_lookup(self, client):
+        """“需要”默认执行上一轮推荐中已提出的库存查询。"""
         session = client.app.state.session
         session._sessions["follow-up-session"] = SessionContext(
             session_id="follow-up-session",
             messages=[
                 {
                     "role": "assistant",
-                    "content": "需要我帮你对比其他型号或查询库存吗？",
+                    "content": "首选推荐：微星魔影15（i7/RTX4070）\n需要我帮你对比其他型号或查询库存吗？",
                 }
             ],
             last_entities={"product": "微星魔影15"},
         )
+        route = AsyncMock(
+            return_value=Intent(
+                target="agent",
+                query="查询 微星魔影15 的实时库存",
+                confidence=1.0,
+            )
+        )
+        client.app.state.intent_router.route = route
         transport = httpx.ASGITransport(app=client.app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
             response = await http_client.post(
@@ -307,9 +315,9 @@ class TestChatEndpoint:
             )
 
         assert response.status_code == 200
-        assert (
-            response.json()["answer"]
-            == "可以。你是希望我查询 “微星魔影15” 的实时库存，还是把它和其他游戏本做一次对比？"
+        route.assert_awaited_once_with(
+            "查询 微星魔影15 的实时库存",
+            history=session._sessions["follow-up-session"].history,
         )
 
     def test_empty_query_rejected(self, client):
@@ -346,20 +354,27 @@ class TestChatEndpoint:
 # =============================================================================
 class TestChatStreamEndpoint:
     @pytest.mark.asyncio
-    async def test_stream_short_confirmation_keeps_targeted_context(self, client):
-        """短确认直接得到上轮相关澄清，不再调用 Agent 输出通用菜单。"""
+    async def test_stream_short_confirmation_defaults_to_stock_lookup(self, client):
+        """短确认在流式路径也会直接进入库存查询。"""
         session = client.app.state.session
         session._sessions["stream-follow-up"] = SessionContext(
             session_id="stream-follow-up",
             messages=[
                 {
                     "role": "assistant",
-                    "content": "需要我帮你对比其他型号或查询库存吗？",
+                    "content": "首选推荐：微星魔影15（i7/RTX4070）\n需要我帮你对比其他型号或查询库存吗？",
                 }
             ],
             last_entities={"product": "微星魔影15"},
         )
-        client.app.state.agent.run_stream = AsyncMock()
+        route = AsyncMock(
+            return_value=Intent(
+                target="agent",
+                query="查询 微星魔影15 的实时库存",
+                confidence=1.0,
+            )
+        )
+        client.app.state.intent_router.route = route
 
         transport = httpx.ASGITransport(app=client.app, raise_app_exceptions=False)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
@@ -369,9 +384,10 @@ class TestChatStreamEndpoint:
             )
 
         assert response.status_code == 200
-        assert "微星魔影15” 的实时库存" in response.text
-        assert "其他游戏本做一次对比" in response.text
-        client.app.state.agent.run_stream.assert_not_awaited()
+        route.assert_awaited_once_with(
+            "查询 微星魔影15 的实时库存",
+            history=session._sessions["stream-follow-up"].history,
+        )
 
     @pytest.mark.asyncio
     async def test_stream_cancellation_does_not_continue_or_save(self, client):

@@ -4,6 +4,8 @@
 规则做指代消解，比 LLM 快且确定。
 """
 
+import re
+
 PRONOUN_MAP: dict[str, str] = {
     "它": "product",
     "他": "product",
@@ -20,7 +22,6 @@ PRONOUN_MAP: dict[str, str] = {
 
 _IMPLICIT_PRODUCT_ACTIONS = ("下单", "购买", "买下", "就买", "要这个")
 _STOCK_CONFIRMATIONS = frozenset({"需要", "要", "查一下", "查下", "查询一下", "好的，需要", "好的，查一下"})
-_SHORT_CONFIRMATIONS = _STOCK_CONFIRMATIONS | frozenset({"好", "好的", "可以", "可以的", "好啊"})
 
 
 def resolve_pronouns(query: str, entities: dict[str, str]) -> str:
@@ -54,8 +55,7 @@ def resolve_stock_follow_up(
         能确定上下文时返回完整库存查询；其他情况保持用户原话。
     """
     normalized = "".join(query.split()).lower()
-    product = entities.get("product", "").strip()
-    if normalized not in _STOCK_CONFIRMATIONS or not product:
+    if normalized not in _STOCK_CONFIRMATIONS:
         return query
 
     for message in reversed(history):
@@ -63,36 +63,15 @@ def resolve_stock_follow_up(
             continue
         content = message.get("content")
         if isinstance(content, str) and "库存" in content and "查询" in content:
-            return f"查询 {product} 的实时库存"
+            product = entities.get("product", "").strip() or _extract_recommended_product(content)
+            return f"查询 {product or '上轮首选机型'} 的实时库存"
         break
     return query
 
 
-def build_ambiguous_follow_up_clarification(
-    query: str,
-    entities: dict[str, str],
-    history: list[dict[str, object]],
-) -> str | None:
-    """为“需要”这类短确认保留上一轮业务语境，而不是回到通用菜单。
-
-    当客服上一句同时提出“查库存”和“产品对比”两项服务时，用户的短确认没有
-    足够信息选择其中之一。此处返回一个与当前推荐有关的澄清问题，调用方可直接
-    保存并发送，不需要再交给意图分类模型猜测。
-    """
-    normalized = "".join(query.split()).lower()
-    if normalized not in _SHORT_CONFIRMATIONS:
-        return None
-
-    for message in reversed(history):
-        if message.get("role") != "assistant":
-            continue
-        content = message.get("content")
-        if not isinstance(content, str):
-            return None
-        recent_reply = content[-320:]
-        if "库存" not in recent_reply or "对比" not in recent_reply:
-            return None
-        product = entities.get("product", "").strip()
-        product_label = f"“{product}”" if product else "上面首选机型"
-        return f"可以。你是希望我查询 {product_label} 的实时库存，还是把它和其他游戏本做一次对比？"
-    return None
+def _extract_recommended_product(reply: str) -> str:
+    """从客服刚给出的推荐中提取首选商品，作为短确认的默认操作对象。"""
+    match = re.search(r"(?:首选推荐|推荐首选|首推|首选)\s*[：:]\s*([^\n（(]+)", reply)
+    if match is None:
+        return ""
+    return match.group(1).strip().strip("* ")
