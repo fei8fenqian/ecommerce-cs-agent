@@ -187,17 +187,19 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
   const [editingValue, setEditingValue] = useState("");
   const chatHistoryRef = useRef<HTMLDivElement>(null);
   const smoothScrollOnNextMessageRef = useRef(false);
+  const scrollToOpenedSessionRef = useRef(false);
 
   useEffect(() => { void listSessions(auth.token).then(setSessions).catch(() => undefined); }, [auth.token]);
 
   useEffect(() => {
-    if (!busy || chatMessages.length === 0) return;
+    if (chatMessages.length === 0 || (!busy && !scrollToOpenedSessionRef.current)) return;
     const frame = window.requestAnimationFrame(() => {
       chatHistoryRef.current?.scrollTo({
         top: chatHistoryRef.current.scrollHeight,
         behavior: smoothScrollOnNextMessageRef.current ? "smooth" : "auto",
       });
       smoothScrollOnNextMessageRef.current = false;
+      scrollToOpenedSessionRef.current = false;
     });
     return () => window.cancelAnimationFrame(frame);
   }, [busy, chatMessages]);
@@ -220,6 +222,7 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
       setSessionId(session.session_id);
       setChatMessages(restoredMessages);
       setPage("service");
+      scrollToOpenedSessionRef.current = true;
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "无法读取历史会话");
     }
@@ -243,8 +246,11 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
     try {
       await streamChat(auth.token, text, sessionId, (event) => {
         if (event.event === "start") {
-          activeSessionId = event.session_id;
-          setSessionId(event.session_id); setStreamStatus("正在思考…"); return;
+          if (event.session_id) {
+            activeSessionId = event.session_id;
+            setSessionId(event.session_id);
+          }
+          setStreamStatus("正在思考…"); return;
         }
         if (event.event === "tool_call") { setStreamStatus("正在思考…"); return; }
         if (event.event === "token") {
