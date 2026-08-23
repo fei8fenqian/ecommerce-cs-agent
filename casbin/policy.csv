@@ -1,5 +1,6 @@
 # ========== customer (external) ==========
 p, customer, /api/v1/chat, POST
+p, customer, /api/v1/products, GET
 p, customer, /api/v1/products/*, GET
 p, customer, /api/v1/orders/my, GET
 p, customer, /api/v1/orders/my/*, GET
@@ -10,6 +11,7 @@ p, customer, /api/v1/tickets/*/customer-messages, POST
 
 # ========== agent (internal) ==========
 p, agent, /api/v1/chat, POST
+p, agent, /api/v1/products, GET
 p, agent, /api/v1/products/*, GET
 p, agent, /api/v1/orders/my/*, GET
 p, agent, /api/v1/tickets, GET
@@ -22,6 +24,7 @@ p, agent, /api/v1/orders/*, GET
 
 # ========== operator (internal) ==========
 p, operator, /api/v1/chat, POST
+p, operator, /api/v1/products, GET
 p, operator, /api/v1/products/*, GET
 p, operator, /api/v1/orders/my/*, GET
 p, operator, /api/v1/orders/*, GET

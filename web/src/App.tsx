@@ -63,6 +63,7 @@ export function App() {
   if (!auth) return <LoginPage onSignedIn={onSignedIn} />;
   if (auth.user.role === "customer") return <CustomerWorkspace auth={auth} onSignOut={onSignOut} />;
   if (auth.user.role === "agent") return <AgentWorkspace auth={auth} onSignOut={onSignOut} />;
+  if (auth.user.role === "operator") return <OperatorWorkspace auth={auth} onSignOut={onSignOut} />;
   return <UnavailableWorkspace auth={auth} onSignOut={onSignOut} />;
 }
 
@@ -230,6 +231,55 @@ function OrderList({ auth }: { auth: AuthState }) {
   useEffect(() => { void load(); }, [auth.token]);
 
   return <section className="orders panel"><div className="section-title"><div><p className="eyebrow">MY ORDERS</p><h2>我的订单</h2><p className="muted">只显示已完成账户归属确认的订单。</p></div><button className="secondary" onClick={() => void load()}>刷新</button></div>{error && <p className="error">{error}</p>}{loading ? <p className="empty">正在读取订单…</p> : orders.length ? <div className="order-list">{orders.map((order) => <article className="order-card" key={order.order_id}><header><div><strong>{order.order_id}</strong><small>{formatDate(order.order_date)}</small></div><span className="status">{order.status || "处理中"}</span></header><div className="order-products">{order.items.slice(0, expandedOrder === order.order_id ? undefined : 2).map((item, index) => <p key={index}>{item.brand ? `${item.brand} · ` : ""}{item.product_name}<span>×{item.quantity ?? 1}</span></p>)}</div><footer><div><strong>实付 ¥{order.paid_amount.toLocaleString("zh-CN")}</strong><small>{order.tracking.company && order.tracking.number ? `${order.tracking.company} · ${order.tracking.number}` : "暂无物流信息"}</small></div>{order.items.length > 2 && <button className="secondary" onClick={() => setExpandedOrder(expandedOrder === order.order_id ? null : order.order_id)}>{expandedOrder === order.order_id ? "收起" : `查看 ${order.items.length} 件商品`}</button>}</footer></article>)}</div> : <p className="empty">暂无已归属订单。历史订单无法核验时不会在这里展示。</p>}</section>;
+}
+
+/** 运营只读库存台：用已存在商品表展示业务事实，再把分析工作交给现有 Agent。 */
+function OperatorWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: () => Promise<void> }) {
+  const [products, setProducts] = useState<Product[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [question, setQuestion] = useState("");
+  const [answer, setAnswer] = useState("");
+  const [running, setRunning] = useState(false);
+
+  const load = async (): Promise<void> => {
+    setLoading(true); setError("");
+    try {
+      const [laptops, phones] = await Promise.all([listProducts(auth.token, "laptops"), listProducts(auth.token, "phones")]);
+      setProducts([...laptops, ...phones]);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "库存目录暂时不可用"); }
+    finally { setLoading(false); }
+  };
+  useEffect(() => { void load(); }, [auth.token]);
+
+  const askAgent = async (event: FormEvent): Promise<void> => {
+    event.preventDefault();
+    const text = question.trim();
+    if (!text || running) return;
+    setRunning(true); setAnswer(""); setError("");
+    try {
+      await streamChat(auth.token, text, undefined, (event) => {
+        if (event.event === "token") setAnswer((value) => value + (event.content ?? ""));
+        if (event.event === "done" && !answer) setAnswer(event.answer ?? event.data?.answer ?? "");
+      });
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "运营 Agent 暂时不可用"); }
+    finally { setRunning(false); }
+  };
+
+  const totalStock = products.reduce((total, product) => total + product.stock, 0);
+  const lowStock = products.filter((product) => product.stock > 0 && product.stock <= 5);
+  const outOfStock = products.filter((product) => product.stock <= 0);
+
+  return <Shell title="运营 AI 工作台" subtitle="基于当前商品与库存事实，快速发现缺货风险并向 Agent 查询运营问题。" auth={auth} onSignOut={onSignOut}>
+    <section className="metric-grid"><Metric label="目录 SKU" value={loading ? "—" : String(products.length)} /><Metric label="可用库存" value={loading ? "—" : String(totalStock)} /><Metric label="低库存 SKU" value={loading ? "—" : String(lowStock.length)} tone="warning" /><Metric label="缺货 SKU" value={loading ? "—" : String(outOfStock.length)} tone="danger" /></section>
+    <div className="operator-grid"><section className="panel inventory-panel"><div className="section-title"><div><p className="eyebrow">INVENTORY OVERVIEW</p><h2>库存概览</h2></div><button className="secondary" onClick={() => void load()}>刷新</button></div>{error && <p className="error">{error}</p>}{loading ? <p className="empty">正在读取商品库存…</p> : <div className="inventory-list">{[...lowStock, ...outOfStock].length ? [...lowStock, ...outOfStock].map((product) => <article key={product.id} className="inventory-row"><div><strong>{product.product_name}</strong><small>{product.brand} · {product.warehouse || "未标注仓库"}</small></div><span className={product.stock > 0 ? "stock-low" : "stock-empty"}>{product.stock > 0 ? `仅剩 ${product.stock}` : "已缺货"}</span></article>) : <p className="empty">当前目录没有低库存或缺货商品。</p>}</div>}</section>
+      <section className="panel operator-ai"><p className="eyebrow">OPERATOR AGENT</p><h2>让 Agent 分析运营问题</h2><p className="muted">例如：哪些商品库存偏低？适合推荐什么替代型号？</p><form className="form-stack" onSubmit={askAgent}><textarea value={question} onChange={(event) => setQuestion(event.target.value)} maxLength={2000} placeholder="输入运营问题" /><button disabled={running}>{running ? "Agent 分析中…" : "开始分析"}</button></form>{(answer || running) && <article className="agent-answer">{answer || "正在分析商品、知识库和可用工具…"}</article>}</section>
+    </div>
+  </Shell>;
+}
+
+function Metric({ label, value, tone = "normal" }: { label: string; value: string; tone?: "normal" | "warning" | "danger" }) {
+  return <article className={`metric ${tone}`}><span>{label}</span><strong>{value}</strong></article>;
 }
 
 function AgentWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: () => Promise<void> }) {

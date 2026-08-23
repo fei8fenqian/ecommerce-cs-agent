@@ -15,6 +15,7 @@ class TestCustomer:
         assert enforce("customer", "/api/v1/chat", "POST")
 
     def test_can_view_products(self):
+        assert enforce("customer", "/api/v1/products", "GET")
         assert enforce("customer", "/api/v1/products/123", "GET")
 
     def test_can_view_own_orders(self):
@@ -57,6 +58,9 @@ class TestAgent:
 
 
 class TestOperator:
+    def test_can_view_product_catalog(self):
+        assert enforce("operator", "/api/v1/products", "GET")
+
     def test_can_manage_products(self):
         assert enforce("operator", "/api/v1/products/123", "POST")
         assert enforce("operator", "/api/v1/products/123", "PUT")
