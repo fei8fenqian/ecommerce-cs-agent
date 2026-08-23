@@ -46,6 +46,34 @@ async def insert_users(username: str, password_hash: str, role: str):
         await put_connection(conn)
 
 
+async def create_customer(username: str, password_hash: str) -> dict[str, Any] | None:
+    """创建一个外部客户账号。
+
+    角色在 Store 层固定为 customer，公开注册路径不能借参数创建内部身份。
+
+    Returns:
+        新账号的最小身份信息；用户名已存在时返回 None。
+    """
+    connection = await get_connection()
+    try:
+        await connection.set_autocommit(True)
+        cursor = await connection.execute(
+            """
+            INSERT INTO public.users (username, password_hash, role)
+            VALUES (%s, %s, 'customer')
+            ON CONFLICT (username) DO NOTHING
+            RETURNING id, username, role
+            """,
+            (username, password_hash),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return {"id": row[0], "username": row[1], "role": row[2]}
+    finally:
+        await put_connection(connection)
+
+
 async def update_users(id: int, fields: dict[str, Any]):
     """修改用户信息"""
     set_parts: list = []

@@ -103,6 +103,13 @@ export async function signIn(username: string, password: string): Promise<AuthSt
   });
 }
 
+export async function register(username: string, password: string): Promise<AuthState> {
+  return api<AuthState>("/api/v1/auth/register", {
+    method: "POST",
+    body: JSON.stringify({ username, password }),
+  });
+}
+
 export function signOut(token: string): Promise<{ message: string }> {
   return api("/api/v1/auth/logout", { method: "POST" }, token);
 }

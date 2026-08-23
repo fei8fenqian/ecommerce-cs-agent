@@ -5,9 +5,9 @@ from redis.exceptions import RedisError
 
 from exceptions import AuthenticationError, DependencyUnavailableError
 from infra.redis_client import get_redis
-from store.user_store import get_user_by_id, get_user_by_username
+from store.user_store import create_customer, get_user_by_id, get_user_by_username
 from utils.jwt_utils import generate_jwt, parse_jwt
-from utils.password_utils import verify_hashed_password
+from utils.password_utils import generate_hashed_password, verify_hashed_password
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +65,27 @@ async def login(username: str, password: str) -> tuple[str, dict]:
     user_info.pop("password_hash", None)
     logger.info("login success")
     return token, user_info
+
+
+async def register_customer(username: str, password: str) -> tuple[str, dict] | None:
+    """注册外部客户账号并建立登录会话。
+
+    Args:
+        username: 已由 API 层校验格式的账号名。
+        password: 仅在内存中使用的明文密码。
+
+    Returns:
+        登录 token 与最小身份信息；账号名已存在时返回 None。
+
+    Raises:
+        DependencyUnavailableError: 账号创建后 Redis 不可用时，客户端可改为登录重试。
+    """
+    password_hash = generate_hashed_password(password).decode()
+    user = await create_customer(username, password_hash)
+    if user is None:
+        return None
+    # 复用统一登录逻辑，避免注册与登录生成不同的 token / Redis 语义。
+    return await login(username, password)
 
 
 async def logout(token: str) -> None:

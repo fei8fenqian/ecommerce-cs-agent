@@ -5,6 +5,7 @@ button, input, textarea { font: inherit; }
 button { border: 0; border-radius: 10px; background: #2457ef; color: white; padding: 10px 15px; cursor: pointer; font-weight: 650; }
 button:disabled { cursor: not-allowed; opacity: .6; }
 button.secondary { background: #edf1fc; color: #31509e; }
+button.text-button { display: inline; padding: 0; color: #2457ef; background: transparent; border-radius: 0; font-size: inherit; }
 textarea, input { border: 1px solid #d6deef; border-radius: 9px; background: white; padding: 11px; width: 100%; outline-color: #2457ef; }
 h1, h2, p { margin-top: 0; } h1 { margin-bottom: 6px; font-size: 28px; } h2 { margin-bottom: 4px; font-size: 18px; }.muted, .hint { color: #71809b; }.eyebrow { color: #5171ca; font-size: 11px; font-weight: 800; letter-spacing: .13em; margin-bottom: 8px; }.error { color: #c32f45; }.empty { color: #8290a7; padding: 18px 0; }.hint { font-size: 12px; }
 .login-page { min-height: 100vh; display: grid; place-items: center; padding: 24px; background: radial-gradient(circle at 18% 15%, #dbe7ff, transparent 35%), linear-gradient(135deg, #f7f9ff, #eef3ff); }.login-card { width: min(440px, 100%); background: rgba(255,255,255,.92); padding: 40px; box-shadow: 0 20px 50px #234b9f21; border-radius: 20px; }.form-stack { display: grid; gap: 15px; margin-top: 28px; }.form-stack label { display: grid; gap: 7px; color: #40516e; font-size: 14px; }

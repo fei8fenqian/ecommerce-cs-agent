@@ -12,6 +12,7 @@ from service.auth_service import verify_token
 ALLOWLIST_PATHS = {
     "/health",
     "/api/v1/auth/login",
+    "/api/v1/auth/register",
     "/internal/metrics",
     "/docs",
     "/openapi.json",

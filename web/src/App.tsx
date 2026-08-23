@@ -16,6 +16,7 @@ import {
   listTicketMessages,
   listTickets,
   requestReplyDraft,
+  register,
   sendAgentTicketMessage,
   sendChat,
   sendCustomerTicketMessage,
@@ -66,6 +67,7 @@ export function App() {
 }
 
 function LoginPage({ onSignedIn }: { onSignedIn: (auth: AuthState) => void }) {
+  const [mode, setMode] = useState<"login" | "register">("login");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -76,7 +78,7 @@ function LoginPage({ onSignedIn }: { onSignedIn: (auth: AuthState) => void }) {
     setLoading(true);
     setError("");
     try {
-      onSignedIn(await signIn(username.trim(), password));
+      onSignedIn(mode === "login" ? await signIn(username.trim(), password) : await register(username.trim(), password));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "登录失败，请稍后重试");
     } finally {
@@ -88,15 +90,16 @@ function LoginPage({ onSignedIn }: { onSignedIn: (auth: AuthState) => void }) {
     <main className="login-page">
       <section className="login-card">
         <p className="eyebrow">GEEX DIGITAL · AI SERVICE DESK</p>
-        <h1>极客数码 AI 服务台</h1>
-        <p className="muted">客户咨询、智能处理与人工客服协作，都在同一个工作流内。</p>
+        <h1>{mode === "login" ? "欢迎回来" : "创建客户账号"}</h1>
+        <p className="muted">{mode === "login" ? "客户咨询、智能处理与人工客服协作，都在同一个工作流内。" : "注册后即可使用商品咨询、订单与工单服务。"}</p>
         <form onSubmit={submit} className="form-stack">
-          <label>账号<input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" required /></label>
-          <label>密码<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" required /></label>
+          <label>账号<input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" placeholder="3–64 位：字母、数字、_ 或 -" required /></label>
+          <label>密码<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={mode === "login" ? "current-password" : "new-password"} minLength={8} maxLength={72} required /></label>
           {error && <p className="error">{error}</p>}
-          <button disabled={loading}>{loading ? "登录中…" : "进入服务台"}</button>
+          <button disabled={loading}>{loading ? "处理中…" : mode === "login" ? "进入服务台" : "注册并进入服务台"}</button>
         </form>
-        <p className="hint">演示环境使用已有账号登录；页面不会保存密码。</p>
+        <p className="hint">{mode === "login" ? "还没有客户账号？" : "已有账号？"} <button className="text-button" onClick={() => { setError(""); setMode(mode === "login" ? "register" : "login"); }}>{mode === "login" ? "注册" : "登录"}</button></p>
+        <p className="hint">公开注册只会创建客户账号；页面不会保存密码。</p>
       </section>
     </main>
   );
