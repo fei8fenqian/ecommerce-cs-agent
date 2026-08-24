@@ -112,6 +112,9 @@ async def create_customer_ticket_message(
 ) -> dict[str, Any] | None:
     """写入客户追问，并重新激活尚未由人工认领的 AI 工单。
 
+    客户主动补充信息时，即使此前因信息不足进入待人工队列，也优先让 Agent
+    基于新信息再尝试一次；已被人工认领的工单绝不改回 AI 队列。
+
     Returns:
         新消息；若工单不存在或不属于该客户则返回 None。
     """
@@ -123,7 +126,7 @@ async def create_customer_ticket_message(
             """
             UPDATE public.tickets
             SET status = CASE
-                    WHEN assigned_agent_id IS NULL AND status IN ('AI处理中', '已处理') THEN 'AI待处理'
+                    WHEN assigned_agent_id IS NULL AND status IN ('AI处理中', '已处理', '待人工处理') THEN 'AI待处理'
                     ELSE status
                 END,
                 ai_claimed_at = CASE

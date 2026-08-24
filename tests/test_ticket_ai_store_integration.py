@@ -78,17 +78,21 @@ async def test_ai_claims_answers_and_customer_can_read_reply(ai_ticket_data: dic
 
 @pytest.mark.asyncio
 async def test_ai_can_return_unresolved_ticket_to_human_queue(ai_ticket_data: dict[str, int | str]) -> None:
-    """知识不足时，AI 释放任务后人工可以正常认领。"""
+    """知识不足后，客户补充信息会让未认领工单重新进入 AI 队列。"""
     ticket_id = str(ai_ticket_data["ticket_id"])
-    human_agent_id = int(ai_ticket_data["agent"])
+    customer_id = int(ai_ticket_data["customer"])
 
     claimed = await claim_next_ticket_for_ai(claim_timeout_seconds=120)
     assert claimed is not None
     assert await send_ticket_to_human_queue(ticket_id) is True
 
-    claimed_by_human = await claim_ticket(ticket_id, human_agent_id)
-    assert claimed_by_human is not None
-    assert claimed_by_human["assigned_agent_id"] == human_agent_id
+    follow_up = "设备型号是合成测试机，电源灯会亮但屏幕无显示。"
+    assert await create_customer_ticket_message(ticket_id, customer_id, follow_up) is not None
+
+    reclaimed = await claim_next_ticket_for_ai(claim_timeout_seconds=120)
+    assert reclaimed is not None
+    assert reclaimed["ticket_id"] == ticket_id
+    assert reclaimed["issue"] == follow_up
 
 
 @pytest.mark.asyncio

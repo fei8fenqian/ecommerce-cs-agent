@@ -14,12 +14,20 @@ from log_config import redact_text
 from store.ticket_store import (
     claim_next_ticket_for_ai,
     complete_ai_ticket,
-    send_ticket_to_human_queue,
+    escalate_ai_ticket,
 )
 
 logger = logging.getLogger(__name__)
 
 _ESCALATE_MARKER = "[ESCALATE]"
+_NEED_MORE_DETAILS_REPLY = (
+    "我已收到您的报修。当前信息还不足以准确判断故障原因，请补充设备型号、"
+    "开机后是否有指示灯或异常声音，以及近期是否发生过摔落、进液或升级。"
+    "我已将工单转给人工客服继续跟进。"
+)
+_AGENT_UNAVAILABLE_REPLY = (
+    "我已收到您的问题，但智能诊断暂时不可用。工单已转给人工客服继续跟进；您也可以补充设备型号和故障现象，以便更快处理。"
+)
 
 
 class ChatClient(Protocol):
@@ -65,7 +73,7 @@ class TicketResolutionAgent:
             documents = await hybrid_search(safe_issue, table="knowledge_chunks")
             context = _knowledge_context(documents)
             if not context:
-                await send_ticket_to_human_queue(ticket_id)
+                await escalate_ai_ticket(ticket_id, _NEED_MORE_DETAILS_REPLY)
                 return True
 
             response = await self._llm_client.chat(
@@ -90,7 +98,7 @@ class TicketResolutionAgent:
             )
             answer = str(getattr(response, "content", "") or "").strip()
             if not answer or _ESCALATE_MARKER in answer:
-                await send_ticket_to_human_queue(ticket_id)
+                await escalate_ai_ticket(ticket_id, _NEED_MORE_DETAILS_REPLY)
                 return True
 
             await complete_ai_ticket(ticket_id, answer)
@@ -98,9 +106,10 @@ class TicketResolutionAgent:
         except asyncio.CancelledError:
             raise
         except Exception:
-            # 依赖异常和未知模型异常都不能让工单无限重试或泄露给客户。
+            # 依赖异常和未知模型异常都不能让工单无限重试或泄露给客户；但客户必须
+            # 看得到 Agent 已接手及后续去向，不能只留下一个没有解释的状态。
             logger.warning("AI 工单处理失败，已转人工队列")
-            await send_ticket_to_human_queue(ticket_id)
+            await escalate_ai_ticket(ticket_id, _AGENT_UNAVAILABLE_REPLY)
             return True
 
 

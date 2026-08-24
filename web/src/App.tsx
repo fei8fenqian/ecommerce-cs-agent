@@ -468,6 +468,12 @@ function CustomerTicketCenter({ auth }: { auth: AuthState }) {
     finally { setSending(false); }
   };
 
+  const handleReplyKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>): void => {
+    if (event.key !== "Enter" || event.shiftKey || event.altKey || event.nativeEvent.isComposing) return;
+    event.preventDefault();
+    event.currentTarget.form?.requestSubmit();
+  };
+
   if (!loading && tickets.length === 0) return <section className="customer-ticket-empty panel">
     <p className="eyebrow">MY AFTER-SALES</p>
     <h2>暂时没有售后工单</h2>
@@ -482,7 +488,7 @@ function CustomerTicketCenter({ auth }: { auth: AuthState }) {
       {loading ? <p className="empty">正在读取售后进度…</p> : tickets.length ? <div className="ticket-list">{tickets.map((ticket) => <button className={`ticket-card ${selectedTicket?.ticket_id === ticket.ticket_id ? "active" : ""}`} key={ticket.ticket_id} onClick={() => void selectTicket(ticket.ticket_id)}><span className="status">{ticket.status}</span><strong>{ticket.ticket_id}</strong><small>{formatDate(ticket.created_at)}</small></button>)}</div> : <p className="empty">暂时没有售后工单。你可以直接在智能客服中描述问题，Agent 会为你创建并处理。</p>}
     </section>
     <section className="panel ticket-detail customer-ticket-detail">
-      {selectedTicket ? <><div className="section-title"><div><p className="eyebrow">AFTER-SALES CONVERSATION</p><h2>{selectedTicket.ticket_id}</h2><p className="muted">当前状态：{selectedTicket.status}</p></div></div><div className="message-history customer-ticket-messages">{messages.length ? messages.map((message) => <Message key={message.message_id} message={message} />) : <p className="empty">暂时没有消息。</p>}</div><form className="composer customer-ticket-composer" onSubmit={sendFollowUp}><textarea value={reply} onChange={(event) => setReply(event.target.value)} maxLength={4000} placeholder="补充问题或回复 Agent…" /><button disabled={sending || !reply.trim()}>{sending ? "发送中…" : "发送"}</button></form></> : <div className="ticket-detail-empty"><h2>查看售后处理进度</h2><p>从左侧选择一张工单，即可看到 Agent 的处理结果并继续追问。</p></div>}
+      {selectedTicket ? <><div className="section-title"><div><p className="eyebrow">AFTER-SALES CONVERSATION</p><h2>{selectedTicket.ticket_id}</h2><p className="muted">当前状态：{selectedTicket.status}</p></div></div><div className="message-history customer-ticket-messages">{messages.length ? messages.map((message) => <Message key={message.message_id} message={message} />) : <p className="empty">暂时没有消息。</p>}</div><form className="composer customer-ticket-composer" onSubmit={sendFollowUp}><textarea value={reply} onChange={(event) => setReply(event.target.value)} onKeyDown={handleReplyKeyDown} maxLength={4000} placeholder="补充问题或回复 Agent…" /><button disabled={sending || !reply.trim()}>{sending ? "发送中…" : "发送"}</button></form><p className="customer-ticket-hint">Enter 发送 · Shift / Alt + Enter 换行</p></> : <div className="ticket-detail-empty"><h2>查看售后处理进度</h2><p>从左侧选择一张工单，即可看到 Agent 的处理结果并继续追问。</p></div>}
     </section>
     {error && <p className="toast error">{error}</p>}
   </section>;

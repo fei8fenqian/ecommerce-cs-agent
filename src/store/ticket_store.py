@@ -564,3 +564,48 @@ async def send_ticket_to_human_queue(ticket_id: str) -> bool:
     finally:
         if conn is not None:
             await put_connection(conn)
+
+
+async def escalate_ai_ticket(ticket_id: str, content: str) -> bool:
+    """写入 Agent 的升级说明，并将已领取工单交回人工队列。
+
+    Args:
+        ticket_id: 当前由 AI 租约领取的工单编号。
+        content: 面向客户的简短说明；只描述已知事实和下一步，不包含内部异常。
+
+    Returns:
+        True 表示消息和状态已在同一事务内写入；False 表示 AI 已不再拥有该工单。
+    """
+    conn = None
+    try:
+        conn = await get_connection()
+        await conn.set_autocommit(False)
+        cursor = await conn.execute(
+            """
+            UPDATE public.tickets
+            SET status = '待人工处理', ai_processed_at = NOW()
+            WHERE ticket_id = %s AND status = 'AI处理中'
+            RETURNING ticket_id
+            """,
+            (ticket_id,),
+        )
+        if await cursor.fetchone() is None:
+            await conn.rollback()
+            return False
+        await conn.execute(
+            """
+            INSERT INTO public.ticket_messages
+                (ticket_id, author_role, author_user_id, content, ai_assisted)
+            VALUES (%s, 'ai', NULL, %s, true)
+            """,
+            (ticket_id, content),
+        )
+        await conn.commit()
+        return True
+    except Exception:
+        if conn is not None:
+            await conn.rollback()
+        raise
+    finally:
+        if conn is not None:
+            await put_connection(conn)

@@ -54,7 +54,7 @@ async def test_supported_ticket_is_answered_and_closed() -> None:
         patch("agent.ticket_resolution.claim_next_ticket_for_ai", new=AsyncMock(return_value=TICKET)),
         patch("agent.ticket_resolution.hybrid_search", new=AsyncMock(return_value=KNOWLEDGE)),
         patch("agent.ticket_resolution.complete_ai_ticket", new=completed),
-        patch("agent.ticket_resolution.send_ticket_to_human_queue", new=handoff),
+        patch("agent.ticket_resolution.escalate_ai_ticket", new=handoff),
     ):
         assert await agent.process_next() is True
 
@@ -65,8 +65,8 @@ async def test_supported_ticket_is_answered_and_closed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_missing_knowledge_moves_ticket_to_human_queue() -> None:
-    """没有可用知识时，Agent 不调用模型也不编造答案。"""
+async def test_missing_knowledge_explains_handoff_to_customer() -> None:
+    """没有可用知识时，Agent 仍须给客户留下下一步说明。"""
     llm = SimpleNamespace(chat=AsyncMock())
     agent = TicketResolutionAgent(llm, claim_timeout_seconds=120)
     handoff = AsyncMock(return_value=True)
@@ -74,12 +74,18 @@ async def test_missing_knowledge_moves_ticket_to_human_queue() -> None:
     with (
         patch("agent.ticket_resolution.claim_next_ticket_for_ai", new=AsyncMock(return_value=TICKET)),
         patch("agent.ticket_resolution.hybrid_search", new=AsyncMock(return_value=[])),
-        patch("agent.ticket_resolution.send_ticket_to_human_queue", new=handoff),
+        patch("agent.ticket_resolution.escalate_ai_ticket", new=handoff),
     ):
         assert await agent.process_next() is True
 
     llm.chat.assert_not_awaited()
-    handoff.assert_awaited_once_with("ticket-ai-1")
+    handoff.assert_awaited_once()
+    handoff_call = handoff.await_args
+    assert handoff_call is not None
+    ticket_id, customer_reply = handoff_call.args
+    assert ticket_id == "ticket-ai-1"
+    assert "设备型号" in customer_reply
+    assert "人工客服" in customer_reply
 
 
 @pytest.mark.asyncio
@@ -92,11 +98,14 @@ async def test_model_escalation_marker_moves_ticket_to_human_queue() -> None:
     with (
         patch("agent.ticket_resolution.claim_next_ticket_for_ai", new=AsyncMock(return_value=TICKET)),
         patch("agent.ticket_resolution.hybrid_search", new=AsyncMock(return_value=KNOWLEDGE)),
-        patch("agent.ticket_resolution.send_ticket_to_human_queue", new=handoff),
+        patch("agent.ticket_resolution.escalate_ai_ticket", new=handoff),
     ):
         assert await agent.process_next() is True
 
-    handoff.assert_awaited_once_with("ticket-ai-1")
+    handoff.assert_awaited_once()
+    handoff_call = handoff.await_args
+    assert handoff_call is not None
+    assert "人工客服" in handoff_call.args[1]
 
 
 @pytest.mark.asyncio
@@ -109,8 +118,11 @@ async def test_model_failure_moves_ticket_to_human_queue() -> None:
     with (
         patch("agent.ticket_resolution.claim_next_ticket_for_ai", new=AsyncMock(return_value=TICKET)),
         patch("agent.ticket_resolution.hybrid_search", new=AsyncMock(return_value=KNOWLEDGE)),
-        patch("agent.ticket_resolution.send_ticket_to_human_queue", new=handoff),
+        patch("agent.ticket_resolution.escalate_ai_ticket", new=handoff),
     ):
         assert await agent.process_next() is True
 
-    handoff.assert_awaited_once_with("ticket-ai-1")
+    handoff.assert_awaited_once()
+    handoff_call = handoff.await_args
+    assert handoff_call is not None
+    assert "智能诊断暂时不可用" in handoff_call.args[1]
