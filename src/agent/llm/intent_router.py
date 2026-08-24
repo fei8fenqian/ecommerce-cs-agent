@@ -76,6 +76,11 @@ class IntentRouter:
         Returns:
             包含安全改写后 query 与路由目标的 Intent。
         """
+        # 配台式机是确定的多配件工作流。绕过分类模型，避免它误送入通用聊天
+        # Agent 后出现“先说要查、再多轮工具调用”的不稳定路径。
+        if self._is_build_pc_query(query):
+            return Intent(target="plan_execute", scenario="build_pc", query=query, confidence=1.0)
+
         if self._is_inventory_query(query):
             return Intent(target="agent", query=query, confidence=1.0)
 
@@ -153,6 +158,13 @@ class IntentRouter:
         """识别明确库存请求，避免再等待一次分类模型调用。"""
         normalized = "".join(query.split()).lower()
         return "库存" in normalized and any(marker in normalized for marker in ("查", "有", "现货", "多少"))
+
+    @staticmethod
+    def _is_build_pc_query(query: str) -> bool:
+        """识别明确的台式机装机需求，稳定路由到配机执行链路。"""
+        normalized = "".join(query.split()).lower()
+        desktop_markers = ("台式电脑", "台式机", "组装电脑", "组装机", "装机", "攒机", "配台")
+        return any(marker in normalized for marker in desktop_markers)
 
     @staticmethod
     def _safe_rewritten_query(candidate: object, original_query: str) -> str:

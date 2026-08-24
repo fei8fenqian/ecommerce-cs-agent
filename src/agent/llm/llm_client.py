@@ -330,6 +330,7 @@ class LLMClient:
         for attempt in range(self.max_attempts):
             stream_started = False
             tool_buf: dict[int, dict] = {}
+            finish_reason: str | None = None
             try:
                 # 这个 timeout 覆盖建连和整个流的读取过程。
                 async with asyncio.timeout(self.stream_timeout):
@@ -343,7 +344,15 @@ class LLMClient:
                     )
 
                     async for chunk in response:
-                        delta = chunk.choices[0].delta if chunk.choices else None
+                        choice = chunk.choices[0] if chunk.choices else None
+                        if choice is None:
+                            continue
+
+                        chunk_finish_reason = getattr(choice, "finish_reason", None)
+                        if chunk_finish_reason:
+                            finish_reason = str(chunk_finish_reason)
+
+                        delta = choice.delta
                         if delta is None:
                             continue
 
@@ -377,6 +386,10 @@ class LLMClient:
                             args = {}
                         tool_calls.append(ToolCall(buf["id"], buf["name"], args))
                     yield {"type": "tool_calls", "tool_calls": tool_calls}
+
+                # 只有长度截断需要上游额外处理；正常 stop 保持原有流事件契约。
+                if finish_reason == "length":
+                    yield {"type": "finish", "reason": "length"}
 
                 await self.circuit_breaker.record_success()
                 return

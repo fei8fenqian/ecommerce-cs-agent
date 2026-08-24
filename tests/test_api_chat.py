@@ -18,7 +18,14 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from agent.engines.loop import LoopResult
 from agent.llm.intent_router import Intent
 from agent.llm.resolve import resolve_pronouns
-from api.chat import ChatRequest, _entities_from_retrieval, chat_router, chat_stream
+from api.chat import (
+    ChatRequest,
+    _claim_chat_run,
+    _entities_from_retrieval,
+    _is_current_chat_run,
+    chat_router,
+    chat_stream,
+)
 from api.errors import (
     handle_app_exception,
     handle_http_exceptions,
@@ -46,6 +53,35 @@ class _MockIntentRouter:
             query=query,
             confidence=0.95,
         )
+
+
+class _ChatRunRedis:
+    """只覆盖会话运行令牌测试所需的 Redis 操作。"""
+
+    def __init__(self):
+        self.values: dict[str, str] = {}
+
+    async def set(self, key: str, value: str, *, ex: int) -> None:
+        assert ex > 0
+        self.values[key] = value
+
+    async def get(self, key: str) -> bytes | None:
+        value = self.values.get(key)
+        return value.encode() if value is not None else None
+
+
+@pytest.mark.asyncio
+async def test_later_chat_run_supersedes_earlier_run(monkeypatch):
+    """同一会话后发请求必须让旧流失效，而不同 run 不共用令牌。"""
+    redis = _ChatRunRedis()
+    monkeypatch.setattr("api.chat.get_redis", lambda: redis)
+
+    first_run = await _claim_chat_run("session-a")
+    second_run = await _claim_chat_run("session-a")
+
+    assert first_run != second_run
+    assert await _is_current_chat_run("session-a", first_run) is False
+    assert await _is_current_chat_run("session-a", second_run) is True
 
 
 class _MockAgentLoop:

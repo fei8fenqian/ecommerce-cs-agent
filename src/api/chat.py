@@ -3,6 +3,7 @@ import json
 import logging
 import re
 import time
+import uuid
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -15,6 +16,7 @@ from agent.rag.retrieve import hybrid_search
 from agent.tools_registry import ToolContext
 from config import settings
 from exceptions import DependencyUnavailableError, LLMError
+from infra.redis_client import get_redis
 from log_config import get_request_id
 
 _chat_logger = logging.getLogger(__name__)
@@ -40,6 +42,50 @@ class ChatResponse(BaseModel):
 chat_router = APIRouter(prefix="/api/v1", tags=["聊天"])
 
 _STREAM_ERROR_MESSAGE = "智能服务暂时不可用，请稍后重试"
+_CHAT_RUN_TTL_SECONDS = 300
+
+
+def _chat_run_key(session_id: str) -> str:
+    """返回单个会话的最新流式运行标识键。"""
+    return f"chat:active-run:{session_id}"
+
+
+async def _claim_chat_run(session_id: str) -> str | None:
+    """将本次请求标记为会话最新运行，供旧流主动让位。
+
+    测试中未初始化 Redis 时返回 None，保留现有内存测试的纯 HTTP 边界；实际应用
+    已在启动时初始化 Redis，运行令牌会在五分钟后自动过期。
+    """
+    try:
+        redis = get_redis()
+    except RuntimeError:
+        return None
+
+    run_id = uuid.uuid4().hex
+    try:
+        await redis.set(_chat_run_key(session_id), run_id, ex=_CHAT_RUN_TTL_SECONDS)
+    except Exception as exc:
+        raise DependencyUnavailableError("会话协调服务暂时不可用") from exc
+    return run_id
+
+
+async def _is_current_chat_run(session_id: str, run_id: str | None) -> bool:
+    """确认当前流仍是该会话最后一次发送的请求。"""
+    if run_id is None:
+        return True
+    try:
+        value = await get_redis().get(_chat_run_key(session_id))
+    except Exception as exc:
+        raise DependencyUnavailableError("会话协调服务暂时不可用") from exc
+    if isinstance(value, bytes):
+        value = value.decode()
+    return value == run_id
+
+
+def _superseded_stream_event(request: Request) -> dict[str, str]:
+    """通知旧标签页：同一会话已有更新请求，当前流不再落库。"""
+    request_id = getattr(request.state, "request_id", None) or get_request_id()
+    return {"event": "superseded", "message": "此会话已在另一窗口继续生成", "request_id": request_id}
 
 
 def _stream_error_event(request: Request) -> dict[str, str]:
@@ -209,6 +255,7 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
 
         history = session_ctx.history
         session_id = session_ctx.session_id
+        chat_run_id = await _claim_chat_run(session_id)
         resolve_query = await session.resolve(chat_req.query, session_id, user_id)
         resolve_query = resolve_stock_follow_up(
             resolve_query,
@@ -251,6 +298,9 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                     scenario=intent.scenario,
                     tool_context=tool_context,
                 ):
+                    if not await _is_current_chat_run(session_id, chat_run_id):
+                        yield f"data: {json.dumps(_superseded_stream_event(request), ensure_ascii=False)}\n\n"
+                        return
                     if chunk.get("event") == "error":
                         yield f"data: {json.dumps(_stream_error_event(request), ensure_ascii=False)}\n\n"
                         return
@@ -264,6 +314,9 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                         stream_completed = True
 
                 if stream_completed:
+                    if not await _is_current_chat_run(session_id, chat_run_id):
+                        yield f"data: {json.dumps(_superseded_stream_event(request), ensure_ascii=False)}\n\n"
+                        return
                     await session.add_turn(
                         session_id,
                         user_id,
@@ -285,6 +338,9 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                 system_prompt_extra=extra_prompt,
                 tool_context=tool_context,
             ):
+                if not await _is_current_chat_run(session_id, chat_run_id):
+                    yield f"data: {json.dumps(_superseded_stream_event(request), ensure_ascii=False)}\n\n"
+                    return
                 if event.get("event") == "error":
                     yield f"data: {json.dumps(_stream_error_event(request), ensure_ascii=False)}\n\n"
                     return
@@ -304,6 +360,9 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
             if stream_completed:
+                if not await _is_current_chat_run(session_id, chat_run_id):
+                    yield f"data: {json.dumps(_superseded_stream_event(request), ensure_ascii=False)}\n\n"
+                    return
                 await session.add_turn(
                     session_id,
                     user_id,

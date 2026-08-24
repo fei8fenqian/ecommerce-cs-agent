@@ -243,6 +243,9 @@ class AgentLoop:
 
             # 防死循环
             recent_tools: list[str] = []
+            length_continuations = 0
+            max_length_continuations = 1
+            final_answer_parts: list[str] = []
 
             yield {"event": "start"}
 
@@ -250,10 +253,12 @@ class AgentLoop:
                 content_buf = ""
                 has_tool_calls = False
                 tool_calls: list[ToolCall] = []
+                was_truncated = False
 
                 async for chunk in self.llm.chat_stream(
                     messages,
-                    tools=self.registry.to_openai_schemas(),
+                    # 已经开始回答后仅请求续写，不允许模型在续写阶段再发起工具调用。
+                    tools=self.registry.to_openai_schemas() if length_continuations == 0 else None,
                     temperature=settings.temperature,
                     max_tokens=settings.max_tokens,
                 ):
@@ -265,12 +270,25 @@ class AgentLoop:
                         has_tool_calls = True
                         tool_calls = chunk["tool_calls"]
 
+                    elif chunk["type"] == "finish" and chunk.get("reason") == "length":
+                        was_truncated = True
+
                 # 没有工具调用 → 最终回答
                 if not has_tool_calls:
                     messages.append({"role": "assistant", "content": content_buf})
+                    final_answer_parts.append(content_buf)
+                    if was_truncated and content_buf and length_continuations < max_length_continuations:
+                        length_continuations += 1
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": "上一段回答因输出长度中断。请从中断处继续，不要重复前文。",
+                            }
+                        )
+                        continue
                     yield {
                         "event": "done",
-                        "answer": content_buf,
+                        "answer": "".join(final_answer_parts),
                         "total_steps": step,
                     }
                     return
@@ -322,10 +340,24 @@ class AgentLoop:
             # 兜底：循环结束还没答案
             messages.append({"role": "user", "content": "请根据以上信息回答用户问题。"})
             answer = ""
-            async for chunk in self.llm.chat_stream(messages):
-                if chunk["type"] == "content":
-                    yield {"event": "token", "content": chunk["content"]}
-                    answer += chunk["content"]
+            for continuation in range(max_length_continuations + 1):
+                was_truncated = False
+                async for chunk in self.llm.chat_stream(messages, tools=None):
+                    if chunk["type"] == "content":
+                        yield {"event": "token", "content": chunk["content"]}
+                        answer += chunk["content"]
+                    elif chunk["type"] == "finish" and chunk.get("reason") == "length":
+                        was_truncated = True
+
+                if not was_truncated or not answer or continuation == max_length_continuations:
+                    break
+                messages.append({"role": "assistant", "content": answer})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": "上一段回答因输出长度中断。请从中断处继续，不要重复前文。",
+                    }
+                )
 
             yield {
                 "event": "done",

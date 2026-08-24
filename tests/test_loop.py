@@ -457,6 +457,29 @@ class TestAgentLoopRunStream:
         assert events[-1]["total_steps"] == 1
 
     @pytest.mark.asyncio
+    async def test_length_truncated_answer_continues_once(self):
+        """供应商因输出长度截断时，Agent 应保留前文并请求一次无工具续写。"""
+        llm = _StreamMockLLM(
+            [
+                [
+                    {"type": "content", "content": "第一段，"},
+                    {"type": "finish", "reason": "length"},
+                ],
+                [{"type": "content", "content": "第二段。"}],
+            ]
+        )
+        loop = AgentLoop(llm=llm, registry=ToolRegistry())
+
+        events = []
+        async for event in loop.run_stream("请详细说明"):
+            events.append(event)
+
+        assert "".join(event.get("content", "") for event in events if event["event"] == "token") == "第一段，第二段。"
+        assert events[-1]["event"] == "done"
+        assert events[-1]["answer"] == "第一段，第二段。"
+        assert llm._call_count == 2
+
+    @pytest.mark.asyncio
     async def test_single_tool_stream(self):
         """调一次工具 → 通过 stream 观察 tool_call / tool_result 事件"""
         llm = _StreamMockLLM(

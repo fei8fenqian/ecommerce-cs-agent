@@ -30,9 +30,9 @@ def response(content: str = "ok") -> SimpleNamespace:
     return SimpleNamespace(choices=[choice], model="test-model", usage=None)
 
 
-def stream_chunk(content: str | None = None) -> SimpleNamespace:
+def stream_chunk(content: str | None = None, *, finish_reason: str | None = None) -> SimpleNamespace:
     delta = SimpleNamespace(content=content, tool_calls=None)
-    return SimpleNamespace(choices=[SimpleNamespace(delta=delta)])
+    return SimpleNamespace(choices=[SimpleNamespace(delta=delta, finish_reason=finish_reason)])
 
 
 def make_client(
@@ -211,6 +211,26 @@ async def test_stream_failure_before_first_token_retries():
 
     assert events == [{"type": "content", "content": "success"}]
     assert create.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_stream_reports_provider_length_truncation():
+    client, _ = make_client(max_attempts=1)
+
+    async def truncated_stream():
+        yield stream_chunk("partial")
+        yield stream_chunk(finish_reason="length")
+
+    create = set_create(client, [truncated_stream()])
+    events = []
+    async for event in client.chat_stream([{"role": "user", "content": "hello"}]):
+        events.append(event)
+
+    assert events == [
+        {"type": "content", "content": "partial"},
+        {"type": "finish", "reason": "length"},
+    ]
+    assert create.await_count == 1
 
 
 @pytest.mark.asyncio

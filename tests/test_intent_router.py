@@ -54,6 +54,17 @@ class TestIntent:
 # =============================================================================
 class TestRouteNormal:
     @pytest.mark.asyncio
+    async def test_desktop_build_bypasses_classifier_and_uses_plan_execute(self):
+        router = _router("not valid JSON")
+
+        intent = await router.route("我有 8000 块预算，想配一台能玩 3A 游戏的台式电脑")
+
+        assert intent.target == "plan_execute"
+        assert intent.scenario == "build_pc"
+        assert intent.query == "我有 8000 块预算，想配一台能玩 3A 游戏的台式电脑"
+        assert intent.confidence == 1.0
+
+    @pytest.mark.asyncio
     async def test_rag_target(self):
         router = _router('{"target": "rag", "table": "laptop_products", "confidence": 0.95}')
         intent = await router.route("推荐一款笔记本")
