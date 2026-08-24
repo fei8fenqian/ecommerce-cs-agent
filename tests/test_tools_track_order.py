@@ -183,10 +183,11 @@ class TestTrackOrderErrors:
         assert "当前用户身份" in result.error
 
     @pytest.mark.asyncio
-    async def test_no_params_returns_error(self, _pool):
+    async def test_no_params_lists_current_customer_orders(self, _pool):
         result = await TrackOrder().execute(tool_context=_pool["owner"])
-        assert result.is_success is False
-        assert "订单号" in result.error or "手机号" in result.error
+        assert result.is_success is True
+        assert result.data["count"] == 1
+        assert result.data["orders"][0]["order_id"] == _pool["order_a"]
 
     @pytest.mark.asyncio
     async def test_nonexistent_order(self, _pool):

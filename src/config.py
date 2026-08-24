@@ -56,6 +56,16 @@ class Settings(BaseSettings):
     llm_circuit_failure_threshold: int = Field(default=3, ge=1, description="LLM 熔断连续失败阈值")
     llm_circuit_open_seconds: float = Field(default=30.0, gt=0, description="LLM 熔断冷却时间(秒)")
 
+    # ---- 支付宝沙箱（本地/演示环境） ----
+    # 密钥只保存为本机文件路径；不能写入代码、Git 或日志。
+    alipay_sandbox_app_id: str = ""
+    alipay_sandbox_seller_id: str = ""
+    alipay_sandbox_gateway: str = "https://openapi-sandbox.dl.alipaydev.com/gateway.do"
+    alipay_sandbox_app_private_key_path: str = ""
+    alipay_sandbox_public_key_path: str = ""
+    alipay_sandbox_notify_url: str = ""
+    alipay_sandbox_return_url: str = ""
+
     # ---- 内部 Metrics 端点 ----
     metrics_bearer_token: SecretStr = SecretStr("")
 

@@ -1,13 +1,17 @@
 import logging
 from typing import Any
 
-from agent.tools_registry import BaseTool, ToolResult
+from agent.tools_registry import BaseTool, ToolContext, ToolResult
 from infra.db_pool import get_connection, put_connection
 
 logger = logging.getLogger(__name__)
 
 
 class CheckStock(BaseTool):
+    @property
+    def requires_tool_context(self) -> bool:
+        return True
+
     @property
     def name(self) -> str:
         return "check_stock"
@@ -36,7 +40,13 @@ class CheckStock(BaseTool):
             "required": ["product_name"],
         }
 
-    async def execute(self, product_name: str, table: str = "laptop_products") -> ToolResult:
+    async def execute(
+        self,
+        product_name: str,
+        table: str = "laptop_products",
+        *,
+        tool_context: ToolContext | None = None,
+    ) -> ToolResult:
         # 表名白名单，防注入
         if table not in ("laptop_products", "phone_products", "component_products"):
             return ToolResult(name=self.name, status="error", error=f"不支持的表: {table}")
@@ -51,15 +61,17 @@ class CheckStock(BaseTool):
                 (f"%{product_name}%",),
             ):
                 name, brand, price, stock, warehouse = row
-                results.append(
-                    {
-                        "name": name,
-                        "brand": brand,
-                        "price": float(price) if price else 0.0,
-                        "stock": stock,
-                        "warehouse": warehouse,
-                    }
-                )
+                item: dict[str, Any] = {
+                    "name": name,
+                    "brand": brand,
+                    "price": float(price) if price else 0.0,
+                }
+                if tool_context is not None and tool_context.role == "customer":
+                    item["availability"] = "有货" if int(stock or 0) > 0 else "暂时缺货"
+                else:
+                    item["stock"] = stock
+                    item["warehouse"] = warehouse
+                results.append(item)
 
             if not results:
                 return ToolResult(

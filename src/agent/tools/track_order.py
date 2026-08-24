@@ -20,8 +20,8 @@ class TrackOrder(BaseTool):
     def description(self) -> str:
         return """查询订单状态与物流信息。
         适用场景：用户询问"我的订单到哪了""帮我查一下订单""这个手机号下的订单"等。
-        查单规则：优先用订单号精确查询；若无订单号则用手机号查该号码下所有订单。
-        两者至少提供一个。"""
+        查单规则：优先用订单号精确查询；若无订单号则查询当前登录客户最近订单；
+        手机号仅用于兼容已确认归属的历史订单。"""
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -53,9 +53,6 @@ class TrackOrder(BaseTool):
                 status="error",
                 error="缺少当前用户身份，无法追踪订单",
             )
-        if not order_id and not phone:
-            return ToolResult(name=self.name, status="error", error="请提供订单号或手机号")
-
         try:
             orders = await find_orders(
                 tool_context.user_id,
@@ -64,7 +61,7 @@ class TrackOrder(BaseTool):
             )
 
             if not orders:
-                msg = "订单不存在" if order_id else "该手机号下没有订单"
+                msg = "订单不存在" if order_id else "当前没有可查询订单"
                 return ToolResult(name=self.name, status="error", error=msg)
 
             # 单号查询返回单个订单，手机号查询返回列表

@@ -70,8 +70,70 @@ export interface Product {
   product_type: string;
   status: string;
   stock: number;
-  warehouse: string;
   image_url: string | null;
+}
+
+export interface ProductCatalogPage {
+  category: "laptops" | "phones" | "components";
+  products: Product[];
+  total: number;
+  page: number;
+  page_size: number;
+  brands: string[];
+  component_categories: Record<string, string>;
+}
+
+export interface ProductDetail extends Product {
+  specifications: Array<{ name: string; value: string }>;
+}
+
+export interface CheckoutSession {
+  order_no: string;
+  amount_cents: number;
+  payment_url: string;
+}
+
+export interface PublicAssistantResponse {
+  answer: string;
+}
+
+export interface CheckoutOrder {
+  order_no: string;
+  status: string;
+  total_amount_cents: number;
+  product_name: string;
+  quantity: number;
+  payment_status: string;
+  fulfillment_status: string | null;
+  tracking_company: string | null;
+  tracking_number: string | null;
+  created_at: string;
+}
+
+export interface CartItem {
+  item_id: number;
+  category: "laptops" | "phones";
+  product_id: string;
+  product_name: string;
+  brand: string;
+  price: number | null;
+  stock: number;
+  quantity: number;
+  available: boolean;
+}
+
+export interface Cart {
+  items: CartItem[];
+}
+
+export interface Fulfillment {
+  order_no: string;
+  product_name: string;
+  quantity: number;
+  status: string;
+  carrier: string | null;
+  tracking_number: string | null;
+  created_at: string;
 }
 
 export interface CustomerOrder {
@@ -200,11 +262,129 @@ export async function streamChat(
   }
 }
 
-export async function listProducts(token: string, category: "laptops" | "phones", query = ""): Promise<Product[]> {
-  const parameters = new URLSearchParams({ category });
-  if (query.trim()) parameters.set("query", query.trim());
-  const response = await api<{ products: Product[] }>(`/api/v1/products?${parameters}`, {}, token);
-  return response.products;
+export async function listProducts(
+  token: string | undefined,
+  category: "laptops" | "phones" | "components",
+  options: { query?: string; brand?: string; componentCategory?: string; page?: number } = {},
+): Promise<ProductCatalogPage> {
+  const parameters = new URLSearchParams({ category, page_size: "24", page: String(options.page ?? 1) });
+  if (options.query?.trim()) parameters.set("query", options.query.trim());
+  if (options.brand?.trim()) parameters.set("brand", options.brand.trim());
+  if (options.componentCategory?.trim()) parameters.set("component_category", options.componentCategory.trim());
+  return api<ProductCatalogPage>(`/api/v1/products?${parameters}`, {}, token);
+}
+
+/** 读取单件商品的公开规格，用于目录中的详情页。 */
+export function getProductDetail(
+  token: string | undefined,
+  category: "laptops" | "phones" | "components",
+  productId: string,
+): Promise<ProductDetail> {
+  return api<ProductDetail>(`/api/v1/products/${category}/${encodeURIComponent(productId)}`, {}, token);
+}
+
+/** 匿名访客可用的公开导购，不创建服务端会话，也不会访问个人订单。 */
+export function askPublicAssistant(query: string): Promise<PublicAssistantResponse> {
+  return api<PublicAssistantResponse>("/api/v1/products/assistant", {
+    method: "POST",
+    body: JSON.stringify({ query }),
+  });
+}
+
+/** 创建待支付订单后返回支付宝沙箱的浏览器跳转地址。 */
+export function createCheckout(
+  token: string,
+  category: "laptops" | "phones",
+  productId: string,
+  returnOrigin: string,
+): Promise<CheckoutSession> {
+  return api<CheckoutSession>("/api/v1/checkout/orders", {
+    method: "POST",
+    body: JSON.stringify({ category, product_id: productId, quantity: 1, return_origin: returnOrigin }),
+  }, token);
+}
+
+/** 将商品加入当前客户的持久化购物车；价格和库存会在结算时再次核验。 */
+export function addCartItem(
+  token: string,
+  category: "laptops" | "phones",
+  productId: string,
+  quantity = 1,
+): Promise<CartItem> {
+  return api<CartItem>("/api/v1/cart/items", {
+    method: "POST",
+    body: JSON.stringify({ category, product_id: productId, quantity }),
+  }, token);
+}
+
+/** 读取当前客户的购物车。 */
+export function getCart(token: string): Promise<Cart> {
+  return api<Cart>("/api/v1/cart", {}, token);
+}
+
+/** 覆盖购物车单项数量。 */
+export function updateCartItem(token: string, itemId: number, quantity: number): Promise<CartItem> {
+  return api<CartItem>(`/api/v1/cart/items/${itemId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ quantity }),
+  }, token);
+}
+
+/** 删除购物车单项，并返回最新购物车。 */
+export function deleteCartItem(token: string, itemId: number): Promise<Cart> {
+  return api<Cart>(`/api/v1/cart/items/${itemId}`, { method: "DELETE" }, token);
+}
+
+/** 以购物车当前内容创建或复用一笔待支付订单。 */
+export function checkoutCart(token: string, returnOrigin: string): Promise<CheckoutSession> {
+  return api<CheckoutSession>("/api/v1/cart/checkout", {
+    method: "POST",
+    body: JSON.stringify({ return_origin: returnOrigin }),
+  }, token);
+}
+
+/** 为同一笔待支付订单重新打开支付宝收银台，不新建订单。 */
+export function resumeCheckout(token: string, orderNo: string, returnOrigin: string): Promise<CheckoutSession> {
+  return api<CheckoutSession>(`/api/v1/checkout/orders/${encodeURIComponent(orderNo)}/resume-payment`, {
+    method: "POST",
+    body: JSON.stringify({ return_origin: returnOrigin }),
+  }, token);
+}
+
+/** 关闭尚未付款的沙箱订单；已付款或状态变化的订单会被拒绝。 */
+export function cancelCheckout(token: string, orderNo: string): Promise<{ order_no: string; cancelled: boolean }> {
+  return api(`/api/v1/checkout/orders/${encodeURIComponent(orderNo)}/cancel`, { method: "POST" }, token);
+}
+
+export async function listMyCheckoutOrders(token: string): Promise<CheckoutOrder[]> {
+  const response = await api<{ orders: CheckoutOrder[] }>("/api/v1/checkout/orders/my", {}, token);
+  return response.orders;
+}
+
+/** 以支付宝网关的交易查询结果刷新一笔待支付订单。 */
+export function refreshCheckoutPayment(token: string, orderNo: string): Promise<CheckoutOrder> {
+  return api<CheckoutOrder>(`/api/v1/checkout/orders/${encodeURIComponent(orderNo)}/refresh-payment`, {
+    method: "POST",
+  }, token);
+}
+
+/** 运营查看应用自有订单的发货队列。 */
+export async function listOperatorFulfillments(token: string): Promise<Fulfillment[]> {
+  const response = await api<{ fulfillments: Fulfillment[] }>("/api/v1/fulfillments", {}, token);
+  return response.fulfillments;
+}
+
+/** 运营登记一次真实或演示物流发货事件。 */
+export function shipFulfillment(
+  token: string,
+  orderNo: string,
+  carrier: string,
+  trackingNumber: string,
+): Promise<Fulfillment> {
+  return api<Fulfillment>(`/api/v1/fulfillments/${encodeURIComponent(orderNo)}/ship`, {
+    method: "POST",
+    body: JSON.stringify({ carrier, tracking_number: trackingNumber }),
+  }, token);
 }
 
 export async function listMyOrders(token: string): Promise<CustomerOrder[]> {

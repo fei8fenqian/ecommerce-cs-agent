@@ -1,14 +1,19 @@
 import logging
+import re
 from typing import Any
 
 from agent.rag.retrieve import hybrid_search
-from agent.tools_registry import BaseTool, ToolResult
+from agent.tools_registry import BaseTool, ToolContext, ToolResult
 from config import settings
 
 logger = logging.getLogger(__name__)
 
 
 class SearchProduct(BaseTool):
+    @property
+    def requires_tool_context(self) -> bool:
+        return True
+
     @property
     def name(self) -> str:
         return "search_product"
@@ -46,6 +51,8 @@ class SearchProduct(BaseTool):
         query: str,
         table: str = "laptop_products",
         top_k: int = settings.retrieval_top_k,
+        *,
+        tool_context: ToolContext | None = None,
     ) -> ToolResult:
         try:
             candidates: list[dict] = await hybrid_search(query, table=table, where=None, top_k=top_k)
@@ -53,11 +60,13 @@ class SearchProduct(BaseTool):
                 return ToolResult(name=self.name, status="error", error="未找到相关内容")
             results: list[dict[str, Any]] = []
             for c in candidates:
+                content = str(c.get("content") or "")
+                if tool_context is not None and tool_context.role == "customer":
+                    content = _customer_visible_content(content)
                 results.append(
                     {
                         "title": c.get("title"),
-                        "content": (c.get("content") or "")[:200]
-                        + ("..." if len(c.get("content") or "") > 200 else ""),
+                        "content": content[:200] + ("..." if len(content) > 200 else ""),
                         "score": c.get("score"),
                     }
                 )
@@ -70,3 +79,8 @@ class SearchProduct(BaseTool):
         except Exception:
             logger.error("search_product 检索失败")
             return ToolResult(name=self.name, status="error", error="检索失败")
+
+
+def _customer_visible_content(content: str) -> str:
+    """移除商品检索文本中的仓库和精确库存描述。"""
+    return re.sub(r"(?:库存|仓库|[\u4e00-\u9fa5]+仓)[^。；\n]*[。；]?", "", content).strip()

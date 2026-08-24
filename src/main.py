@@ -24,16 +24,20 @@ from agent.tools import (
 )
 from agent.tools_registry import ToolRegistry
 from api.auth import auth_router
+from api.cart import cart_router
 from api.chat import chat_router
+from api.checkout import checkout_router
 from api.errors import (
     handle_app_exception,
     handle_http_exceptions,
     handle_unexpected_exception,
     handle_validation_error,
 )
+from api.fulfillments import fulfillment_router
 from api.health import health_router
 from api.metrics import metrics_router
 from api.orders import order_router
+from api.payments import payment_router
 from api.products import product_router
 from api.session import session_router
 from api.tickets import ticket_router
@@ -207,7 +211,11 @@ app.include_router(chat_router)
 app.include_router(session_router)
 app.include_router(ticket_router)
 app.include_router(product_router)
+app.include_router(checkout_router)
+app.include_router(cart_router)
+app.include_router(payment_router)
 app.include_router(order_router)
+app.include_router(fulfillment_router)
 app.include_router(health_router)
 app.include_router(metrics_router)
 app.include_router(auth_router)

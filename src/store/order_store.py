@@ -6,6 +6,7 @@
 from typing import Any
 
 from infra.db_pool import get_connection, put_connection
+from store.checkout_store import list_customer_checkout_orders
 
 _ORDER_QUERY = """
     SELECT
@@ -70,12 +71,18 @@ async def find_orders(
     order_id 和 phone 只是查询条件，customer_user_id 才是数据范围条件。
     未匹配的历史订单 customer_user_id 为 NULL，因此不会被返回。
     """
+    if order_id.startswith("SO"):
+        return await _find_customer_checkout_orders(customer_user_id, order_id)
     if order_id:
         where_clause = "o.customer_user_id = %s AND o.order_id = %s"
         params = (customer_user_id, order_id)
-    else:
+    elif phone:
         where_clause = "o.customer_user_id = %s AND o.phone = %s"
         params = (customer_user_id, phone)
+    else:
+        legacy_orders = await list_customer_orders(customer_user_id, limit=10)
+        checkout_orders = await list_customer_checkout_orders(customer_user_id, limit=10)
+        return [_checkout_order_to_tool_order(order) for order in checkout_orders] + legacy_orders
 
     conn = None
     try:
@@ -88,6 +95,41 @@ async def find_orders(
     finally:
         if conn is not None:
             await put_connection(conn)
+
+
+def _checkout_order_to_tool_order(order: object) -> dict[str, Any]:
+    """把应用自有支付订单映射为现有 Agent 查单工具的统一输出。"""
+    order_no = str(getattr(order, "order_no"))
+    amount_cents = int(getattr(order, "total_amount_cents"))
+    payment_status = str(getattr(order, "payment_status"))
+    fulfillment_status = getattr(order, "fulfillment_status")
+    tracking_company = getattr(order, "tracking_company")
+    tracking_number = getattr(order, "tracking_number")
+    paid_amount = amount_cents / 100 if payment_status == "SUCCEEDED" else 0.0
+    return {
+        "order_id": order_no,
+        "status": str(fulfillment_status or getattr(order, "status")),
+        "tracking": {"company": tracking_company, "number": tracking_number},
+        "total_amount": amount_cents / 100,
+        "paid_amount": paid_amount,
+        "payment_method": "支付宝沙箱",
+        "order_date": str(getattr(order, "created_at")),
+        "delivered_at": None,
+        "items": [
+            {
+                "product_name": str(getattr(order, "product_name")),
+                "brand": None,
+                "price": amount_cents / 100,
+                "quantity": int(getattr(order, "quantity")),
+            }
+        ],
+    }
+
+
+async def _find_customer_checkout_orders(customer_user_id: int, order_no: str) -> list[dict[str, Any]]:
+    """按客户范围精确查找应用自有支付订单，避免落回 legacy 表。"""
+    orders = await list_customer_checkout_orders(customer_user_id, limit=30)
+    return [_checkout_order_to_tool_order(order) for order in orders if order.order_no == order_no]
 
 
 async def list_customer_orders(customer_user_id: int, limit: int = 30) -> list[dict[str, Any]]:
