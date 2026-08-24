@@ -7,6 +7,12 @@
 import re
 
 PRONOUN_MAP: dict[str, str] = {
+    # 复合表达必须在“这款 / 那款”前替换，否则会留下“刚刚商品名”这种残句。
+    "刚刚那款": "product",
+    "刚才那款": "product",
+    "刚才推荐的": "product",
+    "上一款": "product",
+    "前面那款": "product",
     "它": "product",
     "他": "product",
     "这个": "product",
@@ -22,6 +28,8 @@ PRONOUN_MAP: dict[str, str] = {
 
 _IMPLICIT_PRODUCT_ACTIONS = ("下单", "购买", "买下", "就买", "要这个")
 _STOCK_CONFIRMATIONS = frozenset({"需要", "要", "查一下", "查下", "查询一下", "好的，需要", "好的，查一下"})
+_INVENTORY_QUESTION_MARKERS = ("库存", "现货", "有货")
+_INVENTORY_OFFER_MARKERS = ("需要我", "要不要我", "是否需要", "要不要")
 
 
 def resolve_pronouns(query: str, entities: dict[str, str]) -> str:
@@ -62,7 +70,11 @@ def resolve_stock_follow_up(
         if message.get("role") != "assistant":
             continue
         content = message.get("content")
-        if isinstance(content, str) and "库存" in content and "查询" in content:
+        if (
+            isinstance(content, str)
+            and any(marker in content for marker in _INVENTORY_QUESTION_MARKERS)
+            and any(marker in content for marker in _INVENTORY_OFFER_MARKERS)
+        ):
             product = entities.get("product", "").strip() or _extract_recommended_product(content)
             return f"查询 {product or '上轮首选机型'} 的实时库存"
         break

@@ -113,6 +113,18 @@ class TestResolvePronouns:
         result = resolve_pronouns("这款适合打游戏吗", {"product": "拯救者Y7000"})
         assert result == "拯救者Y7000适合打游戏吗"
 
+    def test_recent_product_reference_replaces_the_whole_phrase(self):
+        result = resolve_pronouns("刚刚那款有货吗", {"product": "惠普锐Pro"})
+        assert result == "惠普锐Pro有货吗"
+
+    def test_stock_confirmation_accepts_natural_inventory_offer(self):
+        result = resolve_stock_follow_up(
+            "需要",
+            {"product": "惠普锐Pro"},
+            [{"role": "assistant", "content": "需要我帮您看看这款是否有现货吗？"}],
+        )
+        assert result == "查询 惠普锐Pro 的实时库存"
+
     def test_replace_gaishangpin(self):
         result = resolve_pronouns("该商品支持分期吗", {"product": "华为Mate 60"})
         assert result == "华为Mate 60支持分期吗"
