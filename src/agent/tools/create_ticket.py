@@ -88,6 +88,8 @@ class CreateTicket(BaseTool):
                 issue=issue,
                 urgency=urgency,
                 customer_user_id=tool_context.user_id,
+                # 只有经受控 Agent 工具创建的明确售后诉求进入自动处理队列。
+                status="AI待处理",
             )
 
             return ToolResult(
@@ -96,8 +98,8 @@ class CreateTicket(BaseTool):
                 data={
                     "ticket_id": ticket_id,
                     "urgency": urgency,
-                    "status": "待处理",
-                    "message": f"工单 {ticket_id} 已创建，人工客服将尽快跟进",
+                    "status": "AI待处理",
+                    "message": f"工单 {ticket_id} 已创建，智能客服正在处理中",
                 },
             )
 

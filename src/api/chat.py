@@ -133,7 +133,7 @@ async def _create_customer_ticket(
     if not ticket_id:
         raise DependencyUnavailableError("工单服务暂时不可用")
 
-    return ticket_id, f"已为您创建售后工单 {ticket_id}。客服会尽快跟进，您也可以在当前会话补充问题细节。"
+    return ticket_id, f"已为您创建售后工单 {ticket_id}。智能客服正在处理中，您也可以在当前会话补充问题细节。"
 
 
 def _build_context(docs: list[dict]) -> str:

@@ -85,7 +85,7 @@ class TestCreateTicketExecute:
         assert result.is_success is True
         assert "ticket_id" in result.data
         assert result.data["ticket_id"].startswith("TK")
-        assert result.data["status"] == "待处理"
+        assert result.data["status"] == "AI待处理"
         assert result.data["urgency"] == "high"
 
         ticket = await get_ticket(result.data["ticket_id"])

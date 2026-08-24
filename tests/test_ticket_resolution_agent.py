@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from agent.ticket_resolution import TicketResolutionAgent
+from store.ticket_store import claim_next_ticket_for_ai
 
 TICKET = {
     "ticket_id": "ticket-ai-1",
@@ -19,6 +20,26 @@ KNOWLEDGE = [
         "content": "先检查电源连接，再长按电源键十秒后重试。",
     }
 ]
+
+
+@pytest.mark.asyncio
+async def test_ai_queue_claim_only_selects_explicitly_agent_queued_tickets() -> None:
+    """旧的“待处理”工单不能因开启 worker 被 AI 自动领取。"""
+    cursor = SimpleNamespace(fetchone=AsyncMock(return_value=None))
+    connection = SimpleNamespace(
+        set_autocommit=AsyncMock(),
+        execute=AsyncMock(return_value=cursor),
+    )
+
+    with (
+        patch("store.ticket_store.get_connection", new=AsyncMock(return_value=connection)),
+        patch("store.ticket_store.put_connection", new=AsyncMock()),
+    ):
+        assert await claim_next_ticket_for_ai(claim_timeout_seconds=120) is None
+
+    sql = str(connection.execute.await_args.args[0])
+    assert "status = 'AI待处理'" in sql
+    assert "status = '待处理'" not in sql
 
 
 @pytest.mark.asyncio

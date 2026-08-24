@@ -42,6 +42,7 @@ async def ai_ticket_data() -> AsyncGenerator[dict[str, int | str], None]:
         ticket_id=ticket_id,
         issue="合成工单：设备无法开机",
         customer_user_id=users["customer"],
+        status="AI待处理",
     )
     yield {"ticket_id": ticket_id, **users}
 

@@ -42,8 +42,12 @@ async def create_ticket(
     phone: str = "",
     urgency: str = "medium",
     customer_user_id: int | None = None,
+    status: str = "待处理",
 ) -> None:
-    """插入一条新工单。"""
+    """插入一条新工单。
+
+    ``AI待处理`` 仅由服务端 Agent 工具使用；普通 API 与兼容调用保持人工队列。
+    """
     conn = None
     try:
         conn = await get_connection()
@@ -51,10 +55,10 @@ async def create_ticket(
         await conn.execute(
             """
             INSERT INTO tickets
-                (ticket_id, customer_user_id, customer_name, phone, issue, urgency)
-            VALUES (%s, %s, %s, %s, %s, %s)
+                (ticket_id, customer_user_id, customer_name, phone, issue, urgency, status)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             """,
-            (ticket_id, customer_user_id, customer_name, phone, issue, urgency),
+            (ticket_id, customer_user_id, customer_name, phone, issue, urgency, status),
         )
         # 新工单的 issue 是客户对话的首句。与工单一起提交，避免出现孤立工单。
         if customer_user_id is not None:
@@ -454,7 +458,7 @@ async def claim_next_ticket_for_ai(claim_timeout_seconds: int) -> dict[str, Any]
                 WHERE assigned_agent_id IS NULL
                   AND customer_user_id IS NOT NULL
                   AND (
-                      status = '待处理'
+                      status = 'AI待处理'
                       OR (
                           status = 'AI处理中'
                           AND ai_claimed_at < NOW() - (%s * INTERVAL '1 second')

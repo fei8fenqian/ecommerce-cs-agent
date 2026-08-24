@@ -123,7 +123,7 @@ async def create_customer_ticket_message(
             """
             UPDATE public.tickets
             SET status = CASE
-                    WHEN assigned_agent_id IS NULL THEN '待处理'
+                    WHEN assigned_agent_id IS NULL AND status IN ('AI处理中', '已处理') THEN 'AI待处理'
                     ELSE status
                 END,
                 ai_claimed_at = CASE
