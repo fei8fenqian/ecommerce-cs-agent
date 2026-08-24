@@ -37,9 +37,12 @@ async def list_products(
         商品目录行；不包含 embedding、完整内部元数据或任何成交事实。
     """
     table = _PRODUCT_TABLES[category]
+    # 两张历史商品表的公共字段相同，但 phone_products 没有 product_type。
+    # 目录展示层使用稳定别名，而不是为了一个展示字段改动历史入库表。
+    product_type_column = "product_type" if category == "laptops" else "'手机'"
     normalized_query = query.strip()
     sql = f"""
-        SELECT id, product_name, brand, price, description, product_type,
+        SELECT id, product_name, brand, price, description, {product_type_column} AS product_type,
                status, stock, warehouse, metadata
         FROM {table}
         WHERE (%s = '' OR product_name ILIKE %s OR brand ILIKE %s)

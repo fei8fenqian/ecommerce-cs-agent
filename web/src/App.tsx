@@ -372,7 +372,7 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
     </aside>
     <section className="chat-main">
       <header className="chat-main-header"><div><strong>{page === "service" ? "智能客服" : page === "catalog" ? "商品目录" : "我的订单"}</strong><span>{page === "service" ? (sessionId ? "当前会话" : "新对话") : "Geex Digital"}</span></div><span className="role-badge">客户服务台</span></header>
-      {page === "catalog" ? <ProductCatalog auth={auth} onAsk={(product) => { setPage("service"); setQuery(`我想了解 ${product.product_name}，请介绍它的配置、适用场景和库存情况。`); }} /> : page === "orders" ? <OrderList auth={auth} /> : <section className="chat-canvas">
+      {page === "catalog" ? <div className="customer-page-scroll"><ProductCatalog auth={auth} onAsk={(product) => { setPage("service"); setQuery(`我想了解 ${product.product_name}，请介绍它的配置、适用场景和库存情况。`); }} /></div> : page === "orders" ? <div className="customer-page-scroll"><OrderList auth={auth} /></div> : <section className="chat-canvas">
         <div ref={chatHistoryRef} className="chat-history chatgpt-history">{chatMessages.length === 0 ? <div className="chat-welcome"><p className="eyebrow">GEEX DIGITAL · AI ASSISTANT</p><h1>今天想解决什么问题？</h1><p>我可以介绍商品、查询已归属订单，也能帮你发起售后工单。</p><div className="prompt-grid"><button className="prompt-card" onClick={() => setQuery("帮我推荐一台预算 5000 元左右的笔记本")}>推荐一台预算 5000 元的笔记本</button><button className="prompt-card" onClick={() => setQuery("帮我查询订单物流")}>查询我的订单物流</button><button className="prompt-card" onClick={() => setQuery("哪些手机目前有库存？")}>查询有库存的手机</button></div></div> : chatMessages.map((message) => <article className={`bubble ${message.role}${!message.content ? " thinking" : ""}${editingMessageId === message.id ? " editing" : ""}`} key={message.id}><div className="message-content">{message.role === "user" && editingMessageId === message.id ? <div className="message-edit"><textarea value={editingValue} onChange={(event) => setEditingValue(event.target.value)} maxLength={2000} autoFocus /></div> : message.content ? message.role === "assistant" ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown> : message.content : streamStatus || "正在思考…"}</div>{message.role === "user" && message.sequenceNo !== undefined && !busy && <div className="message-actions">{editingMessageId === message.id ? <><button className="secondary" onClick={() => { setEditingMessageId(null); setEditingValue(""); }}>取消</button><button onClick={() => saveEditedMessage(message)} disabled={!editingValue.trim()}>生成</button></> : <button className="message-edit-button" onClick={() => { setEditingMessageId(message.id); setEditingValue(message.content); }}>编辑</button>}</div>}</article>)}</div>
         <form className="composer chatgpt-composer" onSubmit={submitChat}><textarea value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={handleChatKeyDown} placeholder="给 Geex AI 发送消息" maxLength={2000} rows={1} /><button aria-label="发送消息" disabled={busy || !query.trim()}>{busy ? "…" : "↑"}</button></form><p className="chat-disclaimer">Enter 发送 · Shift / Alt + Enter 换行</p>
       </section>}
@@ -387,12 +387,22 @@ function ProductCatalog({ auth, onAsk }: { auth: AuthState; onAsk: (product: Pro
   const [products, setProducts] = useState<Product[]>([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const requestVersionRef = useRef(0);
 
   const load = async (nextCategory = category, nextQuery = query): Promise<void> => {
+    const requestVersion = ++requestVersionRef.current;
     setLoading(true); setError("");
-    try { setProducts(await listProducts(auth.token, nextCategory, nextQuery)); }
-    catch (reason) { setError(reason instanceof Error ? reason.message : "商品目录暂时不可用"); }
-    finally { setLoading(false); }
+    setProducts([]);
+    try {
+      const nextProducts = await listProducts(auth.token, nextCategory, nextQuery);
+      if (requestVersion === requestVersionRef.current) setProducts(nextProducts);
+    }
+    catch (reason) {
+      if (requestVersion === requestVersionRef.current) setError(reason instanceof Error ? reason.message : "商品目录暂时不可用");
+    }
+    finally {
+      if (requestVersion === requestVersionRef.current) setLoading(false);
+    }
   };
   useEffect(() => { void load(); }, [auth.token, category]);
   const search = (event: FormEvent): void => { event.preventDefault(); void load(); };

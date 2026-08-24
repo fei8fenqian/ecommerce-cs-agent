@@ -33,6 +33,8 @@ html, body, #root { height: 100%; overflow: hidden; }
 .chat-sidebar, .chat-main { height: 100dvh; min-height: 0; overflow: hidden; }
 .chat-main-header { flex: 0 0 auto; }
 .chat-canvas { min-height: 0; overflow: hidden; }
+.customer-page-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 24px 28px; }
+.customer-page-scroll .catalog, .customer-page-scroll .orders { min-height: 100%; }
 .chatgpt-history { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 .sidebar-sessions { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 .sidebar-tickets { flex: 0 0 auto; overflow-y: auto; overscroll-behavior: contain; }
