@@ -468,6 +468,14 @@ function CustomerTicketCenter({ auth }: { auth: AuthState }) {
     finally { setSending(false); }
   };
 
+  if (!loading && tickets.length === 0) return <section className="customer-ticket-empty panel">
+    <p className="eyebrow">MY AFTER-SALES</p>
+    <h2>暂时没有售后工单</h2>
+    <p>在智能客服中描述设备问题、保修或退款诉求后，Agent 会自动创建工单并优先处理；处理进度会显示在这里。</p>
+    <button className="secondary" onClick={() => void loadTickets()}>刷新状态</button>
+    {error && <p className="error">{error}</p>}
+  </section>;
+
   return <section className="customer-ticket-center">
     <section className="panel customer-ticket-list">
       <div className="section-title"><div><p className="eyebrow">MY AFTER-SALES</p><h2>我的售后</h2><p className="muted">Agent 会自动处理明确问题，复杂情况再转人工。</p></div><button className="secondary" onClick={() => void loadTickets()} disabled={loading}>刷新</button></div>
