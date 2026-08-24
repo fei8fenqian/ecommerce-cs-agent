@@ -98,6 +98,44 @@ def _stream_error_event(request: Request) -> dict[str, str]:
     }
 
 
+def _is_customer_ticket_intent(intent_target: str, role: str) -> bool:
+    """判断是否可将明确的客户售后诉求交给受控工单工具执行。"""
+    return intent_target == "ticket" and role == "customer"
+
+
+async def _create_customer_ticket(
+    request: Request,
+    *,
+    issue: str,
+    tool_context: ToolContext,
+) -> tuple[str, str]:
+    """以当前登录客户身份创建售后工单并生成可直接展示的结果。
+
+    Args:
+        request: 当前 HTTP 请求，用于取得服务端注册的受控工具。
+        issue: 已完成会话消解的客户原始诉求。
+        tool_context: 由服务端构造的当前客户身份，不接受客户端传入的身份。
+
+    Returns:
+        新工单编号和展示给客户的确认消息。
+
+    Raises:
+        DependencyUnavailableError: 工单工具不可用或未返回有效工单编号。
+    """
+    registry = request.app.state.registry
+    result = await registry.execute(
+        "create_ticket",
+        tool_context=tool_context,
+        issue=issue,
+        urgency="medium",
+    )
+    ticket_id = str(result.data.get("ticket_id") or "") if result.is_success else ""
+    if not ticket_id:
+        raise DependencyUnavailableError("工单服务暂时不可用")
+
+    return ticket_id, f"已为您创建售后工单 {ticket_id}。客服会尽快跟进，您也可以在当前会话补充问题细节。"
+
+
 def _build_context(docs: list[dict]) -> str:
     """把检索结果拼成上下文字符串"""
     if not docs:
@@ -166,6 +204,20 @@ async def chat(chat_req: ChatRequest, request: Request):
         effective_query = intent.query or resolved_query
         sentiment = detect_sentiment(effective_query, history=ctx.history)
         sentiment_ctx = build_escalation_prompt(sentiment)
+
+        if _is_customer_ticket_intent(intent.target, tool_context.role):
+            _, answer = await _create_customer_ticket(
+                request,
+                issue=effective_query,
+                tool_context=tool_context,
+            )
+            await session.add_turn_simple(ctx.session_id, user_id, chat_req.query, answer)
+            return ChatResponse(
+                answer=answer,
+                session_id=ctx.session_id,
+                total_steps=1,
+                total_tokens=0,
+            )
 
         if intent.target == "plan_execute":
             plan_agent = request.app.state.plan_execute_agent
@@ -282,6 +334,7 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
 
     stream_res = {"answer": "", "total_steps": 0, "total_tokens": 0}
     start_t = time.perf_counter()
+    create_customer_ticket = _is_customer_ticket_intent(intent.target, tool_context.role)
 
     async def generate():
         stream_completed = False
@@ -289,6 +342,32 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
         try:
             # 先推一个 start 事件给前端，带 session_id
             yield f"data: {json.dumps({'event': 'start', 'session_id': session_id}, ensure_ascii=False)}\n\n"
+
+            if create_customer_ticket:
+                if not await _is_current_chat_run(session_id, chat_run_id):
+                    yield f"data: {json.dumps(_superseded_stream_event(request), ensure_ascii=False)}\n\n"
+                    return
+
+                ticket_id, answer = await _create_customer_ticket(
+                    request,
+                    issue=effective_query,
+                    tool_context=tool_context,
+                )
+                if not await _is_current_chat_run(session_id, chat_run_id):
+                    yield f"data: {json.dumps(_superseded_stream_event(request), ensure_ascii=False)}\n\n"
+                    return
+
+                yield f"data: {json.dumps({'event': 'tool_call', 'name': 'create_ticket'}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'event': 'token', 'content': answer}, ensure_ascii=False)}\n\n"
+                done_event = {
+                    "event": "done",
+                    "answer": answer,
+                    "total_steps": 1,
+                    "ticket_id": ticket_id,
+                }
+                yield f"data: {json.dumps(done_event, ensure_ascii=False)}\n\n"
+                await session.add_turn_simple(session_id, user_id, chat_req.query, answer)
+                return
 
             if intent.target == "plan_execute":
                 plan_agent = request.app.state.plan_execute_agent

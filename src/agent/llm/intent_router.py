@@ -84,6 +84,9 @@ class IntentRouter:
         if self._is_inventory_query(query):
             return Intent(target="agent", query=query, confidence=1.0)
 
+        if self._is_ticket_request(query):
+            return Intent(target="ticket", query=query, confidence=1.0)
+
         messages: list[dict[str, Any]] = [{"role": "system", "content": self.system_prompt}]
         messages.append({"role": "user", "content": self._build_router_input(query, history)})
 
@@ -165,6 +168,35 @@ class IntentRouter:
         normalized = "".join(query.split()).lower()
         desktop_markers = ("台式电脑", "台式机", "组装电脑", "组装机", "装机", "攒机", "配台")
         return any(marker in normalized for marker in desktop_markers)
+
+    @staticmethod
+    def _is_ticket_request(query: str) -> bool:
+        """识别无需模型判断的明确售后请求。
+
+        这里只覆盖用户已经明确要求创建售后事项的表达。退款政策、退货条件等咨询
+        仍交给分类模型走知识库，设备故障排查也仍走诊断链路，避免把普通问答误建
+        成工单。
+        """
+        normalized = "".join(query.split()).lower()
+        policy_markers = ("政策", "流程", "条件", "规则", "怎么退", "能退吗", "可以退吗")
+        if any(marker in normalized for marker in policy_markers):
+            return False
+
+        explicit_markers = (
+            "我要退款",
+            "申请退款",
+            "给我退款",
+            "退钱",
+            "我要投诉",
+            "投诉你们",
+            "转人工",
+            "人工客服",
+            "帮我报修",
+            "申请报修",
+            "帮我保修",
+            "申请维修",
+        )
+        return any(marker in normalized for marker in explicit_markers)
 
     @staticmethod
     def _safe_rewritten_query(candidate: object, original_query: str) -> str:

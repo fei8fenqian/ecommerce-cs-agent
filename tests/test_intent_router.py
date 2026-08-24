@@ -105,6 +105,27 @@ class TestRouteNormal:
         assert intent.table == ""  # ticket 强制置空
 
     @pytest.mark.asyncio
+    async def test_explicit_after_sale_request_bypasses_classifier(self):
+        """明确申请售后时不应因分类模型波动错过受控工单闭环。"""
+        router = _router("not valid JSON")
+
+        intent = await router.route("我要申请退款")
+
+        assert intent.target == "ticket"
+        assert intent.query == "我要申请退款"
+        assert intent.confidence == 1.0
+
+    @pytest.mark.asyncio
+    async def test_refund_policy_question_does_not_create_ticket(self):
+        """政策咨询仍应由知识库回答，不能误创建售后工单。"""
+        router = _router('{"target": "rag", "table": "knowledge_chunks", "confidence": 0.9}')
+
+        intent = await router.route("退款条件是什么")
+
+        assert intent.target == "rag"
+        assert intent.table == "knowledge_chunks"
+
+    @pytest.mark.asyncio
     async def test_rag_with_knowledge_chunks(self):
         router = _router('{"target": "rag", "table": "knowledge_chunks", "confidence": 0.90}')
         intent = await router.route("退货需要什么条件")

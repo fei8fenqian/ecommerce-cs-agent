@@ -18,6 +18,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from agent.engines.loop import LoopResult
 from agent.llm.intent_router import Intent
 from agent.llm.resolve import resolve_pronouns
+from agent.tools_registry import ToolResult
 from api.chat import (
     ChatRequest,
     _claim_chat_run,
@@ -52,6 +53,26 @@ class _MockIntentRouter:
             table="",
             query=query,
             confidence=0.95,
+        )
+
+
+class _MockTicketIntentRouter:
+    """将测试请求稳定路由到客户售后工单闭环。"""
+
+    async def route(self, query: str = "", history=None) -> Intent:
+        return Intent(target="ticket", query=query, confidence=1.0)
+
+
+class _MockToolRegistry:
+    """记录受控工具调用，不连接真实工单数据库。"""
+
+    def __init__(self):
+        self.execute = AsyncMock(
+            return_value=ToolResult(
+                name="create_ticket",
+                status="success",
+                data={"ticket_id": "TK-DEMO-001"},
+            )
         )
 
 
@@ -206,6 +227,7 @@ def client():
     app.state.agent = _MockAgentLoop(answer="这是测试回答")
     app.state.session = _MockSessionManager()
     app.state.intent_router = _MockIntentRouter()
+    app.state.registry = _MockToolRegistry()
     # plan_execute agent (used when intent is plan_execute)
     app.state.plan_execute_agent = _MockAgentLoop(
         answer=json.dumps({"answer": "逐步诊断结果", "plan": ["步骤1", "步骤2"]})
@@ -389,6 +411,24 @@ class TestChatEndpoint:
 # POST /chat/stream
 # =============================================================================
 class TestChatStreamEndpoint:
+    @pytest.mark.asyncio
+    async def test_customer_ticket_intent_creates_ticket_without_calling_llm_agent(self, client):
+        """明确售后诉求应自主建工单，而不是依赖模型决定是否调用工具。"""
+        client.app.state.intent_router = _MockTicketIntentRouter()
+        client.app.state.agent.run_stream = AsyncMock()
+
+        transport = httpx.ASGITransport(app=client.app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+            response = await http_client.post("/api/v1/chat/stream", json={"query": "我要申请退款"})
+
+        assert response.status_code == 200
+        assert '"event": "tool_call"' in response.text
+        assert '"name": "create_ticket"' in response.text
+        assert "TK-DEMO-001" in response.text
+        assert '"event": "done"' in response.text
+        client.app.state.registry.execute.assert_awaited_once()
+        client.app.state.agent.run_stream.assert_not_awaited()
+
     @pytest.mark.asyncio
     async def test_stream_short_confirmation_defaults_to_stock_lookup(self, client):
         """短确认在流式路径也会直接进入库存查询。"""
