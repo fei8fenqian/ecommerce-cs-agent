@@ -21,6 +21,7 @@ import {
   listTickets,
   requestReplyDraft,
   register,
+  sendCustomerTicketMessage,
   sendAgentTicketMessage,
   signIn,
   signOut,
@@ -184,7 +185,7 @@ function Shell({ title, subtitle, auth, onSignOut, children }: { title: string; 
 }
 
 function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: () => Promise<void> }) {
-  const [page, setPage] = useState<"service" | "catalog" | "orders">("service");
+  const [page, setPage] = useState<"service" | "catalog" | "orders" | "tickets">("service");
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [sessionId, setSessionId] = useState<string | undefined>();
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
@@ -366,13 +367,14 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
       <nav className="chat-page-nav" aria-label="客户服务导航">
         <button className={page === "catalog" ? "active" : "secondary"} onClick={() => setPage("catalog")}>商品目录</button>
         <button className={page === "orders" ? "active" : "secondary"} onClick={() => setPage("orders")}>我的订单</button>
+        <button className={page === "tickets" ? "active" : "secondary"} onClick={() => setPage("tickets")}>我的售后</button>
       </nav>
       <section className="sidebar-sessions"><button className="sidebar-section-toggle" onClick={() => setSessionsExpanded((value) => !value)}><span>最近对话</span><span>{sessionsExpanded ? "⌃" : "⌄"}</span></button>{sessionsExpanded && (sessions.length ? sessions.slice(0, 10).map((session) => <div className={`session-item ${sessionId === session.session_id ? "active" : ""}`} key={session.session_id}><a className="session-row" href={sessionUrl(session.session_id)} onClick={(event) => { if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); void openSession(session.session_id); }}><span>{session.title || "新对话"}</span><small>{session.message_count} 条消息</small></a><button className="session-delete" aria-label={`删除会话：${session.title || "新对话"}`} onClick={() => void removeSession(session.session_id)}>×</button></div>) : <p className="sidebar-empty">暂无历史对话</p>)}</section>
       <div className="chat-account"><span>{auth.user.username}</span><button className="text-button" onClick={() => void onSignOut()}>退出</button></div>
     </aside>
     <section className="chat-main">
-      <header className="chat-main-header"><div><strong>{page === "service" ? "智能客服" : page === "catalog" ? "商品目录" : "我的订单"}</strong><span>{page === "service" ? (sessionId ? "当前会话" : "新对话") : "Geex Digital"}</span></div><span className="role-badge">客户服务台</span></header>
-      {page === "catalog" ? <div className="customer-page-scroll"><ProductCatalog auth={auth} onAsk={(product) => { setPage("service"); setQuery(`我想了解 ${product.product_name}，请介绍它的配置、适用场景和库存情况。`); }} /></div> : page === "orders" ? <div className="customer-page-scroll"><OrderList auth={auth} /></div> : <section className="chat-canvas">
+      <header className="chat-main-header"><div><strong>{page === "service" ? "智能客服" : page === "catalog" ? "商品目录" : page === "orders" ? "我的订单" : "我的售后"}</strong><span>{page === "service" ? (sessionId ? "当前会话" : "新对话") : "Geex Digital"}</span></div><span className="role-badge">客户服务台</span></header>
+      {page === "catalog" ? <div className="customer-page-scroll"><ProductCatalog auth={auth} onAsk={(product) => { setPage("service"); setQuery(`我想了解 ${product.product_name}，请介绍它的配置、适用场景和库存情况。`); }} /></div> : page === "orders" ? <div className="customer-page-scroll"><OrderList auth={auth} /></div> : page === "tickets" ? <div className="customer-page-scroll"><CustomerTicketCenter auth={auth} /></div> : <section className="chat-canvas">
         <div ref={chatHistoryRef} className="chat-history chatgpt-history">{chatMessages.length === 0 ? <div className="chat-welcome"><p className="eyebrow">GEEX DIGITAL · AI ASSISTANT</p><h1>今天想解决什么问题？</h1><p>我可以介绍商品、查询已归属订单，也能帮你发起售后工单。</p><div className="prompt-grid"><button className="prompt-card" onClick={() => setQuery("帮我推荐一台预算 5000 元左右的笔记本")}>推荐一台预算 5000 元的笔记本</button><button className="prompt-card" onClick={() => setQuery("帮我查询订单物流")}>查询我的订单物流</button><button className="prompt-card" onClick={() => setQuery("哪些手机目前有库存？")}>查询有库存的手机</button></div></div> : chatMessages.map((message) => <article className={`bubble ${message.role}${!message.content ? " thinking" : ""}${editingMessageId === message.id ? " editing" : ""}`} key={message.id}><div className="message-content">{message.role === "user" && editingMessageId === message.id ? <div className="message-edit"><textarea value={editingValue} onChange={(event) => setEditingValue(event.target.value)} maxLength={2000} autoFocus /></div> : message.content ? message.role === "assistant" ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown> : message.content : streamStatus || "正在思考…"}</div>{message.role === "user" && message.sequenceNo !== undefined && !busy && <div className="message-actions">{editingMessageId === message.id ? <><button className="secondary" onClick={() => { setEditingMessageId(null); setEditingValue(""); }}>取消</button><button onClick={() => saveEditedMessage(message)} disabled={!editingValue.trim()}>生成</button></> : <button className="message-edit-button" onClick={() => { setEditingMessageId(message.id); setEditingValue(message.content); }}>编辑</button>}</div>}</article>)}</div>
         <form className="composer chatgpt-composer" onSubmit={submitChat}><textarea value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={handleChatKeyDown} placeholder="给 Geex AI 发送消息" maxLength={2000} rows={1} /><button aria-label="发送消息" disabled={busy || !query.trim()}>{busy ? "…" : "↑"}</button></form><p className="chat-disclaimer">Enter 发送 · Shift / Alt + Enter 换行</p>
       </section>}
@@ -419,6 +421,63 @@ function OrderList({ auth }: { auth: AuthState }) {
   useEffect(() => { void load(); }, [auth.token]);
 
   return <section className="orders panel"><div className="section-title"><div><p className="eyebrow">MY ORDERS</p><h2>我的订单</h2><p className="muted">只显示已完成账户归属确认的订单。</p></div><button className="secondary" onClick={() => void load()}>刷新</button></div>{error && <p className="error">{error}</p>}{loading ? <p className="empty">正在读取订单…</p> : orders.length ? <div className="order-list">{orders.map((order) => <article className="order-card" key={order.order_id}><header><div><strong>{order.order_id}</strong><small>{formatDate(order.order_date)}</small></div><span className="status">{order.status || "处理中"}</span></header><div className="order-products">{order.items.slice(0, expandedOrder === order.order_id ? undefined : 2).map((item, index) => <p key={index}>{item.brand ? `${item.brand} · ` : ""}{item.product_name}<span>×{item.quantity ?? 1}</span></p>)}</div><footer><div><strong>实付 ¥{order.paid_amount.toLocaleString("zh-CN")}</strong><small>{order.tracking.company && order.tracking.number ? `${order.tracking.company} · ${order.tracking.number}` : "暂无物流信息"}</small></div>{order.items.length > 2 && <button className="secondary" onClick={() => setExpandedOrder(expandedOrder === order.order_id ? null : order.order_id)}>{expandedOrder === order.order_id ? "收起" : `查看 ${order.items.length} 件商品`}</button>}</footer></article>)}</div> : <p className="empty">暂无已归属订单。历史订单无法核验时不会在这里展示。</p>}</section>;
+}
+
+/** 客户查看 Agent 售后处理进度，并在同一工单中继续补充问题。 */
+function CustomerTicketCenter({ auth }: { auth: AuthState }) {
+  const [tickets, setTickets] = useState<Ticket[]>([]);
+  const [selectedTicket, setSelectedTicket] = useState<Ticket | null>(null);
+  const [messages, setMessages] = useState<TicketMessage[]>([]);
+  const [reply, setReply] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState("");
+
+  const loadTickets = async (): Promise<void> => {
+    setLoading(true); setError("");
+    try { setTickets(await listTickets(auth.token)); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "售后工单暂时无法读取"); }
+    finally { setLoading(false); }
+  };
+
+  const selectTicket = async (ticketId: string): Promise<void> => {
+    setError("");
+    try {
+      const [ticket, nextMessages] = await Promise.all([
+        getTicket(auth.token, ticketId),
+        listTicketMessages(auth.token, ticketId),
+      ]);
+      setSelectedTicket(ticket);
+      setMessages(nextMessages);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "无法读取工单详情"); }
+  };
+
+  useEffect(() => { void loadTickets(); }, [auth.token]);
+
+  const sendFollowUp = async (event: FormEvent): Promise<void> => {
+    event.preventDefault();
+    const content = reply.trim();
+    if (!selectedTicket || !content || sending) return;
+    setSending(true); setError("");
+    try {
+      const message = await sendCustomerTicketMessage(auth.token, selectedTicket.ticket_id, content);
+      setMessages((items) => [...items, message]);
+      setReply("");
+      await Promise.all([loadTickets(), selectTicket(selectedTicket.ticket_id)]);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "发送补充信息失败"); }
+    finally { setSending(false); }
+  };
+
+  return <section className="customer-ticket-center">
+    <section className="panel customer-ticket-list">
+      <div className="section-title"><div><p className="eyebrow">MY AFTER-SALES</p><h2>我的售后</h2><p className="muted">Agent 会自动处理明确问题，复杂情况再转人工。</p></div><button className="secondary" onClick={() => void loadTickets()} disabled={loading}>刷新</button></div>
+      {loading ? <p className="empty">正在读取售后进度…</p> : tickets.length ? <div className="ticket-list">{tickets.map((ticket) => <button className={`ticket-card ${selectedTicket?.ticket_id === ticket.ticket_id ? "active" : ""}`} key={ticket.ticket_id} onClick={() => void selectTicket(ticket.ticket_id)}><span className="status">{ticket.status}</span><strong>{ticket.ticket_id}</strong><small>{formatDate(ticket.created_at)}</small></button>)}</div> : <p className="empty">暂时没有售后工单。你可以直接在智能客服中描述问题，Agent 会为你创建并处理。</p>}
+    </section>
+    <section className="panel ticket-detail customer-ticket-detail">
+      {selectedTicket ? <><div className="section-title"><div><p className="eyebrow">AFTER-SALES CONVERSATION</p><h2>{selectedTicket.ticket_id}</h2><p className="muted">当前状态：{selectedTicket.status}</p></div></div><div className="message-history customer-ticket-messages">{messages.length ? messages.map((message) => <Message key={message.message_id} message={message} />) : <p className="empty">暂时没有消息。</p>}</div><form className="composer customer-ticket-composer" onSubmit={sendFollowUp}><textarea value={reply} onChange={(event) => setReply(event.target.value)} maxLength={4000} placeholder="补充问题或回复 Agent…" /><button disabled={sending || !reply.trim()}>{sending ? "发送中…" : "发送"}</button></form></> : <div className="ticket-detail-empty"><h2>查看售后处理进度</h2><p>从左侧选择一张工单，即可看到 Agent 的处理结果并继续追问。</p></div>}
+    </section>
+    {error && <p className="toast error">{error}</p>}
+  </section>;
 }
 
 /** 运营只读库存台：用已存在商品表展示业务事实，再把分析工作交给现有 Agent。 */

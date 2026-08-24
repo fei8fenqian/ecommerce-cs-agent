@@ -35,6 +35,8 @@ html, body, #root { height: 100%; overflow: hidden; }
 .chat-canvas { min-height: 0; overflow: hidden; }
 .customer-page-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 24px 28px; }
 .customer-page-scroll .catalog, .customer-page-scroll .orders { min-height: 100%; }
+.customer-ticket-center { display: grid; grid-template-columns: minmax(250px, 320px) minmax(0, 1fr); gap: 18px; min-height: min(680px, calc(100dvh - 108px)); }.customer-ticket-list, .customer-ticket-detail { min-height: 0; }.customer-ticket-list { overflow-y: auto; }.customer-ticket-list .ticket-card.active { background: #e6edff; outline: 1px solid #cbd8ff; }.customer-ticket-detail { display: flex; flex-direction: column; }.customer-ticket-messages { min-height: 260px; }.customer-ticket-composer { flex: 0 0 auto; margin-top: 14px; }.ticket-detail-empty { margin: auto; max-width: 380px; color: #71809b; text-align: center; line-height: 1.65; }.ticket-detail-empty h2 { color: #33415c; }
+@media (max-width: 840px) { .customer-ticket-center { grid-template-columns: 1fr; min-height: auto; }.customer-ticket-list { max-height: 300px; }.customer-ticket-detail { min-height: 520px; } }
 .chatgpt-history { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 .sidebar-sessions { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 .sidebar-tickets { flex: 0 0 auto; overflow-y: auto; overscroll-behavior: contain; }
