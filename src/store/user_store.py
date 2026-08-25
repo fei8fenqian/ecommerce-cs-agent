@@ -8,6 +8,8 @@ from utils.password_utils import generate_hashed_password
 
 logger = logging.getLogger(__name__)
 
+_INTERNAL_ROLES = frozenset({"admin", "agent", "operator", "finance"})
+
 
 async def init_user_table():
     """建表（幂等）"""
@@ -181,6 +183,62 @@ async def create_initial_admin(username: str, password: str) -> bool:
     finally:
         if conn is not None:
             await put_connection(conn)
+
+
+async def create_initial_internal_user(username: str, password: str, role: str) -> bool:
+    """创建一个内部开发账号；同名同角色账号不覆盖原密码。
+
+    Args:
+        username: 内部账号用户名。
+        password: 初始明文密码，仅在当前调用中用于生成哈希，不会持久化明文。
+        role: 受控内部角色，必须是 admin、agent、operator 或 finance。
+
+    Returns:
+        True 表示创建了新账号；False 表示同名同角色账号已存在且密码未改变。
+
+    Raises:
+        ValueError: 用户名、密码或角色无效，或用户名已被其他角色占用。
+    """
+    username = username.strip()
+    role = role.strip()
+    if not username or not password:
+        raise ValueError("内部账号用户名和密码不能为空")
+    if role not in _INTERNAL_ROLES:
+        raise ValueError("不允许初始化该内部角色")
+
+    password_hash = generate_hashed_password(password).decode()
+    connection = None
+    try:
+        connection = await get_connection()
+        await connection.set_autocommit(True)
+        cursor = await connection.execute(
+            """
+            INSERT INTO public.users (username, password_hash, role)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (username) DO NOTHING
+            RETURNING id
+            """,
+            (username, password_hash, role),
+        )
+        row = await cursor.fetchone()
+        if row is not None:
+            logger.info("内部开发账号创建成功")
+            return True
+
+        cursor = await connection.execute(
+            "SELECT role FROM public.users WHERE username = %s",
+            (username,),
+        )
+        existing = await cursor.fetchone()
+        if existing is None:
+            raise RuntimeError("内部账号初始化失败：用户状态未知")
+        if existing[0] != role:
+            raise ValueError(f"用户名 {username!r} 已被其他角色账号占用")
+        logger.info("内部开发账号已存在，保持原密码不变")
+        return False
+    finally:
+        if connection is not None:
+            await put_connection(connection)
 
 
 async def seed_users(users: Sequence[tuple[str, str, str]]) -> None:
