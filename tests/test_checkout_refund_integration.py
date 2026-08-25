@@ -22,7 +22,7 @@ from store.checkout_refund_store import (
 )
 
 TARGET_DATABASE = "ecommerce_agent_s3_test"
-EXPECTED_REVISION = "e9c4b7d2a618"
+EXPECTED_REVISION = "b4e7c2d9f601"
 
 
 def _dsn() -> str:

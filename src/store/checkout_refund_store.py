@@ -74,6 +74,26 @@ _REFUND_COLUMNS = """
 """
 
 
+async def _select_refund(connection: object, refund_id: UUID) -> CheckoutRefund | None:
+    """在状态更新后通过联表查询完整退款摘要。
+
+    ``UPDATE ... RETURNING`` 只能直接返回被更新表的列，不能返回订单和支付表
+    的联表列；统一在同一事务中重新查询，避免把联表字段塞进 UPDATE 的 RETURNING。
+    """
+    cursor = await connection.execute(  # type: ignore[attr-defined]
+        f"""
+        SELECT {_REFUND_COLUMNS}
+        FROM checkout_refunds AS r
+        JOIN sales_orders AS o ON o.id = r.sales_order_id
+        JOIN payment_transactions AS p ON p.id = r.payment_transaction_id
+        WHERE r.id = %s
+        """,
+        (refund_id,),
+    )
+    row = await cursor.fetchone()
+    return _refund_from_row(row) if row is not None else None
+
+
 async def list_finance_refunds(*, limit: int = 100) -> list[FinanceRefund]:
     """列出财务可见的 checkout 退款摘要。"""
     connection = await get_connection()
@@ -243,18 +263,22 @@ async def start_customer_refund_confirmation(
             return None
 
         cursor = await connection.execute(
-            f"""
+            """
             UPDATE checkout_refunds AS r
             SET status = 'PROCESSING', confirmation_idempotency_key = %s,
                 processing_at = NOW(), updated_at = NOW(), version = r.version + 1
             FROM sales_orders AS o, payment_transactions AS p
             WHERE r.id = %s AND r.sales_order_id = o.id AND r.payment_transaction_id = p.id
               AND r.status = 'PENDING_CONFIRMATION' AND o.status = 'PAID'
-            RETURNING {_REFUND_COLUMNS}
+            RETURNING r.id
             """,
             (confirmation_idempotency_key, refund_id),
         )
-        processing = await cursor.fetchone()
+        processing_row = await cursor.fetchone()
+        if processing_row is None:
+            await connection.rollback()
+            return None
+        processing = await _select_refund(connection, processing_row[0])
         if processing is None:
             await connection.rollback()
             return None
@@ -269,7 +293,7 @@ async def start_customer_refund_confirmation(
             (refund_id,),
         )
         await connection.commit()
-        return RefundConfirmationStart(refund=_refund_from_row(processing), should_submit_to_provider=True)
+        return RefundConfirmationStart(refund=processing, should_submit_to_provider=True)
     except Exception:
         await connection.rollback()
         raise
@@ -333,7 +357,7 @@ async def start_finance_refund_approval(
             return None
 
         cursor = await connection.execute(
-            f"""
+            """
             UPDATE checkout_refunds AS r
             SET status = 'PROCESSING',
                 finance_decision_idempotency_key = %s,
@@ -342,11 +366,15 @@ async def start_finance_refund_approval(
                 finance_decision_note = %s,
                 processing_at = NOW(), updated_at = NOW(), version = r.version + 1
             WHERE r.id = %s AND r.status = 'PENDING_FINANCE_APPROVAL'
-            RETURNING {_REFUND_COLUMNS}
+            RETURNING r.id
             """,
             (decision_idempotency_key, finance_user_id, decision_note, refund_id),
         )
-        processing = await cursor.fetchone()
+        processing_row = await cursor.fetchone()
+        if processing_row is None:
+            await connection.rollback()
+            return None
+        processing = await _select_refund(connection, processing_row[0])
         if processing is None:
             await connection.rollback()
             return None
@@ -360,9 +388,7 @@ async def start_finance_refund_approval(
             (refund_id,),
         )
         await connection.commit()
-        return FinanceDecisionStart(
-            refund=_refund_from_row(processing), should_submit_to_provider=True, idempotent_replay=False
-        )
+        return FinanceDecisionStart(refund=processing, should_submit_to_provider=True, idempotent_replay=False)
     except Exception:
         await connection.rollback()
         raise
@@ -422,22 +448,26 @@ async def reject_finance_refund(
             return None
 
         cursor = await connection.execute(
-            f"""
+            """
             UPDATE checkout_refunds
             SET status = 'REJECTED', finance_decision_idempotency_key = %s,
                 finance_decided_by = %s, finance_decided_at = NOW(),
                 finance_decision_note = %s, updated_at = NOW(), version = version + 1
             WHERE id = %s AND status = 'PENDING_FINANCE_APPROVAL'
-            RETURNING {_REFUND_COLUMNS}
+            RETURNING id
             """,
             (decision_idempotency_key, finance_user_id, decision_note, refund_id),
         )
-        rejected = await cursor.fetchone()
+        rejected_row = await cursor.fetchone()
+        if rejected_row is None:
+            await connection.rollback()
+            return None
+        rejected = await _select_refund(connection, rejected_row[0])
         if rejected is None:
             await connection.rollback()
             return None
         await connection.commit()
-        return _refund_from_row(rejected), False
+        return rejected, False
     except Exception:
         await connection.rollback()
         raise
@@ -481,7 +511,7 @@ async def _finish_checkout_refund(
     try:
         await connection.execute("BEGIN")
         cursor = await connection.execute(
-            f"""
+            """
             UPDATE checkout_refunds AS r
             SET status = %s, provider_refund_reference = COALESCE(%s, r.provider_refund_reference),
                 succeeded_at = CASE WHEN %s = 'SUCCEEDED' THEN NOW() ELSE r.succeeded_at END,
@@ -490,7 +520,7 @@ async def _finish_checkout_refund(
             FROM sales_orders AS o, payment_transactions AS p
             WHERE r.id = %s AND r.status = 'PROCESSING'
               AND r.sales_order_id = o.id AND r.payment_transaction_id = p.id
-            RETURNING {_REFUND_COLUMNS}, r.sales_order_id
+            RETURNING r.id, r.sales_order_id
             """,
             (next_refund_status, provider_refund_reference, next_refund_status, next_refund_status, refund_id),
         )
@@ -498,14 +528,17 @@ async def _finish_checkout_refund(
         if row is None:
             await connection.rollback()
             return None
-        updated = _refund_from_row(row[:9])
+        updated = await _select_refund(connection, row[0])
+        if updated is None:
+            await connection.rollback()
+            return None
         await connection.execute(
             """
             UPDATE sales_orders
             SET status = %s, updated_at = NOW(), version = version + 1
             WHERE id = %s AND status = 'REFUND_PROCESSING'
             """,
-            (next_order_status, row[9]),
+            (next_order_status, row[1]),
         )
         await connection.commit()
         return updated
