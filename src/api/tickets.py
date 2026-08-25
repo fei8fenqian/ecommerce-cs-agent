@@ -166,7 +166,7 @@ async def create_customer_ticket(
     request: Request,
     payload: CustomerTicketCreateRequest,
 ) -> CustomerTicketDetailResponse:
-    """由客户创建工单，并交给现有 AI 工单 Worker 或客服队列处理。"""
+    """由客户创建工单，并优先交给自主售后 Agent 处理。"""
     user = request.state.user
     if user["role"] != "customer":
         raise HTTPException(status_code=403, detail="只有客户可以创建工单")
@@ -180,6 +180,9 @@ async def create_customer_ticket(
         issue=issue,
         urgency="medium",
         customer_user_id=user["id"],
+        # 客户主动发起的售后与聊天工具创建的售后走同一条 Agent 队列。
+        # 只有 Agent 无法可靠处理时才会转成“待人工处理”。
+        status="AI待处理",
     )
     ticket_data = await get_customer_ticket(ticket_id, user["id"])
     if ticket_data is None:

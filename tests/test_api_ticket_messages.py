@@ -190,6 +190,42 @@ async def test_customer_cannot_add_follow_up_to_another_ticket() -> None:
 
 
 @pytest.mark.asyncio
+async def test_customer_created_ticket_enters_agent_queue_first() -> None:
+    """客户从售后页建单也应先交给自主 Agent，不直接落入人工队列。"""
+    app = make_app()
+    created = AsyncMock()
+    fetched = AsyncMock(
+        return_value={
+            "ticket_id": "TKNEW",
+            "customer_name": "",
+            "phone": "",
+            "issue": "设备无法开机",
+            "urgency": "medium",
+            "status": "AI待处理",
+            "created_at": "2026-08-25T10:00:00+00:00",
+        }
+    )
+
+    with (
+        patch("api.tickets.create_ticket", new=created),
+        patch("api.tickets.get_customer_ticket", new=fetched),
+    ):
+        response = await request(
+            app,
+            "customer-a-token",
+            "POST",
+            "/api/v1/tickets",
+            json={"issue": "设备无法开机"},
+        )
+
+    assert response.status_code == 201
+    assert response.json()["status"] == "AI待处理"
+    assert created.await_args is not None
+    assert created.await_args.kwargs["customer_user_id"] == 101
+    assert created.await_args.kwargs["status"] == "AI待处理"
+
+
+@pytest.mark.asyncio
 async def test_ticket_reply_rejects_content_over_4000_characters() -> None:
     app = make_app()
     created = AsyncMock()

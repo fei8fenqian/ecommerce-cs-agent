@@ -865,6 +865,29 @@ function CustomerTicketCenter({ auth }: { auth: AuthState }) {
 
   useEffect(() => { void loadTickets(); }, [auth.token]);
 
+  useEffect(() => {
+    if (!selectedTicket || !["AI待处理", "AI处理中"].includes(selectedTicket.status)) return;
+
+    let active = true;
+    const refreshPendingTicket = async (): Promise<void> => {
+      try {
+        const [ticket, nextMessages] = await Promise.all([
+          getTicket(auth.token, selectedTicket.ticket_id),
+          listTicketMessages(auth.token, selectedTicket.ticket_id),
+        ]);
+        if (!active) return;
+        setSelectedTicket(ticket);
+        setMessages(nextMessages);
+        setTickets((items) => items.map((item) => item.ticket_id === ticket.ticket_id ? { ...item, ...ticket } : item));
+      } catch {
+        // 短轮询只是更新异步处理结果；临时网络失败不打断客户正在输入的内容。
+      }
+    };
+
+    const timer = window.setInterval(() => { void refreshPendingTicket(); }, 2500);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [auth.token, selectedTicket?.ticket_id, selectedTicket?.status]);
+
   const sendFollowUp = async (event: FormEvent): Promise<void> => {
     event.preventDefault();
     const content = reply.trim();
