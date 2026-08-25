@@ -32,6 +32,8 @@ class FinanceRefund:
     currency: str
     reason: str
     requested_at: str
+    finance_decision_note: str = ""
+    finance_decided_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -40,6 +42,15 @@ class RefundConfirmationStart:
 
     refund: CheckoutRefund
     should_submit_to_provider: bool
+
+
+@dataclass(frozen=True)
+class FinanceDecisionStart:
+    """财务审批后的退款提交资格；同一幂等键只允许一次资金提交。"""
+
+    refund: CheckoutRefund
+    should_submit_to_provider: bool
+    idempotent_replay: bool
 
 
 def _refund_from_row(row: tuple[object, ...]) -> CheckoutRefund:
@@ -70,7 +81,8 @@ async def list_finance_refunds(*, limit: int = 100) -> list[FinanceRefund]:
         cursor = await connection.execute(
             """
             SELECT r.id, o.order_no, r.status, r.amount_cents,
-                   r.currency, r.reason, r.requested_at
+                   r.currency, r.reason, r.requested_at,
+                   r.finance_decision_note, r.finance_decided_at
             FROM public.checkout_refunds AS r
             JOIN public.sales_orders AS o ON o.id = r.sales_order_id
             ORDER BY r.requested_at DESC, r.id DESC
@@ -88,6 +100,8 @@ async def list_finance_refunds(*, limit: int = 100) -> list[FinanceRefund]:
                 currency=str(row[4]),
                 reason=str(row[5]),
                 requested_at=str(row[6]),
+                finance_decision_note=str(row[7] or ""),
+                finance_decided_at=str(row[8]) if row[8] is not None else None,
             )
             for row in rows
         ]
@@ -103,6 +117,7 @@ async def create_customer_refund_request(
     merchant_refund_no: str,
     request_idempotency_key: str,
     reason: str,
+    status: str = "PENDING_CONFIRMATION",
 ) -> CheckoutRefund | None:
     """原子创建客户本人的待确认全额退款。
 
@@ -112,6 +127,9 @@ async def create_customer_refund_request(
     connection = await get_connection()
     try:
         await connection.execute("BEGIN")
+        if status not in {"AUTO", "PENDING_CONFIRMATION", "PENDING_FINANCE_APPROVAL"}:
+            raise ValueError("invalid initial refund status")
+
         cursor = await connection.execute(
             f"""
             SELECT {_REFUND_COLUMNS}
@@ -150,13 +168,16 @@ async def create_customer_refund_request(
         if eligible is None or int(eligible[3]) != int(eligible[4]) or int(eligible[3]) <= 0:
             await connection.rollback()
             return None
+        if status == "AUTO":
+            # 首版把金额门槛作为确定性分流；完整事实策略仍由后续资格服务补齐。
+            status = "PENDING_CONFIRMATION" if int(eligible[3]) <= 200000 else "PENDING_FINANCE_APPROVAL"
 
         cursor = await connection.execute(
             """
             INSERT INTO checkout_refunds (
                 id, sales_order_id, payment_transaction_id, customer_user_id,
-                merchant_refund_no, request_idempotency_key, amount_cents, currency, reason
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, 'CNY', %s)
+                merchant_refund_no, request_idempotency_key, status, amount_cents, currency, reason
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'CNY', %s)
             RETURNING id, %s, %s, merchant_refund_no, status, amount_cents,
                       currency, reason, requested_at
             """,
@@ -167,6 +188,7 @@ async def create_customer_refund_request(
                 customer_user_id,
                 merchant_refund_no,
                 request_idempotency_key,
+                status,
                 int(eligible[3]),
                 reason,
                 order_no,
@@ -248,6 +270,174 @@ async def start_customer_refund_confirmation(
         )
         await connection.commit()
         return RefundConfirmationStart(refund=_refund_from_row(processing), should_submit_to_provider=True)
+    except Exception:
+        await connection.rollback()
+        raise
+    finally:
+        await put_connection(connection)
+
+
+async def start_finance_refund_approval(
+    *,
+    finance_user_id: int,
+    refund_id: UUID,
+    decision_idempotency_key: str,
+    decision_note: str,
+) -> FinanceDecisionStart | None:
+    """原子批准待财务退款，并取得唯一的支付宝提交资格。
+
+    Args:
+        finance_user_id: 当前财务用户 ID，写入决策审计字段。
+        refund_id: 要处理的应用自有退款记录 UUID。
+        decision_idempotency_key: 本次财务命令的稳定幂等键。
+        decision_note: 财务的简短处理备注，不包含支付原始报文。
+
+    Returns:
+        首次批准时返回 ``should_submit_to_provider=True``；相同幂等键重放时返回
+        当前处理中记录且不允许再次调用支付网关。
+
+    Raises:
+        ValueError: 幂等键或备注不符合内部边界。
+    """
+    if not decision_idempotency_key or len(decision_idempotency_key) > 80:
+        raise ValueError("invalid finance decision idempotency key")
+    if len(decision_note) > 500:
+        raise ValueError("finance decision note is too long")
+
+    connection = await get_connection()
+    try:
+        await connection.execute("BEGIN")
+        cursor = await connection.execute(
+            f"""
+            SELECT {_REFUND_COLUMNS}, r.finance_decision_idempotency_key
+            FROM checkout_refunds AS r
+            JOIN sales_orders AS o ON o.id = r.sales_order_id
+            JOIN payment_transactions AS p ON p.id = r.payment_transaction_id
+            WHERE r.id = %s
+            FOR UPDATE OF r, o
+            """,
+            (refund_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            await connection.rollback()
+            return None
+
+        refund = _refund_from_row(row[:9])
+        saved_key = str(row[9]) if row[9] is not None else None
+        if refund.status == "PROCESSING" and saved_key == decision_idempotency_key:
+            await connection.commit()
+            return FinanceDecisionStart(refund=refund, should_submit_to_provider=False, idempotent_replay=True)
+        if refund.status != "PENDING_FINANCE_APPROVAL":
+            await connection.rollback()
+            return None
+
+        cursor = await connection.execute(
+            f"""
+            UPDATE checkout_refunds AS r
+            SET status = 'PROCESSING',
+                finance_decision_idempotency_key = %s,
+                finance_decided_by = %s,
+                finance_decided_at = NOW(),
+                finance_decision_note = %s,
+                processing_at = NOW(), updated_at = NOW(), version = r.version + 1
+            WHERE r.id = %s AND r.status = 'PENDING_FINANCE_APPROVAL'
+            RETURNING {_REFUND_COLUMNS}
+            """,
+            (decision_idempotency_key, finance_user_id, decision_note, refund_id),
+        )
+        processing = await cursor.fetchone()
+        if processing is None:
+            await connection.rollback()
+            return None
+        await connection.execute(
+            """
+            UPDATE sales_orders
+            SET status = 'REFUND_PROCESSING', updated_at = NOW(), version = version + 1
+            WHERE id = (SELECT sales_order_id FROM checkout_refunds WHERE id = %s)
+              AND status = 'PAID'
+            """,
+            (refund_id,),
+        )
+        await connection.commit()
+        return FinanceDecisionStart(
+            refund=_refund_from_row(processing), should_submit_to_provider=True, idempotent_replay=False
+        )
+    except Exception:
+        await connection.rollback()
+        raise
+    finally:
+        await put_connection(connection)
+
+
+async def reject_finance_refund(
+    *,
+    finance_user_id: int,
+    refund_id: UUID,
+    decision_idempotency_key: str,
+    decision_note: str,
+) -> tuple[CheckoutRefund, bool] | None:
+    """原子驳回待财务退款；驳回不调用支付网关并保持订单为已支付。
+
+    Args:
+        finance_user_id: 当前财务用户 ID。
+        refund_id: 要驳回的应用自有退款记录 UUID。
+        decision_idempotency_key: 本次财务命令的稳定幂等键。
+        decision_note: 驳回原因，供财务和客户后续查看。
+
+    Returns:
+        ``(退款摘要, 是否为幂等重放)``；资源不存在、状态已变化或使用了不同命令
+        键时返回 None。
+    """
+    if not decision_idempotency_key or len(decision_idempotency_key) > 80:
+        raise ValueError("invalid finance decision idempotency key")
+    if len(decision_note) > 500:
+        raise ValueError("finance decision note is too long")
+
+    connection = await get_connection()
+    try:
+        await connection.execute("BEGIN")
+        cursor = await connection.execute(
+            f"""
+            SELECT {_REFUND_COLUMNS}, r.finance_decision_idempotency_key
+            FROM checkout_refunds AS r
+            JOIN sales_orders AS o ON o.id = r.sales_order_id
+            JOIN payment_transactions AS p ON p.id = r.payment_transaction_id
+            WHERE r.id = %s
+            FOR UPDATE OF r
+            """,
+            (refund_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            await connection.rollback()
+            return None
+        refund = _refund_from_row(row[:9])
+        saved_key = str(row[9]) if row[9] is not None else None
+        if refund.status == "REJECTED" and saved_key == decision_idempotency_key:
+            await connection.commit()
+            return refund, True
+        if refund.status != "PENDING_FINANCE_APPROVAL":
+            await connection.rollback()
+            return None
+
+        cursor = await connection.execute(
+            f"""
+            UPDATE checkout_refunds
+            SET status = 'REJECTED', finance_decision_idempotency_key = %s,
+                finance_decided_by = %s, finance_decided_at = NOW(),
+                finance_decision_note = %s, updated_at = NOW(), version = version + 1
+            WHERE id = %s AND status = 'PENDING_FINANCE_APPROVAL'
+            RETURNING {_REFUND_COLUMNS}
+            """,
+            (decision_idempotency_key, finance_user_id, decision_note, refund_id),
+        )
+        rejected = await cursor.fetchone()
+        if rejected is None:
+            await connection.rollback()
+            return None
+        await connection.commit()
+        return _refund_from_row(rejected), False
     except Exception:
         await connection.rollback()
         raise

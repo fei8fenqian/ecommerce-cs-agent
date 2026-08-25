@@ -1,12 +1,14 @@
 """Checkout API 权限和请求边界测试；不连接 PostgreSQL。"""
 
 from unittest.mock import AsyncMock, patch
+from uuid import UUID
 
 import httpx
 import pytest
 from fastapi import FastAPI, Request
 
 from api.checkout import checkout_router
+from service.checkout_refund_service import CustomerRefundResult
 from service.checkout_service import CheckoutCancellationUnavailableError, CheckoutSession, PaymentNotCreatedError
 from store.checkout_store import CustomerCheckoutOrder
 
@@ -152,3 +154,68 @@ async def test_cannot_cancel_paid_or_changed_checkout():
             response = await client.post("/api/v1/checkout/orders/SO202608240001/cancel")
 
     assert response.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_only_finance_can_approve_refund() -> None:
+    """财务审批接口走统一服务，客服不能借路由触碰资金动作。"""
+    refund_id = "11111111-1111-4111-8111-111111111111"
+    result = CustomerRefundResult(
+        refund_id=UUID(refund_id),
+        order_no="SO202608250001",
+        status="PROCESSING",
+        amount_cents=300000,
+        currency="CNY",
+        reason="测试退款",
+        requested_at="2026-08-25T10:00:00+00:00",
+        idempotent_replay=False,
+    )
+    transport = httpx.ASGITransport(app=_app("finance"))
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        with patch("api.checkout.approve_finance_refund", new=AsyncMock(return_value=result)) as approve:
+            response = await client.post(
+                f"/api/v1/checkout/finance/refunds/{refund_id}/approve",
+                headers={"Idempotency-Key": "finance-approve-0001"},
+                json={"decision_note": "已核对"},
+            )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "PROCESSING"
+    approve.assert_awaited_once()
+
+    transport = httpx.ASGITransport(app=_app("agent"))
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            f"/api/v1/checkout/finance/refunds/{refund_id}/approve",
+            headers={"Idempotency-Key": "finance-approve-0002"},
+            json={"decision_note": "越权"},
+        )
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_finance_can_reject_refund_without_gateway_call() -> None:
+    """驳回命令返回确定性结果，支付网关调用由服务层保证为零。"""
+    refund_id = "22222222-2222-4222-8222-222222222222"
+    result = CustomerRefundResult(
+        refund_id=UUID(refund_id),
+        order_no="SO202608250002",
+        status="REJECTED",
+        amount_cents=300000,
+        currency="CNY",
+        reason="测试退款",
+        requested_at="2026-08-25T10:00:00+00:00",
+        idempotent_replay=False,
+    )
+    transport = httpx.ASGITransport(app=_app("finance"))
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        with patch("api.checkout.reject_finance_refund_request", new=AsyncMock(return_value=result)) as reject:
+            response = await client.post(
+                f"/api/v1/checkout/finance/refunds/{refund_id}/reject",
+                headers={"Idempotency-Key": "finance-reject-0001"},
+                json={"decision_note": "不符合退款条件"},
+            )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "REJECTED"
+    reject.assert_awaited_once()

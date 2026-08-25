@@ -9,12 +9,15 @@ import pytest
 from exceptions import DependencyUnavailableError
 from infra.alipay_sandbox import AlipayRefundRejectedError
 from service.checkout_refund_service import (
+    FinanceRefundDecisionUnavailableError,
     RefundGatewayUnavailableError,
+    approve_finance_refund,
     confirm_customer_refund,
     refresh_customer_refund_status,
+    reject_finance_refund_request,
     request_customer_refund,
 )
-from store.checkout_refund_store import CheckoutRefund, RefundConfirmationStart
+from store.checkout_refund_store import CheckoutRefund, FinanceDecisionStart, RefundConfirmationStart
 
 
 def _refund(*, status: str = "PENDING_CONFIRMATION") -> CheckoutRefund:
@@ -50,6 +53,8 @@ async def test_request_refund_creates_only_a_pending_confirmation_record() -> No
     assert result.status == "PENDING_CONFIRMATION"
     assert result.idempotent_replay is True  # mock returned a historical refund number
     assert created.await_count == 1
+    assert created.await_args is not None
+    assert created.await_args.kwargs["status"] == "AUTO"
 
 
 @pytest.mark.asyncio
@@ -205,3 +210,101 @@ async def test_refresh_non_processing_refund_never_calls_gateway() -> None:
     assert result.status == "SUCCEEDED"
     assert result.idempotent_replay is True
     client.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_finance_approval_submits_high_value_refund_once() -> None:
+    """财务批准取得唯一提交资格后，仍复用同一个支付宝退款服务。"""
+    pending = _refund(status="PENDING_FINANCE_APPROVAL")
+    processing = _refund(status="PROCESSING")
+    processing = CheckoutRefund(**{**processing.__dict__, "refund_id": pending.refund_id})
+    succeeded = _refund(status="SUCCEEDED")
+    succeeded = CheckoutRefund(**{**succeeded.__dict__, "refund_id": pending.refund_id})
+    gateway = AsyncMock()
+    gateway.refund_trade.return_value = {
+        "out_trade_no": pending.merchant_payment_no,
+        "refund_fee": "5299.00",
+        "trade_no": "FINANCE-REFUND-1",
+    }
+    with (
+        patch(
+            "service.checkout_refund_service.start_finance_refund_approval",
+            new=AsyncMock(return_value=FinanceDecisionStart(processing, True, False)),
+        ),
+        patch("service.checkout_refund_service.AlipaySandboxClient.from_settings", return_value=gateway),
+        patch(
+            "service.checkout_refund_service.mark_checkout_refund_succeeded",
+            new=AsyncMock(return_value=succeeded),
+        ) as marked,
+    ):
+        result = await approve_finance_refund(
+            finance_user_id=202,
+            refund_id=pending.refund_id,
+            decision_idempotency_key="finance-approve-0001",
+            decision_note="金额和支付事实已核对",
+        )
+
+    assert result.status == "SUCCEEDED"
+    gateway.refund_trade.assert_awaited_once()
+    marked.assert_awaited_once_with(refund_id=pending.refund_id, provider_refund_reference="FINANCE-REFUND-1")
+
+
+@pytest.mark.asyncio
+async def test_finance_approval_replay_does_not_call_gateway_again() -> None:
+    """财务批准命令重放只返回处理中，不产生第二笔退款。"""
+    processing = _refund(status="PROCESSING")
+    with (
+        patch(
+            "service.checkout_refund_service.start_finance_refund_approval",
+            new=AsyncMock(return_value=FinanceDecisionStart(processing, False, True)),
+        ),
+        patch("service.checkout_refund_service.AlipaySandboxClient.from_settings") as client,
+    ):
+        result = await approve_finance_refund(
+            finance_user_id=202,
+            refund_id=processing.refund_id,
+            decision_idempotency_key="finance-approve-0001",
+            decision_note="重放",
+        )
+
+    assert result.status == "PROCESSING"
+    assert result.idempotent_replay is True
+    client.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_finance_rejection_never_calls_gateway() -> None:
+    """财务驳回只收敛本地状态，不触碰支付宝。"""
+    rejected = _refund(status="REJECTED")
+    with (
+        patch(
+            "service.checkout_refund_service.reject_finance_refund",
+            new=AsyncMock(return_value=(rejected, False)),
+        ),
+        patch("service.checkout_refund_service.AlipaySandboxClient.from_settings") as client,
+    ):
+        result = await reject_finance_refund_request(
+            finance_user_id=202,
+            refund_id=rejected.refund_id,
+            decision_idempotency_key="finance-reject-0001",
+            decision_note="订单已进入履约，不符合首版退款条件",
+        )
+
+    assert result.status == "REJECTED"
+    client.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_finance_command_rejects_already_handled_refund() -> None:
+    """已处理退款不能被第二次财务决策覆盖。"""
+    with patch(
+        "service.checkout_refund_service.start_finance_refund_approval",
+        new=AsyncMock(return_value=None),
+    ):
+        with pytest.raises(FinanceRefundDecisionUnavailableError):
+            await approve_finance_refund(
+                finance_user_id=202,
+                refund_id=uuid4(),
+                decision_idempotency_key="finance-approve-0002",
+                decision_note="重复审批",
+            )

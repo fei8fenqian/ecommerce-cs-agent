@@ -16,7 +16,9 @@ from store.checkout_refund_store import (
     get_customer_checkout_refund,
     mark_checkout_refund_failed,
     mark_checkout_refund_succeeded,
+    reject_finance_refund,
     start_customer_refund_confirmation,
+    start_finance_refund_approval,
 )
 
 
@@ -30,6 +32,10 @@ class RefundConfirmationUnavailableError(ValueError):
 
 class RefundGatewayUnavailableError(ValueError):
     """支付宝结果未知，必须保留处理中状态而不是再次发起退款。"""
+
+
+class FinanceRefundDecisionUnavailableError(ValueError):
+    """财务决策对应的退款不存在、已处理或状态已发生变化。"""
 
 
 @dataclass(frozen=True)
@@ -91,6 +97,7 @@ async def request_customer_refund(
         merchant_refund_no=merchant_refund_no,
         request_idempotency_key=request_idempotency_key,
         reason=reason,
+        status="AUTO",
     )
     if refund is None:
         raise RefundNotEligibleError("checkout refund is not eligible")
@@ -122,20 +129,80 @@ async def confirm_customer_refund(
     if not started.should_submit_to_provider:
         return _to_result(started.refund, idempotent_replay=True)
 
+    return await _submit_refund_to_provider(started.refund)
+
+
+async def approve_finance_refund(
+    *,
+    finance_user_id: int,
+    refund_id: UUID,
+    decision_idempotency_key: str,
+    decision_note: str,
+) -> CustomerRefundResult:
+    """财务批准一笔超出自动资格范围的退款并提交同一确定性支付服务。
+
+    Args:
+        finance_user_id: 当前财务用户 ID。
+        refund_id: 待审批退款 UUID。
+        decision_idempotency_key: 财务命令幂等键。
+        decision_note: 财务审批备注。
+
+    Returns:
+        处理中或最终成功/失败的退款结果；相同幂等键重放不会再次调用支付宝。
+
+    Raises:
+        FinanceRefundDecisionUnavailableError: 退款不在待审批状态。
+        RefundGatewayUnavailableError: 支付结果未知，退款保持处理中。
+    """
+    started = await start_finance_refund_approval(
+        finance_user_id=finance_user_id,
+        refund_id=refund_id,
+        decision_idempotency_key=decision_idempotency_key,
+        decision_note=decision_note,
+    )
+    if started is None:
+        raise FinanceRefundDecisionUnavailableError("refund is not awaiting finance approval")
+    if not started.should_submit_to_provider:
+        return _to_result(started.refund, idempotent_replay=started.idempotent_replay)
+    return await _submit_refund_to_provider(started.refund)
+
+
+async def reject_finance_refund_request(
+    *,
+    finance_user_id: int,
+    refund_id: UUID,
+    decision_idempotency_key: str,
+    decision_note: str,
+) -> CustomerRefundResult:
+    """财务驳回退款申请；不调用支付网关、不修改订单支付事实。"""
+    rejected = await reject_finance_refund(
+        finance_user_id=finance_user_id,
+        refund_id=refund_id,
+        decision_idempotency_key=decision_idempotency_key,
+        decision_note=decision_note,
+    )
+    if rejected is None:
+        raise FinanceRefundDecisionUnavailableError("refund is not awaiting finance approval")
+    refund, replay = rejected
+    return _to_result(refund, idempotent_replay=replay)
+
+
+async def _submit_refund_to_provider(refund: CheckoutRefund) -> CustomerRefundResult:
+    """将已获得唯一提交资格的退款交给支付适配器并收敛本地状态。"""
     try:
         gateway_result = await AlipaySandboxClient.from_settings().refund_trade(
-            merchant_payment_no=started.refund.merchant_payment_no,
-            merchant_refund_no=started.refund.merchant_refund_no,
-            amount_cents=started.refund.amount_cents,
+            merchant_payment_no=refund.merchant_payment_no,
+            merchant_refund_no=refund.merchant_refund_no,
+            amount_cents=refund.amount_cents,
         )
         returned_order_no = gateway_result.get("out_trade_no")
         refunded_cents = int(
             (Decimal(str(gateway_result["refund_fee"])) * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
         )
-        if returned_order_no != started.refund.merchant_payment_no or refunded_cents != started.refund.amount_cents:
+        if returned_order_no != refund.merchant_payment_no or refunded_cents != refund.amount_cents:
             raise RefundGatewayUnavailableError("支付宝退款结果无法匹配")
     except AlipayRefundRejectedError:
-        failed = await mark_checkout_refund_failed(started.refund.refund_id)
+        failed = await mark_checkout_refund_failed(refund.refund_id)
         if failed is None:
             raise RefundConfirmationUnavailableError("refund state changed")
         return _to_result(failed, idempotent_replay=False)
@@ -145,7 +212,7 @@ async def confirm_customer_refund(
         raise RefundGatewayUnavailableError("支付宝退款结果暂时无法确认") from exc
 
     succeeded = await mark_checkout_refund_succeeded(
-        refund_id=started.refund.refund_id,
+        refund_id=refund.refund_id,
         provider_refund_reference=str(gateway_result.get("trade_no") or "") or None,
     )
     if succeeded is None:

@@ -7,11 +7,14 @@ from pydantic import BaseModel, Field
 
 from service.checkout_refund_service import (
     CustomerRefundResult,
+    FinanceRefundDecisionUnavailableError,
     RefundConfirmationUnavailableError,
     RefundGatewayUnavailableError,
     RefundNotEligibleError,
+    approve_finance_refund,
     confirm_customer_refund,
     refresh_customer_refund_status,
+    reject_finance_refund_request,
     request_customer_refund,
 )
 from service.checkout_service import (
@@ -89,12 +92,20 @@ class FinanceRefundItem(BaseModel):
     currency: str
     reason: str
     requested_at: str
+    finance_decision_note: str
+    finance_decided_at: str | None
 
 
 class FinanceRefundListResponse(BaseModel):
     """财务可见的退款队列。"""
 
     refunds: list[FinanceRefundItem]
+
+
+class FinanceRefundDecisionRequest(BaseModel):
+    """财务审批或驳回的受控备注；退款金额始终读取服务端事实。"""
+
+    decision_note: str = Field(default="", max_length=500)
 
 
 class CancelCheckoutResponse(BaseModel):
@@ -216,10 +227,62 @@ async def finance_refunds(request: Request) -> FinanceRefundListResponse:
                 currency=refund.currency,
                 reason=refund.reason,
                 requested_at=refund.requested_at,
+                finance_decision_note=refund.finance_decision_note,
+                finance_decided_at=refund.finance_decided_at,
             )
             for refund in refunds
         ]
     )
+
+
+@checkout_router.post("/finance/refunds/{refund_id}/approve", response_model=CheckoutRefundResponse)
+async def approve_finance_refund_route(
+    refund_id: str,
+    body: FinanceRefundDecisionRequest,
+    request: Request,
+    idempotency_key: str = Header(alias="Idempotency-Key", min_length=8, max_length=80),
+) -> CheckoutRefundResponse:
+    """财务批准退款；审批和资金提交仍由确定性服务串联完成。"""
+    from uuid import UUID
+
+    if request.state.user["role"] != "finance":
+        raise HTTPException(status_code=403, detail="只有财务可以审批退款")
+    try:
+        result = await approve_finance_refund(
+            finance_user_id=int(request.state.user["id"]),
+            refund_id=UUID(refund_id),
+            decision_idempotency_key=idempotency_key,
+            decision_note=body.decision_note.strip(),
+        )
+    except (ValueError, FinanceRefundDecisionUnavailableError) as exc:
+        raise HTTPException(status_code=409, detail="该退款当前不能审批") from exc
+    except RefundGatewayUnavailableError as exc:
+        raise HTTPException(status_code=503, detail="支付宝退款结果暂时无法确认，请稍后查看退款状态") from exc
+    return _refund_response(result)
+
+
+@checkout_router.post("/finance/refunds/{refund_id}/reject", response_model=CheckoutRefundResponse)
+async def reject_finance_refund_route(
+    refund_id: str,
+    body: FinanceRefundDecisionRequest,
+    request: Request,
+    idempotency_key: str = Header(alias="Idempotency-Key", min_length=8, max_length=80),
+) -> CheckoutRefundResponse:
+    """财务驳回退款；不调用支付宝，订单仍保持已支付。"""
+    from uuid import UUID
+
+    if request.state.user["role"] != "finance":
+        raise HTTPException(status_code=403, detail="只有财务可以驳回退款")
+    try:
+        result = await reject_finance_refund_request(
+            finance_user_id=int(request.state.user["id"]),
+            refund_id=UUID(refund_id),
+            decision_idempotency_key=idempotency_key,
+            decision_note=body.decision_note.strip(),
+        )
+    except (ValueError, FinanceRefundDecisionUnavailableError) as exc:
+        raise HTTPException(status_code=409, detail="该退款当前不能驳回") from exc
+    return _refund_response(result)
 
 
 @checkout_router.post("/orders/{order_no}/refresh-payment", response_model=CheckoutOrderItem)
