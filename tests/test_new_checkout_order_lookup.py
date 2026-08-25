@@ -32,6 +32,7 @@ async def test_current_customer_lookup_includes_new_checkout_orders():
         orders = await find_orders(101)
 
     assert orders[0]["order_id"] == "SO202608240001"
+    assert orders[0]["order_source"] == "checkout"
     assert orders[0]["status"] == "PENDING_FULFILLMENT"
     assert orders[0]["paid_amount"] == 2999.0
 
@@ -55,3 +56,27 @@ async def test_track_order_without_parameters_reads_current_customer_orders():
 
     assert result.is_success is True
     assert result.data == {"count": 1, "orders": [order]}
+
+
+@pytest.mark.asyncio
+async def test_legacy_order_is_marked_as_read_only_history():
+    """旧订单仍可兼容查询，但结果必须显式标记为 legacy 来源。"""
+    legacy_order = {
+        "order_id": "legacy-001",
+        "status": "shipped",
+        "tracking": {"company": "测试物流", "number": "TEST-001"},
+        "total_amount": 100.0,
+        "paid_amount": 100.0,
+        "payment_method": "历史订单",
+        "order_date": "2026-08-01T12:00:00+00:00",
+        "delivered_at": None,
+        "items": [],
+    }
+    with (
+        patch("store.order_store.list_customer_orders", new=AsyncMock(return_value=[legacy_order])),
+        patch("store.order_store.list_customer_checkout_orders", new=AsyncMock(return_value=[])),
+    ):
+        orders = await find_orders(101)
+
+    assert orders[0]["order_id"] == "legacy-001"
+    assert orders[0]["order_source"] == "legacy"

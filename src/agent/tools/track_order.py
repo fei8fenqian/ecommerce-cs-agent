@@ -21,7 +21,9 @@ class TrackOrder(BaseTool):
         return """查询订单状态与物流信息。
         适用场景：用户询问"我的订单到哪了""帮我查一下订单""这个手机号下的订单"等。
         查单规则：优先用订单号精确查询；若无订单号则查询当前登录客户最近订单；
-        手机号仅用于兼容已确认归属的历史订单。"""
+        手机号仅用于兼容已确认归属的历史订单。
+        返回结果中的 order_source=checkout 表示当前商城新交易，
+        order_source=legacy 表示只读历史订单；不要把两者的支付或退款事实混为一谈。"""
 
     @property
     def parameters(self) -> dict[str, Any]:

@@ -38,6 +38,7 @@ def _to_orders(rows: list[tuple[Any, ...]]) -> list[dict[str, Any]]:
         if current_order_id not in orders_by_id:
             orders_by_id[current_order_id] = {
                 "order_id": current_order_id,
+                "order_source": "legacy",
                 "status": row[1],
                 "tracking": {"company": row[2], "number": row[3]},
                 "total_amount": float(row[4]) if row[4] else 0.0,
@@ -80,9 +81,12 @@ async def find_orders(
         where_clause = "o.customer_user_id = %s AND o.phone = %s"
         params = (customer_user_id, phone)
     else:
-        legacy_orders = await list_customer_orders(customer_user_id, limit=10)
+        legacy_orders = [
+            {**order, "order_source": "legacy"} for order in await list_customer_orders(customer_user_id, limit=10)
+        ]
         checkout_orders = await list_customer_checkout_orders(customer_user_id, limit=10)
-        return [_checkout_order_to_tool_order(order) for order in checkout_orders] + legacy_orders
+        merged_orders = [_checkout_order_to_tool_order(order) for order in checkout_orders] + legacy_orders
+        return sorted(merged_orders, key=lambda item: str(item.get("order_date", "")), reverse=True)
 
     conn = None
     try:
@@ -98,7 +102,11 @@ async def find_orders(
 
 
 def _checkout_order_to_tool_order(order: object) -> dict[str, Any]:
-    """把应用自有支付订单映射为现有 Agent 查单工具的统一输出。"""
+    """把应用自有支付订单映射为现有 Agent 查单工具的统一输出。
+
+    已退款订单的退款事实优先于履约事实。退款成功后即使历史履约记录仍是
+    ``PENDING_FULFILLMENT``，也不能让 Agent 把它解释为“正在等待发货”。
+    """
     order_no = str(getattr(order, "order_no"))
     amount_cents = int(getattr(order, "total_amount_cents"))
     payment_status = str(getattr(order, "payment_status"))
@@ -106,8 +114,10 @@ def _checkout_order_to_tool_order(order: object) -> dict[str, Any]:
     tracking_company = getattr(order, "tracking_company")
     tracking_number = getattr(order, "tracking_number")
     paid_amount = amount_cents / 100 if payment_status == "SUCCEEDED" else 0.0
-    return {
+    refund_status = getattr(order, "refund_status", None)
+    result: dict[str, Any] = {
         "order_id": order_no,
+        "order_source": "checkout",
         "status": str(fulfillment_status or getattr(order, "status")),
         "tracking": {"company": tracking_company, "number": tracking_number},
         "total_amount": amount_cents / 100,
@@ -124,6 +134,45 @@ def _checkout_order_to_tool_order(order: object) -> dict[str, Any]:
             }
         ],
     }
+
+    if refund_status is None:
+        return result
+
+    refund_status_text = str(refund_status)
+    result["refund"] = {"status": refund_status_text}
+    if refund_status_text == "SUCCEEDED":
+        result.update(
+            {
+                "status": "REFUNDED",
+                "tracking": {"company": None, "number": None},
+                "fulfillment_status": "NOT_APPLICABLE",
+                "refund": {
+                    "status": "SUCCEEDED",
+                    "message": "退款已完成；该订单不会进入发货或物流流程。",
+                },
+            }
+        )
+    elif refund_status_text == "PROCESSING":
+        result.update(
+            {
+                "status": "REFUND_PROCESSING",
+                "refund": {
+                    "status": "PROCESSING",
+                    "message": "退款正在处理；请等待退款结果，不要按物流状态解释。",
+                },
+            }
+        )
+    elif refund_status_text == "PENDING_CONFIRMATION":
+        result.update(
+            {
+                "status": "REFUND_CONFIRMATION_REQUIRED",
+                "refund": {
+                    "status": "PENDING_CONFIRMATION",
+                    "message": "退款申请已创建，正等待客户确认。",
+                },
+            }
+        )
+    return result
 
 
 async def _find_customer_checkout_orders(customer_user_id: int, order_no: str) -> list[dict[str, Any]]:
