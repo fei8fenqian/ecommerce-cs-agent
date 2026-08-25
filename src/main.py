@@ -15,6 +15,7 @@ from agent.mcp_tool import MCPClientManager, MCPTool
 from agent.rag.retrieve import warmup_customer_catalog_retrieval
 from agent.ticket_resolution import TicketResolutionAgent, TicketResolutionWorker
 from agent.tools import (
+    check_payment_status,
     check_stock,
     compare_products,
     create_ticket,
@@ -125,6 +126,7 @@ async def lifespan(app: FastAPI):
     registry.register(search_product.SearchProduct())
     registry.register(check_stock.CheckStock())
     registry.register(track_order.TrackOrder())
+    registry.register(check_payment_status.CheckPaymentStatus())
     registry.register(create_ticket.CreateTicket())
     registry.register(compare_products.CompareProducts())
     registry.register(search_component.SearchComponent())
