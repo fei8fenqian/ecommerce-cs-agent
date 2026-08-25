@@ -15,6 +15,7 @@ from agent.mcp_tool import MCPClientManager, MCPTool
 from agent.rag.retrieve import warmup_customer_catalog_retrieval
 from agent.ticket_resolution import TicketResolutionAgent, TicketResolutionWorker
 from agent.tools import (
+    check_after_sales,
     check_payment_status,
     check_stock,
     compare_products,
@@ -47,12 +48,14 @@ from exceptions import BaseAppException
 from infra.casbin_enforcer import init_casbin
 from infra.circuit_breaker import CircuitBreaker
 from infra.db_pool import close_pool, init_pool
+from infra.feishu_notifier import build_duty_notifier
 from infra.redis_client import close_redis, health_check, init_redis
 from log_config import setup_logging
 from middleware.auth import AuthMiddleware
 from middleware.metrics import MetricsMiddleware
 from middleware.rate_limit import RateLimitMiddleware
 from middleware.request_id import RequestIDMiddleware
+from service.ticket_escalation_worker import TicketEscalationNotificationWorker
 from store.user_store import seed_users
 
 _logger = logging.getLogger(__name__)
@@ -127,6 +130,7 @@ async def lifespan(app: FastAPI):
     registry.register(check_stock.CheckStock())
     registry.register(track_order.TrackOrder())
     registry.register(check_payment_status.CheckPaymentStatus())
+    registry.register(check_after_sales.CheckAfterSales())
     registry.register(create_ticket.CreateTicket())
     registry.register(compare_products.CompareProducts())
     registry.register(search_component.SearchComponent())
@@ -176,6 +180,7 @@ async def lifespan(app: FastAPI):
         _logger.warning("customer catalog retrieval warmup failed")
 
     ticket_worker_task: asyncio.Task[None] | None = None
+    escalation_worker_task: asyncio.Task[None] | None = None
     if settings.ai_ticket_worker_enabled:
         ticket_resolution_agent = TicketResolutionAgent(
             llm,
@@ -189,6 +194,20 @@ async def lifespan(app: FastAPI):
         app.state.ticket_resolution_worker = ticket_worker
         _logger.info("AI ticket worker enabled")
 
+    if settings.feishu_escalation_worker_enabled:
+        escalation_worker = TicketEscalationNotificationWorker(
+            build_duty_notifier(),
+            interval_seconds=settings.feishu_escalation_worker_interval_seconds,
+            max_attempts=settings.feishu_escalation_max_attempts,
+            claim_timeout_seconds=settings.feishu_escalation_claim_timeout_seconds,
+        )
+        escalation_worker_task = asyncio.create_task(
+            escalation_worker.run(),
+            name="ticket-escalation-notification-worker",
+        )
+        app.state.ticket_escalation_worker = escalation_worker
+        _logger.info("ticket escalation notification worker enabled")
+
     yield
 
     # shutdown
@@ -196,6 +215,12 @@ async def lifespan(app: FastAPI):
         ticket_worker_task.cancel()
         try:
             await ticket_worker_task
+        except asyncio.CancelledError:
+            pass
+    if escalation_worker_task is not None:
+        escalation_worker_task.cancel()
+        try:
+            await escalation_worker_task
         except asyncio.CancelledError:
             pass
     await close_pool()
