@@ -866,6 +866,12 @@ function CustomerTicketCenter({ auth }: { auth: AuthState }) {
   useEffect(() => { void loadTickets(); }, [auth.token]);
 
   useEffect(() => {
+    // 从聊天中的“查看售后进度”进入时，直接打开最新工单并开始观察 Agent 处理结果。
+    // 客户仍可随时在左侧切换到其他历史工单。
+    if (!selectedTicket && tickets[0]) void selectTicket(tickets[0].ticket_id);
+  }, [tickets, selectedTicket?.ticket_id]);
+
+  useEffect(() => {
     if (!selectedTicket || !["AI待处理", "AI处理中"].includes(selectedTicket.status)) return;
 
     let active = true;
