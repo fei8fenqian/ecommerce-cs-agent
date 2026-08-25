@@ -31,6 +31,24 @@ class AlipayTradeNotFoundError(AlipayGatewayError):
     """本地待支付单未曾在支付宝侧成功创建交易。"""
 
 
+class AlipayRefundRejectedError(AlipayGatewayError):
+    """支付宝明确拒绝一笔退款；这与网络超时的未知结果不同。"""
+
+
+@dataclass(frozen=True)
+class AlipayPagePayForm:
+    """浏览器提交到支付宝收银台的一次性表单。"""
+
+    action: str
+    fields: dict[str, str]
+
+    @property
+    def url(self) -> str:
+        """保留 GET URL 作为旧客户端的兼容回退。"""
+        separator = "&" if "?" in self.action else "?"
+        return f"{self.action}{separator}{urlencode(self.fields)}"
+
+
 @dataclass(frozen=True)
 class AlipaySandboxClient:
     """仅处理支付宝沙箱协议，不直接写入订单或支付表。"""
@@ -41,6 +59,7 @@ class AlipaySandboxClient:
     alipay_public_key_pem: bytes
     notify_url: str
     return_url: str
+    timeout_seconds: float = 30.0
 
     @classmethod
     def from_settings(cls) -> "AlipaySandboxClient":
@@ -67,6 +86,7 @@ class AlipaySandboxClient:
                 alipay_public_key_pem=Path(settings.alipay_sandbox_public_key_path).read_bytes(),
                 notify_url=settings.alipay_sandbox_notify_url,
                 return_url=settings.alipay_sandbox_return_url,
+                timeout_seconds=settings.alipay_sandbox_timeout_seconds,
             )
             client._load_app_private_key()
             client._load_alipay_public_key()
@@ -82,26 +102,128 @@ class AlipaySandboxClient:
         subject: str,
         return_url: str | None = None,
     ) -> str:
-        """构建已 RSA2 签名的电脑网站支付跳转链接。"""
+        """构建已 RSA2 签名的电脑网站支付跳转链接。
+
+        新客户端优先使用 :meth:`build_page_pay_form` 的 POST 表单；保留此方法
+        是为了兼容已有订单页和外部调用方。
+        """
+        return self.build_page_pay_form(
+            merchant_payment_no=merchant_payment_no,
+            amount_cents=amount_cents,
+            subject=subject,
+            return_url=return_url,
+        ).url
+
+    def build_page_pay_form(
+        self,
+        *,
+        merchant_payment_no: str,
+        amount_cents: int,
+        subject: str,
+        return_url: str | None = None,
+    ) -> AlipayPagePayForm:
+        """构建支付宝电脑网站支付的浏览器 POST 表单数据。
+
+        Args:
+            merchant_payment_no: 本系统生成的唯一商户交易号。
+            amount_cents: 服务端核验后的 CNY 整数分金额。
+            subject: 客户可见的订单标题。
+            return_url: 支付完成后的受控浏览器回跳地址。
+
+        Returns:
+            可直接由浏览器 ``form.submit()`` 提交的 action 和签名字段。
+        """
         parameters = self._build_common_parameters("alipay.trade.page.pay")
         parameters.update(
             {
-                "notify_url": self.notify_url,
                 "return_url": return_url or self.return_url,
                 "biz_content": json.dumps(
                     {
                         "out_trade_no": merchant_payment_no,
                         "product_code": "FAST_INSTANT_TRADE_PAY",
                         "total_amount": self._format_amount(amount_cents),
-                        "subject": subject[:128],
+                        # 沙箱的 page.pay 对长爬虫标题和临时回调地址都不稳定；
+                        # 商品明细仍由本地订单页展示，收银台只需稳定的订单概览。
+                        "subject": "Geex Digital Order",
                     },
-                    ensure_ascii=False,
+                    # 收银台标题固定为 ASCII，避免浏览器表单编码改变签名串。
+                    ensure_ascii=True,
                     separators=(",", ":"),
                 ),
             }
         )
-        signature = self._sign(self._canonical(parameters))
-        return f"{self.gateway}?{urlencode({**parameters, 'sign': signature})}"
+        parameters["sign"] = self._sign(self._canonical(parameters))
+        # 页面支付完成后以前端回跳为触发点，由服务端 query_trade 收敛状态。
+        # 沙箱的临时 trycloudflare 回调会使其在创建收银台时重定向到 /error，故不
+        # 传 notify_url；生产适配器必须改用稳定、可公网访问的异步回调地址。
+        # charset 必须留在 action 查询字符串中，同时参与原始签名。
+        charset = parameters.pop("charset")
+        return AlipayPagePayForm(action=f"{self.gateway}?charset={charset}", fields=parameters)
+
+    async def precreate_trade(
+        self,
+        *,
+        merchant_payment_no: str,
+        amount_cents: int,
+        subject: str,
+    ) -> str:
+        """创建支付宝当面付交易，并返回仅供前端生成二维码的内容。
+
+        Args:
+            merchant_payment_no: 本系统生成的唯一商户交易号。
+            amount_cents: 服务端核验后的 CNY 整数分金额。
+            subject: 收银台和沙箱钱包展示的简短商品标题。
+
+        Returns:
+            支付宝返回的 ``qr_code`` 字符串。它不是支付成功凭据，付款结果仍需
+            通过 :meth:`query_trade` 确认。
+
+        Raises:
+            AlipayGatewayError: 网关不可达、拒绝创建交易或未返回二维码。
+        """
+        parameters = self._build_common_parameters("alipay.trade.precreate")
+        parameters.update(
+            {
+                "biz_content": json.dumps(
+                    {
+                        "out_trade_no": merchant_payment_no,
+                        "total_amount": self._format_amount(amount_cents),
+                        "subject": subject[:128],
+                        "timeout_express": "15m",
+                    },
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                ),
+            }
+        )
+        parameters["sign"] = self._sign(self._canonical(parameters))
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                response = await client.post(self.gateway, data=parameters)
+                response.raise_for_status()
+            try:
+                payload = json.loads(response.content.decode("utf-8"))
+            except UnicodeDecodeError:
+                payload = json.loads(response.content.decode("gbk"))
+            result = payload.get("alipay_trade_precreate_response")
+            if not isinstance(result, dict) or result.get("code") != "10000":
+                logger.warning(
+                    "Alipay precreate rejected",
+                    extra={
+                        "gateway_code": str(result.get("code", "")) if isinstance(result, dict) else "",
+                        "gateway_sub_code": str(result.get("sub_code", "")) if isinstance(result, dict) else "",
+                    },
+                )
+                raise AlipayGatewayError("支付宝暂时无法创建二维码付款")
+            qr_code = result.get("qr_code")
+            if not isinstance(qr_code, str) or not qr_code:
+                raise AlipayGatewayError("支付宝未返回付款二维码")
+            return qr_code
+        except (httpx.HTTPError, TypeError, ValueError) as exc:
+            if isinstance(exc, AlipayGatewayError):
+                raise
+            logger.warning("Alipay precreate request failed", extra={"failure_type": type(exc).__name__})
+            raise AlipayGatewayError("支付宝暂时无法创建二维码付款") from exc
 
     async def query_trade(self, merchant_payment_no: str) -> Mapping[str, object]:
         """查询支付宝侧交易事实，用于回跳或通知缺失时的状态收敛。
@@ -117,11 +239,11 @@ class AlipaySandboxClient:
         """
         parameters = self._build_common_parameters("alipay.trade.query")
         parameters["biz_content"] = json.dumps(
-            {"out_trade_no": merchant_payment_no}, ensure_ascii=False, separators=(",", ":")
+            {"out_trade_no": merchant_payment_no}, ensure_ascii=True, separators=(",", ":")
         )
         parameters["sign"] = self._sign(self._canonical(parameters))
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
                 response = await client.post(self.gateway, data=parameters)
                 response.raise_for_status()
             try:
@@ -160,11 +282,11 @@ class AlipaySandboxClient:
         """
         parameters = self._build_common_parameters("alipay.trade.close")
         parameters["biz_content"] = json.dumps(
-            {"out_trade_no": merchant_payment_no}, ensure_ascii=False, separators=(",", ":")
+            {"out_trade_no": merchant_payment_no}, ensure_ascii=True, separators=(",", ":")
         )
         parameters["sign"] = self._sign(self._canonical(parameters))
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
                 response = await client.post(self.gateway, data=parameters)
                 response.raise_for_status()
             try:
@@ -182,6 +304,121 @@ class AlipaySandboxClient:
                 raise
             logger.warning("Alipay trade close request failed", extra={"failure_type": type(exc).__name__})
             raise AlipayGatewayError("支付宝暂时无法关闭交易") from exc
+
+    async def refund_trade(
+        self,
+        *,
+        merchant_payment_no: str,
+        merchant_refund_no: str,
+        amount_cents: int,
+    ) -> Mapping[str, object]:
+        """提交一笔全额退款并返回经网关基础校验的结果。
+
+        Args:
+            merchant_payment_no: 原支付请求的商户交易号。
+            merchant_refund_no: 本系统生成且全局唯一的商户退款号。
+            amount_cents: 仅支持 CNY 整数分，由应用服务核验为原支付全额。
+
+        Returns:
+            支付宝 ``alipay_trade_refund_response`` 的业务字段。
+
+        Raises:
+            AlipayRefundRejectedError: 网关明确返回业务拒绝。
+            AlipayGatewayError: 网络或网关结果不可信，调用方必须保留处理中状态。
+        """
+        parameters = self._build_common_parameters("alipay.trade.refund")
+        parameters["biz_content"] = json.dumps(
+            {
+                "out_trade_no": merchant_payment_no,
+                "out_request_no": merchant_refund_no,
+                "refund_amount": self._format_amount(amount_cents),
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
+        parameters["sign"] = self._sign(self._canonical(parameters))
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                response = await client.post(self.gateway, data=parameters)
+                response.raise_for_status()
+            try:
+                payload = json.loads(response.content.decode("utf-8"))
+            except UnicodeDecodeError:
+                payload = json.loads(response.content.decode("gbk"))
+            result = payload.get("alipay_trade_refund_response")
+            if not isinstance(result, dict):
+                raise AlipayGatewayError("支付宝退款结果无效")
+            if result.get("code") != "10000":
+                logger.warning(
+                    "Alipay refund rejected",
+                    extra={
+                        "gateway_code": str(result.get("code", "")),
+                        "gateway_sub_code": str(result.get("sub_code", "")),
+                    },
+                )
+                raise AlipayRefundRejectedError("支付宝拒绝退款")
+            return result
+        except (httpx.HTTPError, TypeError, ValueError) as exc:
+            if isinstance(exc, AlipayGatewayError):
+                raise
+            logger.warning("Alipay refund request failed", extra={"failure_type": type(exc).__name__})
+            raise AlipayGatewayError("支付宝退款结果暂时不可用") from exc
+
+    async def query_refund(
+        self,
+        *,
+        merchant_payment_no: str,
+        merchant_refund_no: str,
+    ) -> Mapping[str, object]:
+        """查询一笔已提交退款的支付宝侧状态。
+
+        该方法只读取支付宝结果。调用方根据返回状态在本地确定性地收敛退款和订单，
+        因此网关不可达时不能把本地 ``PROCESSING`` 误改为失败或重新提交退款。
+
+        Args:
+            merchant_payment_no: 原支付请求的商户交易号。
+            merchant_refund_no: 本系统生成的商户退款号。
+
+        Returns:
+            ``alipay_trade_fastpay_refund_query_response`` 的业务字段。
+
+        Raises:
+            AlipayGatewayError: 网关不可达、响应无效或未能可靠查询退款。
+        """
+        parameters = self._build_common_parameters("alipay.trade.fastpay.refund.query")
+        parameters["biz_content"] = json.dumps(
+            {
+                "out_trade_no": merchant_payment_no,
+                "out_request_no": merchant_refund_no,
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
+        parameters["sign"] = self._sign(self._canonical(parameters))
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                response = await client.post(self.gateway, data=parameters)
+                response.raise_for_status()
+            try:
+                payload = json.loads(response.content.decode("utf-8"))
+            except UnicodeDecodeError:
+                payload = json.loads(response.content.decode("gbk"))
+            result = payload.get("alipay_trade_fastpay_refund_query_response")
+            if not isinstance(result, dict) or result.get("code") != "10000":
+                logger.warning(
+                    "Alipay refund query unavailable",
+                    extra={
+                        "gateway_code": str(result.get("code", "")) if isinstance(result, dict) else "",
+                        "gateway_sub_code": str(result.get("sub_code", "")) if isinstance(result, dict) else "",
+                    },
+                )
+                raise AlipayGatewayError("支付宝暂时无法确认退款状态")
+            return result
+        except (httpx.HTTPError, TypeError, ValueError) as exc:
+            if isinstance(exc, AlipayGatewayError):
+                raise
+            logger.warning("Alipay refund query request failed", extra={"failure_type": type(exc).__name__})
+            raise AlipayGatewayError("支付宝暂时无法确认退款状态") from exc
 
     def verify_callback(self, parameters: Mapping[str, str]) -> None:
         """验证支付宝回调签名；调用方仍需核验订单、金额和应用 ID。"""

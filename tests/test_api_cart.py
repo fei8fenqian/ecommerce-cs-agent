@@ -43,6 +43,23 @@ async def test_customer_can_add_and_read_their_cart():
 
 
 @pytest.mark.asyncio
+async def test_customer_can_add_component_to_cart():
+    """配件使用与整机相同的客户购物车 API。"""
+    transport = httpx.ASGITransport(app=_app("customer"))
+    component = CartItemView(13, "components", "memory-1", "测试内存", "测试品牌", 669.0, 8, 1, True)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        with patch("api.cart.add_cart_item", new=AsyncMock(return_value=component)) as add:
+            response = await client.post(
+                "/api/v1/cart/items",
+                json={"category": "components", "product_id": "memory-1"},
+            )
+
+    assert response.status_code == 200
+    assert response.json()["category"] == "components"
+    add.assert_awaited_once_with(101, "components", "memory-1", 1)
+
+
+@pytest.mark.asyncio
 async def test_internal_role_cannot_read_customer_cart():
     """客服不能把客户购物车接口当成内部商品读取入口。"""
     transport = httpx.ASGITransport(app=_app("agent"))

@@ -1,6 +1,7 @@
 """支付宝沙箱协议层测试，不连接真实支付宝或数据库。"""
 
 import base64
+import json
 from unittest.mock import AsyncMock, Mock, patch
 from urllib.parse import parse_qs, urlparse
 
@@ -56,6 +57,85 @@ def test_page_pay_url_is_signed_by_application_private_key():
     assert '"total_amount":"4499.00"' in params["biz_content"]
 
 
+def test_page_pay_form_reuses_the_signed_fields_for_browser_post():
+    """新网页客户端应收到可直接 POST 的签名参数，而不是重新自行签名。"""
+    app_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    alipay_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    client = AlipaySandboxClient(
+        app_id="test-app",
+        gateway="https://sandbox.example/gateway.do",
+        app_private_key_pem=_private_pem(app_key),
+        alipay_public_key_pem=_public_pem(alipay_key),
+        notify_url="https://merchant.example/callback",
+        return_url="https://merchant.example/return",
+    )
+
+    form = client.build_page_pay_form(merchant_payment_no="PMFORM", amount_cents=66900, subject="测试内存")
+    signature = base64.b64decode(form.fields["sign"])
+    signable = {"charset": parse_qs(urlparse(form.action).query)["charset"][-1], **form.fields}
+    signable.pop("sign")
+
+    app_key.public_key().verify(
+        signature,
+        client._canonical(signable).encode("utf-8"),
+        padding.PKCS1v15(),
+        hashes.SHA256(),
+    )
+    assert form.action == "https://sandbox.example/gateway.do?charset=utf-8"
+    assert form.fields["method"] == "alipay.trade.page.pay"
+    assert "notify_url" not in form.fields
+    assert json.loads(form.fields["biz_content"])["subject"] == "Geex Digital Order"
+
+
+@pytest.mark.asyncio
+async def test_precreate_returns_signed_qr_code_for_server_confirmed_payment():
+    """二维码只来自支付宝预创建响应，前端不能自行编造交易号或金额。"""
+    app_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    alipay_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    client = AlipaySandboxClient(
+        app_id="test-app",
+        gateway="https://sandbox.example/gateway.do",
+        app_private_key_pem=_private_pem(app_key),
+        alipay_public_key_pem=_public_pem(alipay_key),
+        notify_url="https://merchant.example/callback",
+        return_url="https://merchant.example/return",
+    )
+    captured: dict[str, str] = {}
+
+    class FakeResponse:
+        content = b'{"alipay_trade_precreate_response":{"code":"10000","qr_code":"alipayqr://test"}}'
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def post(self, _url: str, *, data: dict[str, str]) -> FakeResponse:
+            captured.update(data)
+            return FakeResponse()
+
+    with patch("infra.alipay_sandbox.httpx.AsyncClient", return_value=FakeAsyncClient()):
+        qr_code = await client.precreate_trade(merchant_payment_no="PMQR", amount_cents=66900, subject="测试内存")
+
+    signature = base64.b64decode(captured.pop("sign"))
+    app_key.public_key().verify(
+        signature,
+        client._canonical(captured).encode("utf-8"),
+        padding.PKCS1v15(),
+        hashes.SHA256(),
+    )
+    assert captured["method"] == "alipay.trade.precreate"
+    assert "notify_url" not in captured
+    assert "\\u" in captured["biz_content"]
+    assert json.loads(captured["biz_content"])["total_amount"] == "669.00"
+    assert qr_code == "alipayqr://test"
+
+
 def test_callback_signature_is_verified_with_alipay_public_key():
     """支付宝私钥签出的回调能由保存的支付宝公钥验证。"""
     app_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -79,6 +159,116 @@ def test_callback_signature_is_verified_with_alipay_public_key():
     }
     signature = alipay_key.sign(client._canonical(parameters).encode("utf-8"), padding.PKCS1v15(), hashes.SHA256())
     client.verify_callback({**parameters, "sign": base64.b64encode(signature).decode("ascii"), "sign_type": "RSA2"})
+
+
+@pytest.mark.asyncio
+async def test_refund_request_is_signed_and_uses_only_server_calculated_amount():
+    """退款协议必须带原支付号、商户退款号和整数分格式化后的全额。"""
+    app_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    alipay_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    client = AlipaySandboxClient(
+        app_id="test-app",
+        gateway="https://sandbox.example/gateway.do",
+        app_private_key_pem=_private_pem(app_key),
+        alipay_public_key_pem=_public_pem(alipay_key),
+        notify_url="https://merchant.example/callback",
+        return_url="https://merchant.example/return",
+    )
+    captured: dict[str, str] = {}
+
+    class FakeResponse:
+        """最小 HTTP 响应，避免测试访问真实支付宝。"""
+
+        content = b'{"alipay_trade_refund_response":{"code":"10000","out_trade_no":"PM-1","refund_fee":"4499.00"}}'
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class FakeAsyncClient:
+        """捕获网关表单参数的异步上下文客户端。"""
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def post(self, _url: str, *, data: dict[str, str]) -> FakeResponse:
+            captured.update(data)
+            return FakeResponse()
+
+    with patch("infra.alipay_sandbox.httpx.AsyncClient", return_value=FakeAsyncClient()):
+        result = await client.refund_trade(
+            merchant_payment_no="PM-1",
+            merchant_refund_no="RF-1",
+            amount_cents=449900,
+        )
+
+    signature = base64.b64decode(captured.pop("sign"))
+    app_key.public_key().verify(
+        signature,
+        client._canonical(captured).encode("utf-8"),
+        padding.PKCS1v15(),
+        hashes.SHA256(),
+    )
+    assert captured["method"] == "alipay.trade.refund"
+    assert json.loads(captured["biz_content"]) == {
+        "out_trade_no": "PM-1",
+        "out_request_no": "RF-1",
+        "refund_amount": "4499.00",
+    }
+    assert result["refund_fee"] == "4499.00"
+
+
+@pytest.mark.asyncio
+async def test_refund_query_is_signed_with_both_local_references():
+    """未知结果只能按原支付号和商户退款号查询，不能模糊匹配其他退款。"""
+    app_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    alipay_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    client = AlipaySandboxClient(
+        app_id="test-app",
+        gateway="https://sandbox.example/gateway.do",
+        app_private_key_pem=_private_pem(app_key),
+        alipay_public_key_pem=_public_pem(alipay_key),
+        notify_url="https://merchant.example/callback",
+        return_url="https://merchant.example/return",
+    )
+    captured: dict[str, str] = {}
+
+    class FakeResponse:
+        content = (
+            b'{"alipay_trade_fastpay_refund_query_response":'
+            b'{"code":"10000","out_trade_no":"PM-1","out_request_no":"RF-1",'
+            b'"refund_amount":"4499.00","refund_status":"REFUND_SUCCESS"}}'
+        )
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def post(self, _url: str, *, data: dict[str, str]) -> FakeResponse:
+            captured.update(data)
+            return FakeResponse()
+
+    with patch("infra.alipay_sandbox.httpx.AsyncClient", return_value=FakeAsyncClient()):
+        result = await client.query_refund(merchant_payment_no="PM-1", merchant_refund_no="RF-1")
+
+    signature = base64.b64decode(captured.pop("sign"))
+    app_key.public_key().verify(
+        signature,
+        client._canonical(captured).encode("utf-8"),
+        padding.PKCS1v15(),
+        hashes.SHA256(),
+    )
+    assert captured["method"] == "alipay.trade.fastpay.refund.query"
+    assert json.loads(captured["biz_content"]) == {"out_trade_no": "PM-1", "out_request_no": "RF-1"}
+    assert result["refund_status"] == "REFUND_SUCCESS"
 
 
 @pytest.mark.asyncio

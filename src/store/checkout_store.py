@@ -8,10 +8,11 @@ from uuid import UUID, uuid4
 from infra.db_pool import get_connection, put_connection
 from store.refund_store_types import AsyncConnection
 
-CheckoutCategory = Literal["laptops", "phones"]
+CheckoutCategory = Literal["laptops", "phones", "components"]
 _PRODUCT_TABLES: dict[CheckoutCategory, str] = {
     "laptops": "laptop_products",
     "phones": "phone_products",
+    "components": "component_products",
 }
 
 
@@ -46,6 +47,19 @@ class CheckoutLine:
 
 
 @dataclass(frozen=True)
+class CartCheckoutLine:
+    """一次购物车结算时需要在付款成功后消费的商品数量快照。
+
+    这不是购物车行的外键：客户在付款前仍可调整或删除购物车，因此只保留当时的
+    商品标识和数量。付款成功时再在同一事务内做一次保守扣减。
+    """
+
+    category: CheckoutCategory
+    product_id: str
+    quantity: int
+
+
+@dataclass(frozen=True)
 class CallbackPayment:
     """回调核验和条件更新所需的本地支付事实。"""
 
@@ -69,6 +83,8 @@ class CustomerCheckoutOrder:
     tracking_company: str | None
     tracking_number: str | None
     created_at: str
+    refund_id: str | None = None
+    refund_status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -114,11 +130,12 @@ class OperatorFulfillment:
 async def get_checkout_product(category: CheckoutCategory, product_id: str) -> CheckoutProduct | None:
     """读取可购买商品的当前价格和库存，不暴露任意表名入口。"""
     table = _PRODUCT_TABLES[category]
+    brand_column = "COALESCE(metadata->>'brand', '')" if category == "components" else "brand"
     connection = await get_connection()
     try:
         cursor = await connection.execute(
             f"""
-            SELECT id, product_name, brand, price, stock
+            SELECT id, product_name, {brand_column} AS brand, price, stock
             FROM {table}
             WHERE id = %s
             """,
@@ -158,6 +175,7 @@ async def create_checkout_order(
         merchant_payment_no=merchant_payment_no,
         customer_user_id=customer_user_id,
         lines=[CheckoutLine(product=product, quantity=quantity)],
+        cart_lines=None,
     )
 
 
@@ -169,13 +187,15 @@ async def create_checkout_order_from_lines(
     merchant_payment_no: str,
     customer_user_id: int,
     lines: list[CheckoutLine],
-    cart_item_ids: list[int] | None = None,
+    cart_lines: list[CartCheckoutLine] | None = None,
 ) -> CreatedCheckoutOrder:
-    """在一个事务中写入多商品订单、待支付交易并移除已结算购物车条目.
+    """在一个事务中写入多商品订单和待支付交易。
 
     Args:
         lines: 已在服务层按当前价格和库存校验的商品快照。
-        cart_item_ids: 成功创建订单后要删除的客户购物车条目；立即购买传 None。
+        购物车条目在支付宝确认付款前必须保留。否则网络或客户扫码失败都会导致
+        用户无故丢失购物车。传入 ``cart_lines`` 时会持久化消费快照；只有付款
+        真正成功后，才由状态收敛事务按该快照扣减购物车。
 
     Raises:
         ValueError: 商品缺货、金额异常、数量不合法或购物车为空。
@@ -186,6 +206,13 @@ async def create_checkout_order_from_lines(
         raise ValueError("invalid quantity")
     if any(line.product.stock < line.quantity or line.product.unit_amount_cents <= 0 for line in lines):
         raise ValueError("product unavailable")
+    if cart_lines is not None and (
+        not cart_lines
+        or any(line.quantity < 1 or line.quantity > 5 for line in cart_lines)
+        or {(line.product.category, line.product.product_id, line.quantity) for line in lines}
+        != {(line.category, line.product_id, line.quantity) for line in cart_lines}
+    ):
+        raise ValueError("cart checkout lines do not match order lines")
     total_amount_cents = sum(line.product.unit_amount_cents * line.quantity for line in lines)
     connection = await get_connection()
     try:
@@ -216,6 +243,16 @@ async def create_checkout_order_from_lines(
                     line.quantity,
                 ),
             )
+        if cart_lines is not None:
+            for cart_line in cart_lines:
+                await connection.execute(
+                    """
+                    INSERT INTO checkout_cart_lines (
+                        sales_order_id, catalog_category, catalog_product_id, quantity
+                    ) VALUES (%s, %s, %s, %s)
+                    """,
+                    (sales_order_id, cart_line.category, cart_line.product_id, cart_line.quantity),
+                )
         await connection.execute(
             """
             INSERT INTO payment_transactions (
@@ -224,15 +261,6 @@ async def create_checkout_order_from_lines(
             """,
             (payment_id, sales_order_id, merchant_payment_no, total_amount_cents),
         )
-        for cart_item_id in cart_item_ids or []:
-            await connection.execute(
-                """
-                DELETE FROM cart_items AS i
-                USING carts AS c
-                WHERE i.cart_id = c.id AND c.customer_user_id = %s AND i.id = %s
-                """,
-                (customer_user_id, cart_item_id),
-            )
         await connection.commit()
         return CreatedCheckoutOrder(
             sales_order_id=sales_order_id,
@@ -283,6 +311,7 @@ async def apply_alipay_callback(
             payment_status=str(row[3]),
         )
         if payment.payment_status == "SUCCEEDED":
+            await _consume_paid_cart_lines(connection, payment.sales_order_id)
             await _ensure_pending_fulfillment(connection, payment.sales_order_id)
             await connection.commit()
             return True
@@ -304,6 +333,7 @@ async def apply_alipay_callback(
                 """,
                 (payment.sales_order_id,),
             )
+            await _consume_paid_cart_lines(connection, payment.sales_order_id)
             await _ensure_pending_fulfillment(connection, payment.sales_order_id)
         else:
             await connection.execute(
@@ -464,6 +494,7 @@ async def apply_alipay_trade_query(
             await connection.rollback()
             return False
         if str(row[3]) == "SUCCEEDED":
+            await _consume_paid_cart_lines(connection, row[1])
             await _ensure_pending_fulfillment(connection, row[1])
             await connection.commit()
             return True
@@ -484,6 +515,7 @@ async def apply_alipay_trade_query(
                 """,
                 (row[1],),
             )
+            await _consume_paid_cart_lines(connection, row[1])
             await _ensure_pending_fulfillment(connection, row[1])
         else:
             await connection.execute(
@@ -511,6 +543,54 @@ async def apply_alipay_trade_query(
         await put_connection(connection)
 
 
+async def _consume_paid_cart_lines(connection: AsyncConnection, sales_order_id: UUID) -> None:
+    """保守消费一笔已付款购物车订单对应的购物车快照。
+
+    ``consumed_at`` 是幂等闸门：支付宝回调和主动查询即使同时或重复确认成功，
+    也只有第一笔事务能取得待消费行。客户付款前将数量调小或手工删除时不强行
+    覆盖其新选择；将数量调大时，仅扣除本次已经付款的原始数量。
+    """
+    cursor = await connection.execute(
+        """
+        UPDATE checkout_cart_lines
+        SET consumed_at = NOW()
+        WHERE sales_order_id = %s AND consumed_at IS NULL
+        RETURNING catalog_category, catalog_product_id, quantity
+        """,
+        (sales_order_id,),
+    )
+    for category, product_id, quantity in await cursor.fetchall():
+        await connection.execute(
+            """
+            DELETE FROM cart_items AS i
+            USING carts AS c
+            WHERE i.cart_id = c.id
+              AND c.customer_user_id = (
+                  SELECT customer_user_id FROM sales_orders WHERE id = %s
+              )
+              AND i.catalog_category = %s
+              AND i.catalog_product_id = %s
+              AND i.quantity = %s
+            """,
+            (sales_order_id, category, product_id, quantity),
+        )
+        await connection.execute(
+            """
+            UPDATE cart_items AS i
+            SET quantity = i.quantity - %s, updated_at = NOW()
+            FROM carts AS c
+            WHERE i.cart_id = c.id
+              AND c.customer_user_id = (
+                  SELECT customer_user_id FROM sales_orders WHERE id = %s
+              )
+              AND i.catalog_category = %s
+              AND i.catalog_product_id = %s
+              AND i.quantity > %s
+            """,
+            (quantity, sales_order_id, category, product_id, quantity),
+        )
+
+
 async def list_customer_checkout_orders(customer_user_id: int, limit: int = 30) -> list[CustomerCheckoutOrder]:
     """列出当前客户创建的新结算订单，不与 legacy orders 混写。"""
     connection = await get_connection()
@@ -518,14 +598,16 @@ async def list_customer_checkout_orders(customer_user_id: int, limit: int = 30) 
         cursor = await connection.execute(
             """
             SELECT o.order_no, o.status, o.total_amount_cents, MIN(i.product_name), SUM(i.quantity),
-                   p.status, f.status, f.carrier, f.tracking_number, o.created_at
+                   p.status, f.status, f.carrier, f.tracking_number, o.created_at,
+                   r.id, r.status
             FROM sales_orders AS o
             JOIN sales_order_items AS i ON i.sales_order_id = o.id
             JOIN payment_transactions AS p ON p.sales_order_id = o.id
             LEFT JOIN fulfillments AS f ON f.sales_order_id = o.id
+            LEFT JOIN checkout_refunds AS r ON r.sales_order_id = o.id
             WHERE o.customer_user_id = %s
             GROUP BY o.order_no, o.status, o.total_amount_cents, p.status,
-                     f.status, f.carrier, f.tracking_number, o.created_at
+                     f.status, f.carrier, f.tracking_number, o.created_at, r.id, r.status
             ORDER BY o.created_at DESC
             LIMIT %s
             """,
@@ -549,6 +631,8 @@ async def list_customer_checkout_orders(customer_user_id: int, limit: int = 30) 
                 tracking_company=str(row[7]) if row[7] is not None else None,
                 tracking_number=str(row[8]) if row[8] is not None else None,
                 created_at=str(row[9]),
+                refund_id=str(row[10]) if row[10] is not None else None,
+                refund_status=str(row[11]) if row[11] is not None else None,
             )
             for row in rows
         ]

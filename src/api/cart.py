@@ -20,7 +20,7 @@ cart_router = APIRouter(prefix="/api/v1/cart", tags=["购物车"])
 class AddCartItemRequest(BaseModel):
     """向客户购物车增加一个目录商品。"""
 
-    category: Literal["laptops", "phones"]
+    category: Literal["laptops", "phones", "components"]
     product_id: str = Field(min_length=1, max_length=128)
     quantity: int = Field(default=1, ge=1, le=5)
 
@@ -63,6 +63,9 @@ class CartCheckoutResponse(BaseModel):
     order_no: str
     amount_cents: int
     payment_url: str
+    payment_form_action: str | None = None
+    payment_form_fields: dict[str, str] | None = None
+    payment_qr_code: str | None = None
 
 
 def _customer_id(request: Request) -> int:

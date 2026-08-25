@@ -5,9 +5,10 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from infra.alipay_sandbox import AlipaySandboxClient
-from service.checkout_service import CheckoutSession, build_browser_return_url
+from service.checkout_service import CheckoutSession, build_alipay_checkout_session
 from store.cart_store import find_cart_item, list_cart_items, put_cart_item, remove_cart_item
 from store.checkout_store import (
+    CartCheckoutLine,
     CheckoutCategory,
     CheckoutLine,
     CheckoutProduct,
@@ -103,15 +104,13 @@ async def create_cart_checkout_session(customer_user_id: int, return_origin: str
     alipay_client = AlipaySandboxClient.from_settings()
     existing = await get_customer_latest_pending_checkout(customer_user_id)
     if existing is not None:
-        return CheckoutSession(
+        return await build_alipay_checkout_session(
+            alipay_client,
             order_no=existing.order_no,
+            merchant_payment_no=existing.merchant_payment_no,
             amount_cents=existing.amount_cents,
-            payment_url=alipay_client.build_page_pay_url(
-                merchant_payment_no=existing.merchant_payment_no,
-                amount_cents=existing.amount_cents,
-                subject=existing.subject,
-                return_url=build_browser_return_url(return_origin, existing.order_no),
-            ),
+            subject=existing.subject,
+            return_origin=return_origin,
         )
 
     stored_items = await list_cart_items(customer_user_id)
@@ -131,12 +130,6 @@ async def create_cart_checkout_session(customer_user_id: int, return_origin: str
     total_amount_cents = sum(line.product.unit_amount_cents * line.quantity for line in lines)
     total_quantity = sum(line.quantity for line in lines)
     subject = f"Geex Digital 商品订单（{total_quantity} 件）"
-    payment_url = alipay_client.build_page_pay_url(
-        merchant_payment_no=merchant_payment_no,
-        amount_cents=total_amount_cents,
-        subject=subject,
-        return_url=build_browser_return_url(return_origin, order_no),
-    )
     await create_checkout_order_from_lines(
         sales_order_id=uuid4(),
         order_no=order_no,
@@ -144,9 +137,23 @@ async def create_cart_checkout_session(customer_user_id: int, return_origin: str
         merchant_payment_no=merchant_payment_no,
         customer_user_id=customer_user_id,
         lines=lines,
-        cart_item_ids=[item.item_id for item in stored_items],
+        cart_lines=[
+            CartCheckoutLine(
+                category=item.category,
+                product_id=item.product_id,
+                quantity=item.quantity,
+            )
+            for item in stored_items
+        ],
     )
-    return CheckoutSession(order_no=order_no, amount_cents=total_amount_cents, payment_url=payment_url)
+    return await build_alipay_checkout_session(
+        alipay_client,
+        order_no=order_no,
+        merchant_payment_no=merchant_payment_no,
+        amount_cents=total_amount_cents,
+        subject=subject,
+        return_origin=return_origin,
+    )
 
 
 def _to_view(item_id: int, product: CheckoutProduct, quantity: int) -> CartItemView:

@@ -53,6 +53,28 @@ async def test_customer_checkout_returns_signed_redirect_session():
 
 
 @pytest.mark.asyncio
+async def test_customer_can_start_component_checkout():
+    """配件走同一结算服务，不在 API 层被旧类别白名单拒绝。"""
+    transport = httpx.ASGITransport(app=_app("customer"))
+    session = CheckoutSession("SOCOMPONENT", 66900, "https://sandbox.example/pay")
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        with patch("api.checkout.create_checkout_session", new=AsyncMock(return_value=session)) as create:
+            response = await client.post(
+                "/api/v1/checkout/orders",
+                json={"category": "components", "product_id": "memory-1"},
+            )
+
+    assert response.status_code == 201
+    create.assert_awaited_once_with(
+        customer_user_id=101,
+        category="components",
+        product_id="memory-1",
+        quantity=1,
+        return_origin=None,
+    )
+
+
+@pytest.mark.asyncio
 async def test_non_customer_cannot_create_checkout_order():
     """客服角色不能借商品接口直接发起资金动作。"""
     transport = httpx.ASGITransport(app=_app("agent"))

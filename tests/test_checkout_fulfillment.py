@@ -15,8 +15,10 @@ async def test_successful_payment_creates_one_pending_fulfillment_in_same_transa
     sales_order_id = uuid4()
     cursor = AsyncMock()
     cursor.fetchone.return_value = (payment_id, sales_order_id, 299900, "PENDING")
+    cart_cursor = AsyncMock()
+    cart_cursor.fetchall.return_value = []
     connection = AsyncMock()
-    connection.execute.side_effect = [None, cursor, None, None, None]
+    connection.execute.side_effect = [None, cursor, None, None, cart_cursor, None]
 
     with (
         patch("store.checkout_store.get_connection", new=AsyncMock(return_value=connection)),
@@ -33,4 +35,5 @@ async def test_successful_payment_creates_one_pending_fulfillment_in_same_transa
     statements = [call.args[0] for call in connection.execute.await_args_list]
     assert any("INSERT INTO fulfillments" in statement for statement in statements)
     assert any("ON CONFLICT (sales_order_id) DO NOTHING" in statement for statement in statements)
+    assert any("UPDATE checkout_cart_lines" in statement for statement in statements)
     connection.commit.assert_awaited_once()

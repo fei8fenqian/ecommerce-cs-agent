@@ -30,3 +30,26 @@ def test_checkout_migration_requires_core_transaction_constraints() -> None:
     assert "merchant_payment_no VARCHAR(64) NOT NULL UNIQUE" in sql
     assert "provider_callback_id VARCHAR(128) UNIQUE" in sql
     assert "currency = 'CNY'" in sql
+
+
+def test_component_checkout_migration_only_extends_application_category_constraints() -> None:
+    """配件可购买不应借机修改 legacy 订单或支付结构。"""
+    sql = Path("alembic/versions/c3d7e1a9f5b2_allow_components_in_checkout.py").read_text(encoding="utf-8")
+
+    assert "cart_items_category_check" in sql
+    assert "sales_order_items_category_check" in sql
+    assert "'components'" in sql
+    assert "ALTER TABLE public.orders" not in sql
+
+
+def test_cart_consumption_migration_only_adds_application_checkout_snapshots() -> None:
+    """付款成功后的购物车消费必须有独立快照，升级时不清空客户购物车。"""
+    sql = Path("alembic/versions/f7b2d6e1a904_add_checkout_cart_consumption.py").read_text(encoding="utf-8")
+
+    assert "CREATE TABLE public.checkout_cart_lines" in sql
+    assert "consumed_at TIMESTAMPTZ" in sql
+    assert "REFERENCES public.sales_orders(id)" in sql
+    assert "UPDATE public.cart_items" not in sql
+    assert "DELETE FROM public.cart_items" not in sql
+    assert "ALTER TABLE public.orders" not in sql
+    assert "UPDATE public.orders" not in sql

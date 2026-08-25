@@ -4,12 +4,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from service.cart_service import create_cart_checkout_session
 from service.checkout_service import (
     CheckoutCancellationUnavailableError,
     cancel_checkout_session,
     create_checkout_session,
 )
+from store.cart_store import StoredCartItem
 from store.checkout_store import (
+    CartCheckoutLine,
     CheckoutProduct,
     CustomerPendingCheckout,
     ReusablePendingCheckout,
@@ -35,7 +38,11 @@ async def test_retrying_the_same_purchase_reuses_pending_checkout():
         subject="测试笔记本",
     )
     client = MagicMock()
-    client.build_page_pay_url.return_value = "https://sandbox.example/pay-existing"
+    form = MagicMock()
+    form.url = "https://sandbox.example/pay-existing"
+    form.action = "https://sandbox.example/gateway.do"
+    form.fields = {"method": "alipay.trade.page.pay", "sign": "test"}
+    client.build_page_pay_form.return_value = form
     with (
         patch("service.checkout_service.AlipaySandboxClient.from_settings", return_value=client),
         patch("service.checkout_service.get_checkout_product", new=AsyncMock(return_value=product)),
@@ -52,13 +59,44 @@ async def test_retrying_the_same_purchase_reuses_pending_checkout():
 
     assert session.order_no == "SOEXISTING"
     assert session.payment_url == "https://sandbox.example/pay-existing"
+    assert session.payment_qr_code is None
     create_order.assert_not_awaited()
-    client.build_page_pay_url.assert_called_once_with(
+    client.build_page_pay_form.assert_called_once_with(
         merchant_payment_no="PMEXISTING",
         amount_cents=299900,
         subject="测试笔记本",
         return_url="http://127.0.0.1:5173/?page=orders&payment_return=1&checkout_order=SOEXISTING",
     )
+
+
+@pytest.mark.asyncio
+async def test_cart_checkout_keeps_items_until_payment_is_confirmed():
+    """创建待支付单时保存消费快照，但绝不能提前清空购物车。"""
+    product = CheckoutProduct(
+        category="components",
+        product_id="memory-1",
+        product_name="测试内存",
+        brand="测试品牌",
+        unit_amount_cents=66900,
+        stock=8,
+    )
+    cart_item = StoredCartItem(item_id=12, category="components", product_id="memory-1", quantity=2)
+    client = MagicMock()
+    form = MagicMock(url="https://sandbox.example/pay", action="https://sandbox.example/gateway.do", fields={})
+    client.build_page_pay_form.return_value = form
+    with (
+        patch("service.cart_service.AlipaySandboxClient.from_settings", return_value=client),
+        patch("service.cart_service.get_customer_latest_pending_checkout", new=AsyncMock(return_value=None)),
+        patch("service.cart_service.list_cart_items", new=AsyncMock(return_value=[cart_item])),
+        patch("service.cart_service.get_checkout_product", new=AsyncMock(return_value=product)),
+        patch("service.cart_service.create_checkout_order_from_lines", new=AsyncMock()) as create_order,
+    ):
+        session = await create_cart_checkout_session(101, "http://127.0.0.1:5173")
+
+    assert session.payment_qr_code is None
+    assert create_order.await_args.kwargs["cart_lines"] == [
+        CartCheckoutLine(category="components", product_id="memory-1", quantity=2)
+    ]
 
 
 @pytest.mark.asyncio

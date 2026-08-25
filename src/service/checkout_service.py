@@ -36,6 +36,9 @@ class CheckoutSession:
     order_no: str
     amount_cents: int
     payment_url: str
+    payment_form_action: str | None = None
+    payment_form_fields: dict[str, str] | None = None
+    payment_qr_code: str | None = None
 
 
 class AlipayCallbackRejectedError(ValueError):
@@ -52,6 +55,43 @@ class PaymentNotCreatedError(ValueError):
 
 class CheckoutCancellationUnavailableError(ValueError):
     """订单已经不是客户可取消的待支付状态。"""
+
+
+async def build_alipay_checkout_session(
+    client: AlipaySandboxClient,
+    *,
+    order_no: str,
+    merchant_payment_no: str,
+    amount_cents: int,
+    subject: str,
+    return_origin: str | None,
+) -> CheckoutSession:
+    """构造支付宝电脑网站支付会话。
+
+    Args:
+        client: 已完成配置校验的支付宝沙箱客户端。
+        order_no: 本地商城订单号。
+        merchant_payment_no: 支付宝可见的商户交易号。
+        amount_cents: 服务端确定的订单总金额（分）。
+        subject: 收银台展示的订单标题。
+        return_origin: 允许的浏览器回跳来源。
+
+    Returns:
+        由服务端签名的 POST 表单参数；前端必须提交该表单进入支付宝收银台。
+    """
+    form = client.build_page_pay_form(
+        merchant_payment_no=merchant_payment_no,
+        amount_cents=amount_cents,
+        subject=subject,
+        return_url=build_browser_return_url(return_origin, order_no),
+    )
+    return CheckoutSession(
+        order_no=order_no,
+        amount_cents=amount_cents,
+        payment_url=form.url,
+        payment_form_action=form.action,
+        payment_form_fields=form.fields,
+    )
 
 
 def build_browser_return_url(return_origin: str | None, order_no: str) -> str | None:
@@ -87,15 +127,13 @@ async def create_checkout_session(
 
     reusable = await find_reusable_pending_checkout(customer_user_id, product, quantity)
     if reusable is not None:
-        return CheckoutSession(
+        return await build_alipay_checkout_session(
+            alipay_client,
             order_no=reusable.order_no,
+            merchant_payment_no=reusable.merchant_payment_no,
             amount_cents=reusable.amount_cents,
-            payment_url=alipay_client.build_page_pay_url(
-                merchant_payment_no=reusable.merchant_payment_no,
-                amount_cents=reusable.amount_cents,
-                subject=reusable.subject,
-                return_url=build_browser_return_url(return_origin, reusable.order_no),
-            ),
+            subject=reusable.subject,
+            return_origin=return_origin,
         )
 
     now = datetime.now(UTC)
@@ -111,16 +149,13 @@ async def create_checkout_session(
         product=product,
         quantity=quantity,
     )
-    payment_url = alipay_client.build_page_pay_url(
+    return await build_alipay_checkout_session(
+        alipay_client,
+        order_no=created.order_no,
         merchant_payment_no=created.merchant_payment_no,
         amount_cents=created.total_amount_cents,
         subject=product.product_name,
-        return_url=build_browser_return_url(return_origin, created.order_no),
-    )
-    return CheckoutSession(
-        order_no=created.order_no,
-        amount_cents=created.total_amount_cents,
-        payment_url=payment_url,
+        return_origin=return_origin,
     )
 
 
@@ -134,13 +169,14 @@ async def resume_checkout_session(
     pending = await get_customer_pending_payment(customer_user_id, order_no)
     if pending is None:
         raise CheckoutUnavailableError("payment is not resumable")
-    payment_url = AlipaySandboxClient.from_settings().build_page_pay_url(
+    return await build_alipay_checkout_session(
+        AlipaySandboxClient.from_settings(),
+        order_no=order_no,
         merchant_payment_no=pending.merchant_payment_no,
         amount_cents=pending.amount_cents,
         subject=pending.subject,
-        return_url=build_browser_return_url(return_origin, order_no),
+        return_origin=return_origin,
     )
-    return CheckoutSession(order_no=order_no, amount_cents=pending.amount_cents, payment_url=payment_url)
 
 
 async def cancel_checkout_session(*, customer_user_id: int, order_no: str) -> None:
