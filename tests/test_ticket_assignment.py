@@ -97,10 +97,12 @@ async def test_unclaimed_agent_gets_redacted_summary(_assignment_data):
         "urgency",
         "status",
         "created_at",
+        "issue_summary",
     }
     assert "customer_name" not in result.model_dump()
     assert "phone" not in result.model_dump()
     assert "issue" not in result.model_dump()
+    assert result.issue_summary == "客户A的问题全文"
 
 
 @pytest.mark.asyncio

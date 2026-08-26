@@ -4,21 +4,13 @@
 多维表格操作；通知内容由固定字段组装，避免模型直接获得外部写权限。
 """
 
-import re
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 import httpx
 
 from config import settings
-from log_config import redact_text
-
-_ORDER_REFERENCE_PATTERN = re.compile(r"\b(?:ORD|SO|ORDER)[-_A-Z0-9]{3,}\b", re.IGNORECASE)
-
-
-def _redact_issue_summary(value: str) -> str:
-    """在通用文本脱敏后移除常见订单引用，避免摘要泄露业务标识。"""
-    return _ORDER_REFERENCE_PATTERN.sub("[REDACTED]", redact_text(value))
+from service.ticket_summary import build_safe_ticket_summary
 
 
 class FeishuDeliveryError(RuntimeError):
@@ -68,7 +60,7 @@ def build_escalation_payload(
         可直接提交给飞书群机器人 Webhook 的 JSON。不会包含客户姓名、手机号、
         邮箱、订单号、完整对话或模型异常。
     """
-    safe_summary = _redact_issue_summary(issue_summary).strip().replace("\n", " ")[:240]
+    safe_summary = build_safe_ticket_summary(issue_summary)
     return {
         "msg_type": "interactive",
         "card": {

@@ -43,6 +43,7 @@ UNCLAIMED_TICKET = {
     "status": "open",
     "created_at": "2026-08-19T10:01:00",
     "assigned_agent_id": None,
+    "issue_summary": "客户要求人工处理",
 }
 
 AGENT_A_TICKET = {
@@ -54,6 +55,7 @@ AGENT_A_TICKET = {
     "status": "processing",
     "created_at": "2026-08-19T10:02:00",
     "assigned_agent_id": 303,
+    "issue_summary": "客服 A 已认领的问题摘要",
 }
 
 AGENT_B_TICKET = {
@@ -287,11 +289,12 @@ async def test_agent_sees_only_summary_for_unclaimed_ticket(ticket_app):
 
     assert response.status_code == 200
     body = response.json()
-    assert set(body) == {"ticket_id", "urgency", "status", "created_at"}
+    assert set(body) == {"ticket_id", "urgency", "status", "created_at", "issue_summary"}
     assert body["ticket_id"] == "ticket-unclaimed"
     assert "张三" not in response.text
     assert "13800138000" not in response.text
     assert "完整问题描述" not in response.text
+    assert body["issue_summary"] == "客户要求人工处理"
 
 
 @pytest.mark.asyncio
@@ -324,10 +327,11 @@ async def test_agent_ticket_list_uses_summary_field_whitelist(ticket_app):
     body = response.json()
     assert body["total"] == 2
     for ticket in body["tickets"]:
-        assert set(ticket) == {"ticket_id", "urgency", "status", "created_at"}
+        assert set(ticket) == {"ticket_id", "urgency", "status", "created_at", "issue_summary"}
     assert "customer_name" not in response.text
     assert "13900139000" not in response.text
     assert "客服 A 已认领的完整问题描述" not in response.text
+    assert body["tickets"][0]["issue_summary"] == "客户要求人工处理"
     mocks["list_agent_tickets"].assert_awaited_once_with(303, None)
 
 

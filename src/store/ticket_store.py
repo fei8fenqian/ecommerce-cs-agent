@@ -9,6 +9,7 @@ from typing import Any
 
 from infra.db_pool import get_connection, put_connection
 from service.ticket_escalation import TicketEscalationReason
+from service.ticket_summary import build_safe_ticket_summary
 
 logger = logging.getLogger(__name__)
 
@@ -225,6 +226,7 @@ async def list_agent_tickets(
                 "urgency": row[5],
                 "status": row[6],
                 "created_at": _as_iso(row[7]),
+                "issue_summary": build_safe_ticket_summary(str(row[4] or "")),
             }
             if row[1] == agent_id:
                 item.update(
@@ -309,6 +311,8 @@ async def get_agent_ticket(ticket_id: str, user_id: int) -> dict[str, Any] | Non
                     "issue": row[4],
                 }
             )
+        else:
+            result["issue_summary"] = build_safe_ticket_summary(str(row[4] or ""))
         return result
     finally:
         if conn is not None:

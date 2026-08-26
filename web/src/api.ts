@@ -16,6 +16,7 @@ export interface Ticket {
   customer_name?: string;
   phone?: string;
   issue?: string;
+  issue_summary?: string;
   urgency: string;
   status: string;
   created_at: string;
