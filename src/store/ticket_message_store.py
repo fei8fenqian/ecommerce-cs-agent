@@ -93,7 +93,9 @@ async def create_agent_ticket_message(
                 (ticket_id, author_role, author_user_id, content, ai_assisted)
             SELECT ticket_id, 'agent', %s, %s, %s
             FROM public.tickets
-            WHERE ticket_id = %s AND assigned_agent_id = %s
+            WHERE ticket_id = %s
+              AND assigned_agent_id = %s
+              AND status <> '已关闭'
             RETURNING id, author_role, content, ai_assisted, created_at
             """,
             (agent_user_id, content, ai_assisted, ticket_id, agent_user_id),
@@ -126,14 +128,18 @@ async def create_customer_ticket_message(
             """
             UPDATE public.tickets
             SET status = CASE
-                    WHEN assigned_agent_id IS NULL AND status IN ('AI处理中', '已处理', '待人工处理') THEN 'AI待处理'
+                    WHEN assigned_agent_id IS NULL
+                         AND status IN ('AI处理中', '待客户确认', '待人工处理')
+                    THEN 'AI待处理'
                     ELSE status
                 END,
                 ai_claimed_at = CASE
                     WHEN assigned_agent_id IS NULL THEN NULL
                     ELSE ai_claimed_at
                 END
-            WHERE ticket_id = %s AND customer_user_id = %s
+            WHERE ticket_id = %s
+              AND customer_user_id = %s
+              AND status <> '已关闭'
             RETURNING ticket_id
             """,
             (ticket_id, customer_user_id),

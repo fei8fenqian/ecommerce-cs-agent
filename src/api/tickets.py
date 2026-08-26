@@ -14,6 +14,8 @@ from store.ticket_message_store import (
 )
 from store.ticket_store import (
     claim_ticket,
+    close_agent_ticket,
+    close_customer_ticket,
     create_ticket,
     get_agent_ticket,
     get_agent_ticket_escalation,
@@ -100,6 +102,13 @@ class ClaimResponse(BaseModel):
     assigned_agent_id: int
     status: str
     created_at: str
+
+
+class TicketCloseResponse(BaseModel):
+    """工单由有权限的一方明确关闭后的结果。"""
+
+    ok: bool = True
+    status: str = "已关闭"
 
 
 class KnowledgeReference(BaseModel):
@@ -406,6 +415,23 @@ async def claim(ticket_id: str, request: Request):
     if result is None:
         raise HTTPException(status_code=409, detail="工单不存在或已被其他客服认领")
     return ClaimResponse(**result)
+
+
+@ticket_router.post("/tickets/{ticket_id}/close", response_model=TicketCloseResponse)
+async def close_ticket(ticket_id: str, request: Request) -> TicketCloseResponse:
+    """客户确认 AI 已解决，或已认领客服完成处理后，明确关闭工单。"""
+    user = request.state.user
+    if user["role"] == "customer":
+        closed = await close_customer_ticket(ticket_id, user["id"])
+    elif user["role"] == "agent":
+        closed = await close_agent_ticket(ticket_id, user["id"])
+    else:
+        raise HTTPException(status_code=403, detail="当前帐号无权关闭工单")
+
+    if not closed:
+        # 统一不暴露不存在、越权或不处于可关闭状态的差异。
+        raise HTTPException(status_code=404, detail="工单不存在")
+    return TicketCloseResponse()
 
 
 @ticket_router.patch("/tickets/{ticket_id}")

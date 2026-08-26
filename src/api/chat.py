@@ -103,6 +103,50 @@ def _is_customer_ticket_intent(intent_target: str, role: str) -> bool:
     return intent_target == "ticket" and role == "customer"
 
 
+def _should_offer_refund_self_service(issue: str) -> bool:
+    """判断退款诉求是否可先引导至受控自助入口。
+
+    退款申请本身不等于人工异常。只有客户已遇到失败、金额/订单争议、投诉或
+    明确拒绝自助时，才直接进入人工工单；其余情况先让客户从本人订单中选择
+    订单并由退款服务核验资格与金额。
+    """
+    normalized = "".join(issue.split()).lower()
+    if not any(marker in normalized for marker in ("退款", "退货")):
+        return False
+    human_or_exception_markers = (
+        "退款失败",
+        "无法退款",
+        "不能退款",
+        "退不了",
+        "申请失败",
+        "操作失败",
+        "重复扣款",
+        "多扣",
+        "金额不对",
+        "退款没到账",
+        "退款未到账",
+        "支付异常",
+        "订单异常",
+        "投诉",
+        "纠纷",
+        "争议",
+        "不要自助",
+        "必须人工",
+        "坚持人工",
+    )
+    return not any(marker in normalized for marker in human_or_exception_markers)
+
+
+def _refund_self_service_answer() -> str:
+    """返回固定的退款入口说明，避免模型编造退款链接或资格结论。"""
+    return (
+        "可以先在本人订单中发起退款申请：\n\n"
+        "[前往我的订单申请退款](?page=orders)\n\n"
+        "选择对应的已付款订单后点击“申请退款”，系统会核验订单、金额和退款资格。"
+        "如果页面无法提交、订单或金额有异议，或您仍希望人工协助，请直接回复“需要人工”。"
+    )
+
+
 async def _create_customer_ticket(
     request: Request,
     *,
@@ -204,6 +248,19 @@ async def chat(chat_req: ChatRequest, request: Request):
         effective_query = intent.query or resolved_query
         sentiment = detect_sentiment(effective_query, history=ctx.history)
         sentiment_ctx = build_escalation_prompt(sentiment)
+
+        if (
+            _is_customer_ticket_intent(intent.target, tool_context.role)
+            and _should_offer_refund_self_service(effective_query)
+        ):
+            answer = _refund_self_service_answer()
+            await session.add_turn_simple(ctx.session_id, user_id, chat_req.query, answer)
+            return ChatResponse(
+                answer=answer,
+                session_id=ctx.session_id,
+                total_steps=0,
+                total_tokens=0,
+            )
 
         if _is_customer_ticket_intent(intent.target, tool_context.role):
             _, answer = await _create_customer_ticket(
@@ -335,6 +392,7 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
     stream_res = {"answer": "", "total_steps": 0, "total_tokens": 0}
     start_t = time.perf_counter()
     create_customer_ticket = _is_customer_ticket_intent(intent.target, tool_context.role)
+    offer_refund_self_service = create_customer_ticket and _should_offer_refund_self_service(effective_query)
 
     async def generate():
         stream_completed = False
@@ -342,6 +400,20 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
         try:
             # 先推一个 start 事件给前端，带 session_id
             yield f"data: {json.dumps({'event': 'start', 'session_id': session_id}, ensure_ascii=False)}\n\n"
+
+            if offer_refund_self_service:
+                answer = _refund_self_service_answer()
+                yield f"data: {json.dumps({'event': 'token', 'content': answer}, ensure_ascii=False)}\n\n"
+                try:
+                    await session.add_turn_simple(session_id, user_id, chat_req.query, answer)
+                except Exception as exc:
+                    _chat_logger.error(
+                        "refund guidance chat history persistence failed error_type=%s",
+                        type(exc).__name__,
+                    )
+                done_event = {"event": "done", "answer": answer, "total_steps": 0}
+                yield f"data: {json.dumps(done_event, ensure_ascii=False)}\n\n"
+                return
 
             if create_customer_ticket:
                 if not await _is_current_chat_run(session_id, chat_run_id):

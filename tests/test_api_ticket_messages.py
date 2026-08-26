@@ -190,6 +190,31 @@ async def test_customer_cannot_add_follow_up_to_another_ticket() -> None:
 
 
 @pytest.mark.asyncio
+async def test_customer_can_confirm_ai_result_and_close_own_ticket() -> None:
+    app = make_app()
+    closed = AsyncMock(return_value=True)
+
+    with patch("api.tickets.close_customer_ticket", new=closed):
+        response = await request(app, "customer-a-token", "POST", "/api/v1/tickets/ticket-a/close")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "status": "已关闭"}
+    closed.assert_awaited_once_with("ticket-a", 101)
+
+
+@pytest.mark.asyncio
+async def test_only_assigned_agent_can_close_ticket() -> None:
+    app = make_app()
+    closed = AsyncMock(return_value=False)
+
+    with patch("api.tickets.close_agent_ticket", new=closed):
+        response = await request(app, "agent-b-token", "POST", "/api/v1/tickets/ticket-a/close")
+
+    assert response.status_code == 404
+    closed.assert_awaited_once_with("ticket-a", 404)
+
+
+@pytest.mark.asyncio
 async def test_customer_created_ticket_enters_agent_queue_first() -> None:
     """客户从售后页建单也应先交给自主 Agent，不直接落入人工队列。"""
     app = make_app()

@@ -453,14 +453,15 @@ async def update_ticket(ticket_id: str, **kwargs: Any) -> bool:
 
 
 async def claim_ticket(ticket_id: str, agent_id: int) -> dict | None:
-    """客服认领待处理或 AI 已转人工的工单。"""
+    """客服认领待处理或 AI 已转人工的工单，并进入人工处理中。"""
     conn = None
     try:
         conn = await get_connection()
         await conn.set_autocommit(True)
         cur = await conn.execute(
             """
-            UPDATE public.tickets SET assigned_agent_id = %s
+            UPDATE public.tickets
+            SET assigned_agent_id = %s, status = '人工处理中'
             WHERE ticket_id = %s
               AND assigned_agent_id IS NULL
               AND status IN ('待处理', '待人工处理')
@@ -480,6 +481,26 @@ async def claim_ticket(ticket_id: str, agent_id: int) -> dict | None:
     finally:
         if conn is not None:
             await put_connection(conn)
+
+
+async def close_customer_ticket(ticket_id: str, customer_user_id: int) -> bool:
+    """由客户确认 AI 回复已解决问题后关闭工单。"""
+    return await _update_ticket_in_scope(
+        ticket_id,
+        "customer_user_id = %s AND status = '待客户确认'",
+        (customer_user_id,),
+        {"status": "已关闭"},
+    )
+
+
+async def close_agent_ticket(ticket_id: str, agent_id: int) -> bool:
+    """由已认领客服在解决问题后关闭工单。"""
+    return await _update_ticket_in_scope(
+        ticket_id,
+        "assigned_agent_id = %s AND status IN ('人工处理中', '待客户确认')",
+        (agent_id,),
+        {"status": "已关闭"},
+    )
 
 
 async def claim_next_ticket_for_ai(claim_timeout_seconds: int) -> dict[str, Any] | None:
@@ -556,7 +577,7 @@ async def claim_next_ticket_for_ai(claim_timeout_seconds: int) -> dict[str, Any]
 
 
 async def complete_ai_ticket(ticket_id: str, content: str) -> bool:
-    """保存 AI 回复并将其领取中的工单标记为已处理。
+    """保存 AI 回复并等待客户确认是否已解决。
 
     Args:
         ticket_id: 已由 AI 原子领取的工单编号。
@@ -572,7 +593,7 @@ async def complete_ai_ticket(ticket_id: str, content: str) -> bool:
         cursor = await conn.execute(
             """
             UPDATE public.tickets
-            SET status = '已处理', ai_processed_at = NOW()
+            SET status = '待客户确认', ai_processed_at = NOW()
             WHERE ticket_id = %s AND status = 'AI处理中'
             RETURNING ticket_id
             """,

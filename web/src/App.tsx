@@ -26,6 +26,7 @@ import {
   askPublicAssistant,
   cancelCheckout,
   claimTicket,
+  closeTicket,
   checkoutCart,
   confirmCheckoutRefund,
   createCheckout,
@@ -1093,6 +1094,16 @@ function CustomerTicketCenter({ auth }: { auth: AuthState }) {
     finally { setSending(false); }
   };
 
+  const confirmResolved = async (): Promise<void> => {
+    if (!selectedTicket || sending) return;
+    setSending(true); setError("");
+    try {
+      await closeTicket(auth.token, selectedTicket.ticket_id);
+      await Promise.all([loadTickets(), selectTicket(selectedTicket.ticket_id)]);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "暂时无法关闭工单"); }
+    finally { setSending(false); }
+  };
+
   const handleReplyKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>): void => {
     if (event.key !== "Enter" || event.shiftKey || event.altKey || event.nativeEvent.isComposing) return;
     event.preventDefault();
@@ -1113,7 +1124,13 @@ function CustomerTicketCenter({ auth }: { auth: AuthState }) {
       {loading ? <p className="empty">正在读取售后进度…</p> : tickets.length ? <div className="ticket-list">{tickets.map((ticket) => <button className={`ticket-card ${selectedTicket?.ticket_id === ticket.ticket_id ? "active" : ""}`} key={ticket.ticket_id} onClick={() => void selectTicket(ticket.ticket_id)}><span className="status">{ticket.status}</span><strong>{ticket.ticket_id}</strong><small>{formatDate(ticket.created_at)}</small></button>)}</div> : <p className="empty">暂时没有售后工单。你可以直接在智能客服中描述问题，Agent 会为你创建并处理。</p>}
     </section>
     <section className="panel ticket-detail customer-ticket-detail">
-      {selectedTicket ? <><div className="section-title"><div><p className="eyebrow">AFTER-SALES CONVERSATION</p><h2>{selectedTicket.ticket_id}</h2><p className="muted">当前状态：{selectedTicket.status}</p></div></div><div className="message-history customer-ticket-messages">{messages.length ? messages.map((message) => <Message key={message.message_id} message={message} />) : <p className="empty">暂时没有消息。</p>}</div><form className="composer customer-ticket-composer" onSubmit={sendFollowUp}><textarea value={reply} onChange={(event) => setReply(event.target.value)} onKeyDown={handleReplyKeyDown} maxLength={4000} placeholder="补充问题或回复 Agent…" /><button disabled={sending || !reply.trim()}>{sending ? "发送中…" : "发送"}</button></form><p className="customer-ticket-hint">Enter 发送 · Shift / Alt + Enter 换行</p></> : <div className="ticket-detail-empty"><h2>查看售后处理进度</h2><p>从左侧选择一张工单，即可看到 Agent 的处理结果并继续追问。</p></div>}
+      {selectedTicket ? <>
+        <div className="section-title"><div><p className="eyebrow">AFTER-SALES CONVERSATION</p><h2>{selectedTicket.ticket_id}</h2><p className="muted">当前状态：{selectedTicket.status}</p></div></div>
+        <div className="message-history customer-ticket-messages">{messages.length ? messages.map((message) => <Message key={message.message_id} message={message} />) : <p className="empty">暂时没有消息。</p>}</div>
+        {selectedTicket.status === "待客户确认" && <div className="ticket-resolution-actions"><span className="hint">问题已解决？确认后会关闭这张工单。</span><button className="secondary" onClick={() => void confirmResolved()} disabled={sending}>确认已解决</button></div>}
+        {selectedTicket.status !== "已关闭" && <><form className="composer customer-ticket-composer" onSubmit={sendFollowUp}><textarea value={reply} onChange={(event) => setReply(event.target.value)} onKeyDown={handleReplyKeyDown} maxLength={4000} placeholder="补充问题或回复 Agent…" /><button disabled={sending || !reply.trim()}>{sending ? "发送中…" : "发送"}</button></form><p className="customer-ticket-hint">Enter 发送 · Shift / Alt + Enter 换行</p></>}
+        {selectedTicket.status === "已关闭" && <p className="customer-ticket-hint">这张工单已关闭。如仍需帮助，请在智能客服中发起新的售后请求。</p>}
+      </> : <div className="ticket-detail-empty"><h2>查看售后处理进度</h2><p>从左侧选择一张工单，即可看到 Agent 的处理结果并继续追问。</p></div>}
     </section>
     {error && <p className="toast error">{error}</p>}
   </section>;
@@ -1318,6 +1335,17 @@ function AgentWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: () =>
     try { const created = await sendAgentTicketMessage(auth.token, selectedTicket.ticket_id, content.trim(), Boolean(draft)); setMessages((items) => [...items, created]); setContent(""); setDraft(null); }
     catch (reason) { setError(reason instanceof Error ? reason.message : "发送失败"); } finally { setBusy(false); }
   };
+  const close = async (): Promise<void> => {
+    if (!selectedTicket || busy) return;
+    setBusy(true); setError("");
+    try {
+      await closeTicket(auth.token, selectedTicket.ticket_id);
+      await refresh();
+      await select(selectedTicket.ticket_id);
+    }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "无法关闭工单"); }
+    finally { setBusy(false); }
+  };
   const owned = selectedTicket?.assigned_agent_id === auth.user.id;
   const claimable = selectedTicket?.status === "待处理" || selectedTicket?.status === "待人工处理";
   const escalationLabel = escalation?.status === "DELIVERED"
@@ -1338,7 +1366,16 @@ function AgentWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: () =>
       <article className={queueStats.aiProcessing ? "agent-metric-warning" : ""}><span>Agent 处理中</span><strong>{queueStats.aiProcessing}</strong><small>完成后才会转人工</small></article>
     </section>
     <div className="agent-grid"><section className="panel ticket-queue"><div className="section-title"><div><p className="eyebrow">WORK QUEUE</p><h2>工单队列</h2></div><button className="secondary" onClick={() => void refresh()} disabled={loading}>{loading ? "刷新中…" : "刷新"}</button></div><div className="agent-queue-tabs" role="tablist" aria-label="工单筛选"><button className={filter === "all" ? "active" : "secondary"} onClick={() => setFilter("all")}>全部 {queueStats.total}</button><button className={filter === "unclaimed" ? "active" : "secondary"} onClick={() => setFilter("unclaimed")}>待认领 {queueStats.unclaimed}</button><button className={filter === "mine" ? "active" : "secondary"} onClick={() => setFilter("mine")}>我的 {queueStats.mine}</button></div>{queueTickets.length ? queueTickets.map((ticket) => <button className={`ticket-card ${selectedTicket?.ticket_id === ticket.ticket_id ? "active" : ""}`} key={ticket.ticket_id} onClick={() => void select(ticket.ticket_id)}><span className={`status status-${ticket.status}`}>{ticket.status}</span><strong>{ticket.ticket_id}</strong><small>{ticket.urgency} · {formatDate(ticket.created_at)}{ticket.assigned_agent_id === auth.user.id ? " · 我已认领" : ticket.assigned_agent_id == null ? " · 待认领" : ""}</small><small>{ticket.issue_summary || "暂无问题摘要"}</small></button>) : <div className="agent-empty"><div className="agent-empty-icon">✓</div><h3>{loading ? "正在读取队列" : "当前没有需要人工处理的工单"}</h3><p>{loading ? "正在连接工单服务…" : "客户工单会先由 Agent 自动处理。只有知识不足、客户明确要求人工或涉及订单/支付争议时，才会进入这里。"}</p><small>演示建议：使用 customer 账号在智能客服中描述一个售后问题，创建工单后再刷新本页面。</small></div>}</section>
-      <section className="panel ticket-detail">{selectedTicket ? <><div className="section-title"><div><p className="eyebrow">TICKET DETAIL</p><h2>{selectedTicket.ticket_id}</h2><p className="muted">{selectedTicket.issue || selectedTicket.issue_summary || "尚未认领，先认领后查看详情"}</p></div><div className="ticket-detail-actions">{escalationLabel && <span className={`status escalation-status escalation-${escalation?.status?.toLowerCase()}`}>{escalationLabel}</span>}{loadingTicketId === selectedTicket.ticket_id ? <span className="status">正在读取详情…</span> : owned ? <span className="status">我已认领</span> : claimable ? <button onClick={() => void claim()} disabled={busy}>认领工单</button> : <span className="status">Agent 处理中</span>}</div></div>{loadingTicketId === selectedTicket.ticket_id ? <p className="empty">正在确认工单权限…</p> : owned ? <><div className="message-history">{messages.map((message) => <Message key={message.message_id} message={message} />)}</div><div className="draft-actions"><button className="secondary" onClick={() => void createDraft()} disabled={busy}>✨ 生成 AI 回复草稿</button>{draft && <span className="hint">引用 {draft.knowledge_references.length} 条知识资料{draft.needs_human_follow_up ? " · 需补充依据" : ""}</span>}</div><form className="composer" onSubmit={send}><textarea value={content} onChange={(event) => setContent(event.target.value)} placeholder="编辑后发送给客户" maxLength={4000} /><button disabled={busy}>{busy ? "处理中…" : "发送回复"}</button></form></> : <p className="empty">{claimable ? "认领后可查看消息、生成 AI 草稿并回复客户。" : "Agent 正在处理这张工单，转人工后即可认领。"}</p>}</> : <div className="ticket-detail-empty"><div className="agent-detail-icon">AI</div><h2>选择一张工单</h2><p>左侧显示当前客服可处理的工单。认领后可以查看完整对话、让 AI 生成回复草稿，并由你确认后发送。</p></div>}</section>
+      <section className="panel ticket-detail">{selectedTicket ? <>
+        <div className="section-title"><div><p className="eyebrow">TICKET DETAIL</p><h2>{selectedTicket.ticket_id}</h2><p className="muted">{selectedTicket.issue || selectedTicket.issue_summary || "尚未认领，先认领后查看详情"}</p></div><div className="ticket-detail-actions">
+          {escalationLabel && <span className={`status escalation-status escalation-${escalation?.status?.toLowerCase()}`}>{escalationLabel}</span>}
+          {loadingTicketId === selectedTicket.ticket_id ? <span className="status">正在读取详情…</span> : owned ? <><span className="status">{selectedTicket.status === "已关闭" ? "已关闭" : "人工处理中"}</span>{selectedTicket.status !== "已关闭" && <button className="secondary" onClick={() => void close()} disabled={busy}>关闭工单</button>}</> : claimable ? <button onClick={() => void claim()} disabled={busy}>认领工单</button> : <span className="status">Agent 处理中</span>}
+        </div></div>
+        {loadingTicketId === selectedTicket.ticket_id ? <p className="empty">正在确认工单权限…</p> : owned ? <>
+          <div className="message-history">{messages.map((message) => <Message key={message.message_id} message={message} />)}</div>
+          {selectedTicket.status !== "已关闭" && <><div className="draft-actions"><button className="secondary" onClick={() => void createDraft()} disabled={busy}>✨ 生成 AI 回复草稿</button>{draft && <span className="hint">引用 {draft.knowledge_references.length} 条知识资料{draft.needs_human_follow_up ? " · 需补充依据" : ""}</span>}</div><form className="composer" onSubmit={send}><textarea value={content} onChange={(event) => setContent(event.target.value)} placeholder="编辑后发送给客户" maxLength={4000} /><button disabled={busy}>{busy ? "处理中…" : "发送回复"}</button></form></>}
+        </> : <p className="empty">{claimable ? "认领后可查看消息、生成 AI 草稿并回复客户。" : "Agent 正在处理这张工单，转人工后即可认领。"}</p>}
+      </> : <div className="ticket-detail-empty"><div className="agent-detail-icon">AI</div><h2>选择一张工单</h2><p>左侧显示当前客服可处理的工单。认领后可以查看完整对话、让 AI 生成回复草稿，并由你确认后发送。</p></div>}</section>
     </div>{error && <p className="toast error">{error}</p>}
   </Shell>;
 }

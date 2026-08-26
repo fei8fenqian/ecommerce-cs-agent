@@ -127,6 +127,15 @@ class TestRouteNormal:
         assert intent.confidence == 1.0
 
     @pytest.mark.asyncio
+    async def test_customer_can_confirm_human_help_after_self_service_guidance(self):
+        router = _router("not valid JSON")
+
+        intent = await router.route("需要人工")
+
+        assert intent.target == "ticket"
+        assert intent.confidence == 1.0
+
+    @pytest.mark.asyncio
     async def test_refund_policy_question_does_not_create_ticket(self):
         """政策咨询仍应由知识库回答，不能误创建售后工单。"""
         router = _router('{"target": "rag", "table": "knowledge_chunks", "confidence": 0.9}')

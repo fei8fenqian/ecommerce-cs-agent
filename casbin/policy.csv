@@ -17,6 +17,7 @@ p, customer, /api/v1/tickets, POST
 p, customer, /api/v1/tickets/*, GET
 p, customer, /api/v1/tickets/*, PATCH
 p, customer, /api/v1/tickets/*/customer-messages, POST
+p, customer, /api/v1/tickets/*/close, POST
 
 # ========== agent (internal) ==========
 p, agent, /api/v1/chat, POST
@@ -28,6 +29,7 @@ p, agent, /api/v1/tickets/*, GET
 p, agent, /api/v1/tickets/*, PATCH
 p, agent, /api/v1/tickets/*/claim, POST
 p, agent, /api/v1/tickets/*/messages, POST
+p, agent, /api/v1/tickets/*/close, POST
 p, agent, /api/v1/tickets/*/escalation, GET
 p, agent, /api/v1/agent/support-reply-drafts/*, POST
 p, agent, /api/v1/orders/*, GET

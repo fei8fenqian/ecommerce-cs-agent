@@ -412,8 +412,8 @@ class TestChatEndpoint:
 # =============================================================================
 class TestChatStreamEndpoint:
     @pytest.mark.asyncio
-    async def test_customer_ticket_intent_creates_ticket_without_calling_llm_agent(self, client):
-        """明确售后诉求应自主建工单，而不是依赖模型决定是否调用工具。"""
+    async def test_refund_request_offers_self_service_before_creating_ticket(self, client):
+        """普通退款申请先进入本人订单页，不应直接制造人工工单。"""
         client.app.state.intent_router = _MockTicketIntentRouter()
         client.app.state.agent.run_stream = AsyncMock()
 
@@ -422,11 +422,12 @@ class TestChatStreamEndpoint:
             response = await http_client.post("/api/v1/chat/stream", json={"query": "我要申请退款"})
 
         assert response.status_code == 200
-        assert '"event": "tool_call"' in response.text
-        assert '"name": "create_ticket"' in response.text
-        assert "TK-DEMO-001" in response.text
+        assert '"event": "tool_call"' not in response.text
+        assert '"name": "create_ticket"' not in response.text
+        assert "?page=orders" in response.text
+        assert "需要人工" in response.text
         assert '"event": "done"' in response.text
-        client.app.state.registry.execute.assert_awaited_once()
+        client.app.state.registry.execute.assert_not_awaited()
         client.app.state.agent.run_stream.assert_not_awaited()
 
     @pytest.mark.asyncio

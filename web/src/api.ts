@@ -577,6 +577,10 @@ export function claimTicket(token: string, ticketId: string): Promise<Ticket> {
   return api(`/api/v1/tickets/${encodeURIComponent(ticketId)}/claim`, { method: "POST" }, token);
 }
 
+export function closeTicket(token: string, ticketId: string): Promise<{ ok: boolean; status: string }> {
+  return api(`/api/v1/tickets/${encodeURIComponent(ticketId)}/close`, { method: "POST" }, token);
+}
+
 export function requestReplyDraft(token: string, ticketId: string): Promise<SupportReplyDraft> {
   return api(`/api/v1/agent/support-reply-drafts/${encodeURIComponent(ticketId)}`, { method: "POST" }, token);
 }

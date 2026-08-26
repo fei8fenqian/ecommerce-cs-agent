@@ -28,6 +28,9 @@ class TestCustomer:
     def test_can_update_own_ticket(self):
         assert enforce("customer", "/api/v1/tickets/789", "PATCH")
 
+    def test_can_confirm_resolved_ticket(self):
+        assert enforce("customer", "/api/v1/tickets/789/close", "POST")
+
     def test_cannot_view_all_orders(self):
         assert not enforce("customer", "/api/v1/orders/456", "GET")
 
@@ -49,6 +52,7 @@ class TestAgent:
     def test_can_claim_and_update_tickets(self):
         assert enforce("agent", "/api/v1/tickets/789/claim", "POST")
         assert enforce("agent", "/api/v1/tickets/789", "PATCH")
+        assert enforce("agent", "/api/v1/tickets/789/close", "POST")
 
     def test_cannot_process_refund(self):
         assert not enforce("agent", "/api/v1/refunds/ORD-001", "POST")
