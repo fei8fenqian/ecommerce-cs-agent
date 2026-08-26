@@ -3,6 +3,7 @@
 body { margin: 0; min-width: 320px; }
 button, input, textarea { font: inherit; }
 button { border: 0; border-radius: 10px; background: #2457ef; color: white; padding: 10px 15px; cursor: pointer; font-weight: 650; }
+.ticket-detail .composer > button { flex: 0 0 auto; white-space: nowrap; }
 button:disabled { cursor: not-allowed; opacity: .6; }
 button.secondary { background: #edf1fc; color: #31509e; }
 button.text-button { display: inline; padding: 0; color: #2457ef; background: transparent; border-radius: 0; font-size: inherit; }
