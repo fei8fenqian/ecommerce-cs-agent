@@ -50,6 +50,7 @@ p, operator, /api/v1/reports/*, GET
 # ========== finance (internal) ==========
 p, finance, /api/v1/checkout/finance/refunds, GET
 p, finance, /api/v1/checkout/finance/anomalies, GET
+p, finance, /api/v1/checkout/finance/anomalies/summary, POST
 p, finance, /api/v1/checkout/finance/refunds/*/approve, POST
 p, finance, /api/v1/checkout/finance/refunds/*/reject, POST
 

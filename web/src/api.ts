@@ -165,6 +165,12 @@ export interface FinanceAnomaly {
   age_seconds: number;
 }
 
+export interface FinanceAnomalySummary {
+  summary: string;
+  anomaly_count: number;
+  generated_at: string;
+}
+
 export interface CartItem {
   item_id: number;
   category: "laptops" | "phones";
@@ -499,6 +505,10 @@ export async function listFinanceRefunds(token: string): Promise<FinanceRefund[]
 export async function listFinanceAnomalies(token: string): Promise<FinanceAnomaly[]> {
   const response = await api<{ anomalies: FinanceAnomaly[] }>("/api/v1/checkout/finance/anomalies", {}, token);
   return response.anomalies;
+}
+
+export function summarizeFinanceAnomalies(token: string): Promise<FinanceAnomalySummary> {
+  return api<FinanceAnomalySummary>("/api/v1/checkout/finance/anomalies/summary", { method: "POST" }, token);
 }
 
 export function approveFinanceRefund(

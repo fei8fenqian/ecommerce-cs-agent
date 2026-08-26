@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi import HTTPException
 
-from api.checkout import finance_anomalies
+from api.checkout import finance_anomalies, summarize_finance_anomalies
 from store.checkout_refund_store import FinanceAnomaly, list_finance_anomalies
 
 
@@ -77,4 +77,59 @@ async def test_only_finance_can_read_anomalies() -> None:
 
     with pytest.raises(HTTPException) as error:
         await finance_anomalies(_request("operator"))
+    assert error.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_finance_anomaly_summary_uses_scanned_facts_without_writing() -> None:
+    anomaly = FinanceAnomaly(
+        anomaly_type="REFUND_FAILED",
+        reference_id="refund-1",
+        order_no="SO-001",
+        status="FAILED",
+        amount_cents=12500,
+        currency="CNY",
+        reason="渠道拒绝",
+        occurred_at="2026-08-27T10:00:00+00:00",
+        age_seconds=3600,
+    )
+    llm = SimpleNamespace(chat=AsyncMock(return_value=SimpleNamespace(content="先核查 SO-001 的渠道退款结果。")))
+    request = SimpleNamespace(
+        state=SimpleNamespace(user={"id": 202, "role": "finance"}),
+        app=SimpleNamespace(state=SimpleNamespace(llm_client=llm)),
+    )
+
+    with patch("api.checkout.list_finance_anomalies", new=AsyncMock(return_value=[anomaly])) as scan:
+        result = await summarize_finance_anomalies(request)
+
+    assert result.summary == "先核查 SO-001 的渠道退款结果。"
+    assert result.anomaly_count == 1
+    scan.assert_awaited_once()
+    llm.chat.assert_awaited_once()
+    prompt = str(llm.chat.await_args.args[0])
+    assert "SO-001" in prompt
+    assert "12500" in prompt
+    assert "REFUND_FAILED" in prompt
+
+
+@pytest.mark.asyncio
+async def test_finance_anomaly_summary_is_deterministic_when_queue_is_empty() -> None:
+    llm = SimpleNamespace(chat=AsyncMock())
+    request = SimpleNamespace(
+        state=SimpleNamespace(user={"id": 202, "role": "finance"}),
+        app=SimpleNamespace(state=SimpleNamespace(llm_client=llm)),
+    )
+
+    with patch("api.checkout.list_finance_anomalies", new=AsyncMock(return_value=[])):
+        result = await summarize_finance_anomalies(request)
+
+    assert result.anomaly_count == 0
+    assert "未发现" in result.summary
+    llm.chat.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_only_finance_can_generate_anomaly_summary() -> None:
+    with pytest.raises(HTTPException) as error:
+        await summarize_finance_anomalies(_request("operator"))
     assert error.value.status_code == 403

@@ -1,5 +1,7 @@
 """客户发起支付宝沙箱 checkout 的 API 边界。"""
 
+import json
+from datetime import datetime, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -121,6 +123,14 @@ class FinanceAnomalyListResponse(BaseModel):
     """需要财务关注的支付/退款异常。"""
 
     anomalies: list[FinanceAnomalyItem]
+
+
+class FinanceAnomalySummaryResponse(BaseModel):
+    """根据当前扫描事实生成的财务核查摘要。"""
+
+    summary: str
+    anomaly_count: int
+    generated_at: str
 
 
 class FinanceRefundDecisionRequest(BaseModel):
@@ -263,6 +273,66 @@ async def finance_anomalies(request: Request) -> FinanceAnomalyListResponse:
         raise HTTPException(status_code=403, detail="只有财务可以查看资金异常")
     anomalies = await list_finance_anomalies(timeout_minutes=settings.finance_anomaly_timeout_minutes)
     return FinanceAnomalyListResponse(anomalies=[FinanceAnomalyItem(**anomaly.__dict__) for anomaly in anomalies])
+
+
+@checkout_router.post("/finance/anomalies/summary", response_model=FinanceAnomalySummaryResponse)
+async def summarize_finance_anomalies(request: Request) -> FinanceAnomalySummaryResponse:
+    """根据一次新扫描的只读事实生成 Agent 核查摘要，不执行财务动作。"""
+    if request.state.user["role"] != "finance":
+        raise HTTPException(status_code=403, detail="只有财务可以生成资金异常摘要")
+
+    anomalies = await list_finance_anomalies(timeout_minutes=settings.finance_anomaly_timeout_minutes)
+    generated_at = datetime.now(timezone.utc).isoformat()
+    if not anomalies:
+        return FinanceAnomalySummaryResponse(
+            summary="当前扫描未发现需要财务关注的支付或退款异常。",
+            anomaly_count=0,
+            generated_at=generated_at,
+        )
+
+    facts = [
+        {
+            "anomaly_type": anomaly.anomaly_type,
+            "reference_id": anomaly.reference_id,
+            "order_no": anomaly.order_no,
+            "status": anomaly.status,
+            "amount_cents": anomaly.amount_cents,
+            "currency": anomaly.currency,
+            "reason": anomaly.reason,
+            "occurred_at": anomaly.occurred_at,
+            "age_seconds": anomaly.age_seconds,
+        }
+        for anomaly in anomalies
+    ]
+    try:
+        llm_response = await request.app.state.llm_client.chat(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是企业财务核查助手。只能根据给定的本地支付/退款扫描事实，"
+                        "用中文输出简洁的核查摘要和建议的核查顺序。必须保留订单号、异常类型、"
+                        "状态、金额和持续时间等事实；不得新增、改写、估算或合并任何金额、订单号、"
+                        "时间或渠道结果。不得批准、驳回、重试、退款或修改任何状态。"
+                        "如果事实不足以判断原因，明确写出需要人工核查外部渠道。只输出摘要正文。"
+                    ),
+                },
+                {"role": "user", "content": json.dumps(facts, ensure_ascii=False)},
+            ],
+            temperature=0.0,
+            max_tokens=800,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Agent 摘要暂时不可用，请直接按异常队列核查") from exc
+
+    summary = (llm_response.content or "").strip()
+    if not summary:
+        raise HTTPException(status_code=503, detail="Agent 摘要暂时不可用，请直接按异常队列核查")
+    return FinanceAnomalySummaryResponse(
+        summary=summary,
+        anomaly_count=len(anomalies),
+        generated_at=generated_at,
+    )
 
 
 @checkout_router.post("/finance/refunds/{refund_id}/approve", response_model=CheckoutRefundResponse)

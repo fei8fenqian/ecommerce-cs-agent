@@ -9,6 +9,7 @@ import {
   CheckoutOrder,
   Fulfillment,
   FinanceAnomaly,
+  FinanceAnomalySummary,
   FinanceRefund,
   Product,
   ProductContextRef,
@@ -41,6 +42,7 @@ import {
   listMyCheckoutOrders,
   listFinanceRefunds,
   listFinanceAnomalies,
+  summarizeFinanceAnomalies,
   listOperatorFulfillments,
   listTicketMessages,
   listTickets,
@@ -1349,6 +1351,8 @@ function Message({ message }: { message: TicketMessage }) {
 function FinanceWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: () => Promise<void> }) {
   const [refunds, setRefunds] = useState<FinanceRefund[]>([]);
   const [anomalies, setAnomalies] = useState<FinanceAnomaly[]>([]);
+  const [summary, setSummary] = useState<FinanceAnomalySummary | null>(null);
+  const [summaryBusy, setSummaryBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [decisionBusy, setDecisionBusy] = useState<string | null>(null);
@@ -1361,6 +1365,7 @@ function FinanceWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: () 
       ]);
       setRefunds(nextRefunds);
       setAnomalies(nextAnomalies);
+      setSummary(null);
     }
     catch (reason) { setError(reason instanceof Error ? reason.message : "退款队列暂时不可用"); }
     finally { setLoading(false); }
@@ -1396,9 +1401,16 @@ function FinanceWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: () 
     return "支付处理超时";
   };
 
+  const generateSummary = async (): Promise<void> => {
+    setSummaryBusy(true); setError(""); setSummary(null);
+    try { setSummary(await summarizeFinanceAnomalies(auth.token)); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "Agent 摘要暂时不可用"); }
+    finally { setSummaryBusy(false); }
+  };
+
   return <Shell title="财务工作台" subtitle="查看退款队列和支付结果；审批、支付和退款状态变化必须经过确定性业务服务。" auth={auth} onSignOut={onSignOut}>
     <section className="metric-grid"><Metric label="退款总数" value={loading ? "—" : String(refunds.length)} /><Metric label="待处理" value={loading ? "—" : String(pending)} tone={pending ? "warning" : "normal"} /><Metric label="处理中" value={loading ? "—" : String(processing)} /><Metric label="已成功" value={loading ? "—" : String(succeeded)} /><Metric label="资金异常" value={loading ? "—" : String(anomalies.length)} tone={anomalies.length ? "danger" : "normal"} /></section>
-    <section className="panel finance-anomaly-panel"><div className="section-title"><div><p className="eyebrow">EXCEPTION QUEUE</p><h2>资金异常</h2><p className="muted">仅根据本地支付和退款事实筛选；这里不会自动改变资金状态。</p></div></div>{loading ? <p className="empty">正在扫描资金异常…</p> : anomalies.length ? <div className="finance-anomaly-list">{anomalies.map((anomaly) => <article className="finance-anomaly-row" key={`${anomaly.anomaly_type}-${anomaly.reference_id}`}><div><strong>{anomalyLabel(anomaly)}</strong><small>{anomaly.order_no} · {formatDate(anomaly.occurred_at)}</small></div><div><span className="status finance-anomaly-status">{anomaly.status}</span><strong>¥{(anomaly.amount_cents / 100).toLocaleString("zh-CN", { minimumFractionDigits: 2 })}</strong></div><p>{anomaly.reason || "需要财务核查本地事实和外部渠道状态"} · 已持续 {Math.max(1, Math.floor(anomaly.age_seconds / 60))} 分钟</p></article>)}</div> : <div className="role-empty"><div className="agent-empty-icon">✓</div><h3>当前没有资金异常</h3><p>支付和退款状态目前均在可接受范围内。</p></div>}</section>
+    <section className="panel finance-anomaly-panel"><div className="section-title"><div><p className="eyebrow">EXCEPTION QUEUE</p><h2>资金异常</h2><p className="muted">仅根据本地支付和退款事实筛选；这里不会自动改变资金状态。</p></div><button className="secondary" onClick={() => void generateSummary()} disabled={loading || summaryBusy || !anomalies.length}>{summaryBusy ? "生成中…" : "生成 Agent 摘要"}</button></div>{loading ? <p className="empty">正在扫描资金异常…</p> : anomalies.length ? <div className="finance-anomaly-list">{anomalies.map((anomaly) => <article className="finance-anomaly-row" key={`${anomaly.anomaly_type}-${anomaly.reference_id}`}><div><strong>{anomalyLabel(anomaly)}</strong><small>{anomaly.order_no} · {formatDate(anomaly.occurred_at)}</small></div><div><span className="status finance-anomaly-status">{anomaly.status}</span><strong>¥{(anomaly.amount_cents / 100).toLocaleString("zh-CN", { minimumFractionDigits: 2 })}</strong></div><p>{anomaly.reason || "需要财务核查本地事实和外部渠道状态"} · 已持续 {Math.max(1, Math.floor(anomaly.age_seconds / 60))} 分钟</p></article>)}</div> : <div className="role-empty"><div className="agent-empty-icon">✓</div><h3>当前没有资金异常</h3><p>支付和退款状态目前均在可接受范围内。</p></div>}{summary && <div className="agent-answer finance-summary"><strong>Agent 核查摘要</strong><p>{summary.summary}</p><small>基于 {summary.anomaly_count} 条扫描事实 · {formatDate(summary.generated_at)}</small></div>}</section>
     <section className="panel finance-refund-panel"><div className="section-title"><div><p className="eyebrow">REFUND QUEUE</p><h2>退款队列</h2><p className="muted">只处理进入财务审批范围的退款；金额和订单事实由服务端确定。</p></div><button className="secondary" onClick={() => void load()} disabled={loading || decisionBusy !== null}>{loading ? "读取中…" : "刷新"}</button></div>{error && <p className="error">{error}</p>}{loading ? <p className="empty">正在读取退款记录…</p> : refunds.length ? <div className="finance-refund-list">{refunds.map((refund) => <article className="finance-refund-row" key={refund.refund_id}><div><strong>{refund.order_no}</strong><small>{refund.refund_id} · {formatDate(refund.requested_at)}</small></div><div><span className={`status finance-status-${refund.status}`}>{refund.status}</span><strong>¥{(refund.amount_cents / 100).toLocaleString("zh-CN", { minimumFractionDigits: 2 })}</strong></div><p>{refund.reason || "客户未填写原因"}</p>{refund.status === "PENDING_FINANCE_APPROVAL" && <div className="finance-decision-actions"><button disabled={decisionBusy !== null} onClick={() => void decide(refund, "approve")}>批准并发起退款</button><button className="secondary" disabled={decisionBusy !== null} onClick={() => void decide(refund, "reject")}>驳回</button></div>}</article>)}</div> : <div className="role-empty"><div className="agent-empty-icon">✓</div><h3>当前没有退款记录</h3><p>客户提交退款申请后，记录会出现在这里。</p></div>}</section>
   </Shell>;
 }
