@@ -15,7 +15,9 @@ from alembic import op  # type: ignore[attr-defined]
 
 revision: str = "d7a1c4e8b92f"
 down_revision: Union[str, Sequence[str], None] = "a7d1e8f4c902"
-branch_labels: Union[str, Sequence[str], None] = None
+# Harness 是暂不进入生产主线的实验分支。生产部署必须使用
+# ``alembic upgrade production@head``，不能用未区分分支的 ``upgrade head``。
+branch_labels: Union[str, Sequence[str], None] = "experimental_harness"
 depends_on: Union[str, Sequence[str], None] = None
 
 
