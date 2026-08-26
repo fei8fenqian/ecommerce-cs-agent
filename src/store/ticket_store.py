@@ -315,6 +315,48 @@ async def get_agent_ticket(ticket_id: str, user_id: int) -> dict[str, Any] | Non
             await put_connection(conn)
 
 
+async def get_agent_ticket_escalation(ticket_id: str, user_id: int) -> dict[str, Any] | None:
+    """读取客服可见工单最近一次人工升级通知状态。
+
+    工单归属校验和升级状态查询在同一条带范围 SQL 中完成。未认领工单可以看到
+    是否已创建通知，但不能看到客户完整资料；已由其他客服认领的工单返回 ``None``。
+    """
+    conn = None
+    try:
+        conn = await get_connection()
+        await conn.set_autocommit(True)
+        cur = await conn.execute(
+            """
+            SELECT escalation.status, escalation.attempts, escalation.next_attempt_at,
+                   escalation.delivered_at, escalation.last_error_code
+            FROM public.tickets AS ticket
+            LEFT JOIN LATERAL (
+                SELECT status, attempts, next_attempt_at, delivered_at, last_error_code
+                FROM public.ticket_human_escalations
+                WHERE ticket_id = ticket.ticket_id
+                ORDER BY escalation_generation DESC
+                LIMIT 1
+            ) AS escalation ON TRUE
+            WHERE ticket.ticket_id = %s
+              AND (ticket.assigned_agent_id IS NULL OR ticket.assigned_agent_id = %s)
+            """,
+            (ticket_id, user_id),
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        return {
+            "status": row[0],
+            "attempts": row[1] or 0,
+            "next_attempt_at": _as_iso(row[2]) if row[2] is not None else None,
+            "delivered_at": _as_iso(row[3]) if row[3] is not None else None,
+            "last_error_code": row[4],
+        }
+    finally:
+        if conn is not None:
+            await put_connection(conn)
+
+
 async def _update_ticket_in_scope(
     ticket_id: str,
     scope_sql: str,

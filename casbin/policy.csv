@@ -28,6 +28,7 @@ p, agent, /api/v1/tickets/*, GET
 p, agent, /api/v1/tickets/*, PATCH
 p, agent, /api/v1/tickets/*/claim, POST
 p, agent, /api/v1/tickets/*/messages, POST
+p, agent, /api/v1/tickets/*/escalation, GET
 p, agent, /api/v1/agent/support-reply-drafts/*, POST
 p, agent, /api/v1/orders/*, GET
 
@@ -48,6 +49,7 @@ p, operator, /api/v1/reports/*, GET
 
 # ========== finance (internal) ==========
 p, finance, /api/v1/checkout/finance/refunds, GET
+p, finance, /api/v1/checkout/finance/anomalies, GET
 p, finance, /api/v1/checkout/finance/refunds/*/approve, POST
 p, finance, /api/v1/checkout/finance/refunds/*/reject, POST
 

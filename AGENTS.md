@@ -1,153 +1,112 @@
 # AGENTS.md
 
-Codex 的项目接管规范。每次在本仓库工作前先阅读本文件，并以用户当前明确指令为最高优先级；`CLAUDE.md` 是既有项目约定的来源，二者冲突时以用户当前指令为准。
+本文件是本仓库所有 Agent 的当前工作准则。用户当前指令优先；本文件与旧的 `CLAUDE.md`、历史计划
+冲突时，以用户当前指令和本文件为准。
 
-## 项目现状
+## 项目真正要交付什么
 
-这是“极客数码”3C 电商 AI 客服服务，使用 Python 3.12、FastAPI、PostgreSQL + pgvector、Redis、OpenAI 兼容 LLM（默认 DeepSeek）。当前已实现：
+这是一个面向电商场景的 AI 应用开发项目，核心产品形态是可落地部署的智能体（Agent）。
 
-- `/api/v1/chat` 与 `/api/v1/chat/stream`：意图路由后进入 RAG、ReAct 工具 Agent 或 Plan-and-Execute。
-- 混合检索：向量检索 + BM25 + RRF + BGE reranker。
-- Agent 工具：商品/配件检索、库存、订单、商品比较、工单；可选 MCP 工具会在启动时注册。
-- LangGraph 规划执行：配机兼容性校验与故障诊断。
-- Redis 会话、多轮指代消解、JWT 登录态、Casbin 内部角色授权、工单接口与健康检查。
+最终要交付的是：用户提出业务诉求后，Agent 能理解上下文、判断下一步、调用经过授权的业务工具、
+推动业务状态变化，并在成功、失败、等待或需要人工介入时给出清晰结果。人工客服、财务或运营不是
+每一步都必须点击确认的操作者，而是处理高风险、异常、争议和超出 Agent 权限的情况。
 
-`README.md` 和 `CLAUDE.md` 含有部分早期目录/阶段描述；涉及现状、改动范围与行为时，优先相信当前 `src/`、`tests/`、`pyproject.toml` 和 Git 历史。
+最终验收标准是 Agent 能否在真实或 Mock 电商环境中独立完成一条可观察、可恢复的业务闭环，例如
+识别客户诉求、查询所需业务数据、执行低风险动作、等待异步结果、处理失败并在必要时升级人工。
 
-## 当前运行架构
+当前优先级：
 
-```text
-FastAPI lifespan
-  -> PostgreSQL connection pool / ticket + user tables / Redis / Casbin
-  -> LLMClient + IntentRouter + ToolRegistry + AgentLoop + PlanAndExecuteAgent
+1. 选择一个高价值场景，先做出 Agent 能自主完成的端到端业务闭环；
+2. 根据真实使用暴露的问题补充业务工具、状态流转、失败恢复、超时和人工升级；
+3. 只有在当前业务明确需要时，才补通用框架、抽象、测试、文档和其他生产化能力。
 
-/api/v1/chat[/stream]
-  -> SessionManager（Redis 历史与指代消解）
-  -> sentiment detection
-  -> IntentRouter
-     -> rag: hybrid_search -> AgentLoop（携带检索上下文）
-     -> agent/ticket: AgentLoop（LLM function calling -> ToolRegistry）
-     -> plan_execute: LangGraph planner -> executor -> judge -> replanner -> formatter
-```
+计划是方向，不是束缚。发现更直接的业务路径时，可以缩短、合并或调整后续计划；不得为了遵守
+旧计划而继续实现已经没有当前价值的内容。
 
-目录职责：
+## 业务优先原则
 
-- `src/api/`：HTTP 契约与响应编排；`src/middleware/`：请求 ID、认证与权限。
-- `src/agent/llm/`：LLM 客户端、意图、会话、情绪与指代处理。
-- `src/agent/rag/`：检索和排序；`src/agent/engines/`：Agent 执行引擎；`src/agent/tools/`：领域工具。
-- `src/infra/`：PostgreSQL、Redis、Casbin；`src/store/`：SQL 数据访问；`src/service/`：业务服务。
-- `data/`：知识、商品、模拟数据与评测集；`tests/`：现有行为和安全回归约束。
+- 每次开始工作先回答：**这会让谁完成什么具体工作？**
+- 优先交付一条 Agent 能自己推进完成的端到端业务路径，而不是只让人工客服使用的辅助页面、通用
+  平台、未来扩展点或“大而全”基础设施。
+- 最大化复用现有 FastAPI、RAG、ToolRegistry、LangGraph、认证、工单和数据库能力；先组合已有
+  能力，不因为“架构更优雅”就重造 Harness、工作流、权限或存储系统。
+- 每条 Agent 业务路径都要明确：触发条件、可读取的上下文、可调用的工具、状态变化、成功结果、
+  失败与超时处理，以及何时升级人工。不能只描述“模型生成了什么”。
+- 默认让 Agent 自主推进低风险、规则明确的动作；需要人工时必须有具体原因，例如金额风险、权限
+  不足、信息冲突、政策不确定或客户争议，而不能因为流程没有设计自动处理就把每个请求都变成“等
+  客服认领”。
+- 允许先做粗糙但清楚的雏形。接口、数据模型、提示词、页面和流程可以在真实使用后重构。
+- 不为尚未发生的多租户、海量并发、跨区域、复杂审批、灾备、对象存储、插件平台或全面生产化提前
+  设计。它们只有在当前业务被实际阻塞时才进入工作范围。
+- 不用“以后可能需要”“企业通常会有”作为新增模块、表、抽象、ADR 或中间层的充分理由。
 
-## Docker 环境
+### 当前交付方向
 
-- PostgreSQL 容器：`pgvector`
-- Redis 容器：`redis-session`
-- PostgreSQL 宿主机端口：`5433`，容器内端口：`5432`
-- Redis 端口：`6379`
+执行顺序以 `docs/plans/INTERNAL_AGENT_WORKFLOW_PLAN.md` 为准：客服飞书升级与班前摘要 → 财务异常待办
+→ 运营经营例外；物流/仓储后置。客户侧下单、支付、退款与售后是已有基线，不重造；不恢复 Harness-first
+路线，只有多个已验证工作流出现同一恢复/重试痛点时才抽取公共能力。
 
-执行项目命令前，可先确认容器状态：
+## 设计、文档与测试的尺度
 
-```bash
-docker ps
-docker port pgvector
-docker port redis-session
-```
+设计、文档和测试服务于交付，不是交付物本身。
 
-常用数据库查询：
+- 设计：能用现有结构解决时不新增层；能用一个具体实现解决时不抽象成框架；先实现，再从重复痛点
+  中提炼公共部分。
+- 文档：只记录当前会影响实现或协作的决定。不要把可能永远不会执行的未来方案写成大量契约或 ADR。
+- 测试：优先一条能跑通业务的正常路径；再只补当前真正危险的反例。禁止为了覆盖率、形式完整或
+  假想故障堆叠重复的单元、集成、契约、fixture 和回归测试。
+- 评审：只有会导致当前业务无法运行、资源越权、错误资金/订单状态写入、数据难以恢复或敏感信息
+  泄露的问题，才可阻塞交付。其他意见写成后续项，不得阻止雏形上线或演示。
+- 验证比例由风险决定，不由代码行数或“企业标准”决定。一个能手工演示的端到端闭环，通常比几十条
+  没有用户入口的测试更有价值。
 
-```bash
-docker exec pgvector psql -U postgres -d postgres -c "SELECT 1;"
-```
+保留的最小底线：
 
-常用 Redis 查询：
+- 用户或内部角色不能越权读取/修改资源；
+- 涉及订单、库存、支付、退款等写操作时，必须通过确定性服务，不能由模型文本直接改状态或金额；
+- Agent 的自主执行必须可追踪：记录触发原因、工具调用、关键输入输出、状态变化和最终结果；失败时
+  不能假装成功，必须返回可理解的失败、等待或人工升级状态；
+- Agent 不能因为追求“全自动”而绕过权限、确认、金额校验或人工升级边界；自治能力和安全边界必须
+  同时存在；
+- 数据库 migration 或会修改现有数据时，先说明影响并取得用户确认；
+- 不提交密钥、token、密码、私钥或不必要的敏感数据。
 
-```bash
-docker exec redis-session redis-cli ping
-```
+## 当前技术事实
 
-应用从宿主机连接 PostgreSQL 时使用 `localhost:5433`；在 PostgreSQL 容器内部连接时使用容器端口 `5432`。不要在本文件或仓库中写入数据库密码。
+- 技术栈：Python 3.12、FastAPI、PostgreSQL + pgvector、Redis、OpenAI 兼容 LLM。
+- 已有能力：客户商城、聊天/RAG、工单与 AI 升级、结算/沙箱支付退款、财务退款审批、运营发货队列、
+  JWT/Casbin、审计、限流和基础依赖治理。
+- 当前 Docker：PostgreSQL 容器 `pgvector`（宿主端口 `5433`），Redis 容器 `redis-session`（`6379`）。
+- 本地开发默认只用 Docker 运行这两个依赖；FastAPI 和 Vite 在宿主机热更新。不要同时启用手工容器和 Compose 的 `db`/`redis`，避免端口、数据卷和事实来源混乱。
+- 测试必须使用独立的 `*_test` 数据库；迁移使用明确生产 revision，禁止 `alembic upgrade head`（Harness 分支独立）。
+- `docker-compose.demo.yml` 仅用于单机演示；生产不使用源码挂载或 `--reload`，也不把 Docker Compose 本身当作高可用方案。
+- 现有代码、测试和 Git 历史比 README、CLAUDE 或历史计划更能说明当前真实行为。
+- legacy 订单和历史 mock 数据不能被当作可信的新交易事实，也不得自动归属用户。
 
-默认只执行查询和诊断。涉及数据库迁移、写入、删除、清空或重建容器时，先说明影响并等待用户确认。
+## 实现时的必要约束
 
-## 必须遵守的工程约束
+- `src` 是包根，使用 `from config import settings` 等扁平导入，禁止 `from src...`。
+- `src/log_config.py` 不得改名为 `logging.py`。
+- 保持异步边界；SQL 值参数化；动态 SQL 标识符必须白名单。
+- 配置经 `config.Settings`/环境变量注入；不提交 `.env` 或密钥。
+- 不覆盖、回退或删除用户已有未提交改动。
+- 新增公开接口应有类型；复杂公共业务逻辑再补 docstring。不要为了满足格式而给每个小函数写冗长文档。
 
-1. `pyproject.toml` 将 `src` 设为包根目录，必须使用扁平导入：`from config import settings`、`from agent...`，不能使用 `from src...`。
-2. `src/log_config.py` 的名称不可改回 `logging.py`，否则会遮蔽 Python 标准库。
-3. 保持异步边界：HTTP、LLM、数据库、Redis 与工具调用不得在事件循环中引入阻塞 I/O。
-4. SQL 的值一律参数化；动态表名、列名或更新字段必须先白名单校验。鉴权、工单、订单和会话改动必须保留相应安全测试。
-5. 配置只经 `config.Settings`/环境变量注入；不得提交密钥、`.env` 或私钥。`LLMClient` 构造参数继续显式注入，保证可测试性。
-6. 不删除、覆盖或回退用户已有未提交改动。当前工作区已有用户的未跟踪文件 `src/agent/context.py`，除非用户明确指示，不碰它。
-7. 只做与请求直接相关的最小改动；改动前先读相关实现与测试，改动后执行成比例的测试并如实报告结果。
-8. 保持 Ruff、mypy、pytest 约定；验证优先跑受影响测试，再按需要扩展。不要把 `Makefile` 中用 `|| true` 掩盖的 lint 结果当作通过。
+## 工作方式
 
-## 类型、接口与可读性约束
+- 先看当前代码和已有能力，只做实现当前 Agent 业务闭环所需的最小改动。
+- 当前由 Codex 主导实现；前后端可同步推进，但先确定后端业务状态、授权边界和 API 契约，前端不得虚构
+  资金、订单或权限结果。
+- 遇到真实资金动作、生产凭证、业务库写入、不可逆 migration、权限模型大改或数据安全问题时暂停并汇报。
+- 交付时只说明：Agent 现在能替谁自主完成什么工作、改了什么、实际跑了哪些关键验证、还有哪些
+  明确的人工升级或自动化边界。
+- 不把“文档已写”“测试已过”“静态检查通过”描述成用户可用或生产可用。
 
-这些约束用于让业务代码和领域代码更容易理解、审查和测试：
+## Codex 的角色
 
-1. 所有新增或修改的公开函数、方法必须声明完整的参数类型和返回类型。例如：
+Codex 默认负责架构判断、业务实现、测试、调试和交付，目标是尽快把可部署、可验证的 Agent 业务能力
+做出来。用户只有明确说“我想自己写”“这部分由我实现”或等价指令时，Codex 才切换为指导、答疑与审查模式，不替代
+用户编写该部分代码。
 
-   ```python
-   async def claim_after_sale(
-       self,
-       command: ClaimAfterSaleCommand,
-   ) -> CommandResult:
-       ...
-   ```
-
-2. Application Service、Repository、Provider、Worker 和 API handler 不得省略返回类型；
-   异步方法必须明确返回具体类型，例如 `-> CommandResult`、`-> list[Ticket]`，或
-   在非 `async` 的 Protocol 方法中使用 `Awaitable[T]`。
-3. 领域命令、领域结果、审计 metadata 和 Outbox payload 不得使用裸 `dict` 或
-   `dict[str, Any]` 作为接口类型。优先使用 `dataclass(frozen=True, slots=True)`、
-   `Enum`、值对象和 `Protocol`。
-4. 领域层不得接收 FastAPI `Request`、客户端角色字段、任意状态字符串或裸数据库
-   connection；应接收经过验证的内部命令对象、Actor、事务上下文和状态枚举。
-5. 公开的 Service、Repository、Provider、Worker、API handler 和复杂领域函数必须
-   使用 Google 风格 docstring。至少在适用时包含 `Args`、`Returns` 和 `Raises`，
-   说明参数含义、返回值和可能抛出的领域异常。例如：
-
-   ```python
-   def require_command_meta(
-       command: AfterSaleCommand,
-       meta: CommandMeta,
-   ) -> None:
-       """校验命令元数据中的主体、来源和命令角色边界。
-
-       Args:
-           command: 要执行的领域命令。
-           meta: 命令携带的主体、请求上下文、幂等键和版本号。
-
-       Returns:
-           None。校验成功表示 meta 可以进入后续业务流程。
-
-       Raises:
-           ActorNotAllowedError: 主体或来源不能执行该命令。
-       """
-   ```
-
-   私有且显而易见的辅助函数可以不写完整 docstring，但复杂逻辑必须解释关键
-   前置条件和设计原因。
-6. 注释解释“为什么”，类型和 docstring 解释“是什么/怎么调用”；不要用注释代替
-   类型签名，也不要写与实现已经不一致的注释。
-7. 新增代码完成后，至少运行受影响测试、Ruff、mypy 和 Python 编译检查；如果因为
-   外部依赖或测试 fixture 未能运行，必须在交付说明中明确写出，不能宣称通过。
-8. `mypy` 配置应逐步收紧，禁止通过删除类型注解、扩大 `Any` 或缩小检查范围来
-   掩盖错误；确需 `cast` 时必须在代码附近说明 SDK/边界原因。
-
-## 协作与学习模式
-
-项目既有约定表明用户处于学习阶段。未收到明确实现或设计请求时：
-
-- 只回答具体知识点、执行用户要求的检查命令，或在用户提交后进行代码审查。
-- 不主动给架构方案、函数骨架、下一步计划或扩展性建议。
-- 用户明确要求“设计、实现、修复、构建、推进”时，在其授权范围内承担相应的技术负责人职责；先给出基于代码证据的结论，再执行最小可验证变更。
-
-### 当前长期协作约定（优先）
-
-用户要求 Codex 在本项目中只担任生产架构顾问：不编写业务代码、不代替用户做实现；工作内容是评估设计、解释生产实践、识别风险、审查用户完成后的代码，以及协助规划能落地的演进路径。除非用户明确撤销这一约定，否则即使存在可修复的问题，也只说明影响和验证思路，不直接修改业务实现。
-
-## 交付标准
-
-- 说明改动了什么、为什么，以及实际运行过哪些验证。
-- 对未验证的外部依赖（LLM、数据库、Redis、MCP）明确标注，不将静态检查当作端到端验证。
-- 发现架构文档与代码不一致、关键运行缺陷或安全风险时，记录证据和影响；除非用户要求修复，不擅自扩大修改范围。
+即使由 Codex 实现，也必须遵守本文件的业务优先原则：先交付当前 Agent 闭环所需的最小代码，不借
+实现之名扩建通用框架、未来能力或过量测试。

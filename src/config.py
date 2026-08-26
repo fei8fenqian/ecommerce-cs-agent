@@ -65,6 +65,12 @@ class Settings(BaseSettings):
     alipay_sandbox_public_key_path: str = ""
     alipay_sandbox_notify_url: str = ""
     alipay_sandbox_return_url: str = ""
+    alipay_sandbox_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        le=60,
+        description="支付宝沙箱网关单次请求超时(秒)",
+    )
 
     # ---- 内部 Metrics 端点 ----
     metrics_bearer_token: SecretStr = SecretStr("")
@@ -84,6 +90,20 @@ class Settings(BaseSettings):
     ai_ticket_worker_enabled: bool = False
     ai_ticket_worker_interval_seconds: float = Field(default=5.0, gt=0, le=300)
     ai_ticket_claim_timeout_seconds: int = Field(default=120, ge=30, le=3600)
+
+    # ---- 客服人工升级通知 ----
+    # 默认不配置飞书，工单仍可在本系统客服工作台中处理。
+    feishu_duty_webhook_url: str = ""
+    # 使用 SPA 根入口，避免静态服务器未配置 /after-sales rewrite 时深链 404。
+    feishu_workbench_url: str = "http://localhost:5173/?page=login&next=tickets"
+    feishu_webhook_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
+    feishu_escalation_worker_enabled: bool = False
+    feishu_escalation_worker_interval_seconds: float = Field(default=5.0, gt=0, le=300)
+    feishu_escalation_max_attempts: int = Field(default=5, ge=1, le=20)
+    feishu_escalation_claim_timeout_seconds: int = Field(default=60, ge=10, le=3600)
+
+    # ---- 财务异常扫描 ----
+    finance_anomaly_timeout_minutes: int = Field(default=30, ge=5, le=1440)
 
     # ---- MCP Server 端点 ----
     mcp_servers: list[str] = []  # 如 ["http://localhost:8081/sse"]

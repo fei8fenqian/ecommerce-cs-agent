@@ -37,6 +37,21 @@ class FinanceRefund:
 
 
 @dataclass(frozen=True)
+class FinanceAnomaly:
+    """财务异常队列中的只读事实摘要。"""
+
+    anomaly_type: str
+    reference_id: str
+    order_no: str
+    status: str
+    amount_cents: int
+    currency: str
+    reason: str
+    occurred_at: str
+    age_seconds: int
+
+
+@dataclass(frozen=True)
 class RefundConfirmationStart:
     """确认退款后，应用服务是否应当首次调用支付宝。"""
 
@@ -122,6 +137,112 @@ async def list_finance_refunds(*, limit: int = 100) -> list[FinanceRefund]:
                 requested_at=str(row[6]),
                 finance_decision_note=str(row[7] or ""),
                 finance_decided_at=str(row[8]) if row[8] is not None else None,
+            )
+            for row in rows
+        ]
+    finally:
+        await put_connection(connection)
+
+
+async def list_finance_anomalies(*, timeout_minutes: int = 30, limit: int = 100) -> list[FinanceAnomaly]:
+    """扫描退款和支付事实，返回需要财务关注的只读异常。
+
+    该查询只读取应用自有 checkout 表，不改变资金状态。``timeout_minutes``
+    用于识别长时间未收敛的处理中支付/退款，具体动作仍由财务页面和确定性服务完成。
+    """
+    bounded_timeout = max(5, min(timeout_minutes, 24 * 60))
+    bounded_limit = max(1, min(limit, 200))
+    connection = await get_connection()
+    try:
+        cursor = await connection.execute(
+            """
+            WITH anomalies AS (
+                SELECT
+                    'REFUND_PENDING_APPROVAL' AS anomaly_type,
+                    r.id::text AS reference_id,
+                    o.order_no,
+                    r.status,
+                    r.amount_cents,
+                    r.currency,
+                    r.reason,
+                    r.requested_at AS occurred_at
+                FROM public.checkout_refunds AS r
+                JOIN public.sales_orders AS o ON o.id = r.sales_order_id
+                WHERE r.status = 'PENDING_FINANCE_APPROVAL'
+
+                UNION ALL
+
+                SELECT
+                    'REFUND_FAILED' AS anomaly_type,
+                    r.id::text AS reference_id,
+                    o.order_no,
+                    r.status,
+                    r.amount_cents,
+                    r.currency,
+                    r.reason,
+                    COALESCE(r.failed_at, r.updated_at) AS occurred_at
+                FROM public.checkout_refunds AS r
+                JOIN public.sales_orders AS o ON o.id = r.sales_order_id
+                WHERE r.status = 'FAILED'
+
+                UNION ALL
+
+                SELECT
+                    'REFUND_PROCESSING_TIMEOUT' AS anomaly_type,
+                    r.id::text AS reference_id,
+                    o.order_no,
+                    r.status,
+                    r.amount_cents,
+                    r.currency,
+                    r.reason,
+                    COALESCE(r.processing_at, r.updated_at) AS occurred_at
+                FROM public.checkout_refunds AS r
+                JOIN public.sales_orders AS o ON o.id = r.sales_order_id
+                WHERE r.status = 'PROCESSING'
+                  AND COALESCE(r.processing_at, r.updated_at)
+                      < NOW() - (%s * INTERVAL '1 minute')
+
+                UNION ALL
+
+                SELECT
+                    CASE WHEN p.status = 'PENDING'
+                         THEN 'PAYMENT_PENDING_TIMEOUT'
+                         ELSE 'PAYMENT_PROCESSING_TIMEOUT'
+                    END AS anomaly_type,
+                    p.id::text AS reference_id,
+                    o.order_no,
+                    p.status,
+                    p.amount_cents,
+                    p.currency,
+                    '支付状态长时间未确认' AS reason,
+                    p.created_at AS occurred_at
+                FROM public.payment_transactions AS p
+                JOIN public.sales_orders AS o ON o.id = p.sales_order_id
+                WHERE p.status IN ('PENDING', 'PROCESSING')
+                  AND o.status NOT IN ('CANCELLED', 'PAYMENT_FAILED')
+                  AND p.created_at < NOW() - (%s * INTERVAL '1 minute')
+            )
+            SELECT anomaly_type, reference_id, order_no, status, amount_cents,
+                   currency, reason, occurred_at,
+                   FLOOR(EXTRACT(EPOCH FROM (NOW() - occurred_at)))::bigint AS age_seconds
+            FROM anomalies
+            ORDER BY occurred_at ASC, reference_id ASC
+            LIMIT %s
+            """,
+            (bounded_timeout, bounded_timeout, bounded_limit),
+        )
+        rows = await cursor.fetchall()
+        return [
+            FinanceAnomaly(
+                anomaly_type=str(row[0]),
+                reference_id=str(row[1]),
+                order_no=str(row[2]),
+                status=str(row[3]),
+                amount_cents=int(str(row[4])),
+                currency=str(row[5]),
+                reason=str(row[6] or ""),
+                occurred_at=str(row[7]),
+                age_seconds=max(0, int(row[8] or 0)),
             )
             for row in rows
         ]

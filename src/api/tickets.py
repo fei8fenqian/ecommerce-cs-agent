@@ -16,6 +16,7 @@ from store.ticket_store import (
     claim_ticket,
     create_ticket,
     get_agent_ticket,
+    get_agent_ticket_escalation,
     get_customer_ticket,
     list_agent_tickets,
     list_customer_tickets,
@@ -64,6 +65,16 @@ class AgentTicketSummaryResponse(BaseModel):
     urgency: str
     status: str
     created_at: str
+
+
+class AgentTicketEscalationResponse(BaseModel):
+    """当前客服可见的最近一次人工升级通知投递状态。"""
+
+    status: str | None = None
+    attempts: int = 0
+    next_attempt_at: str | None = None
+    delivered_at: str | None = None
+    last_error_code: str | None = None
 
 
 class AgentTicketDetailResponse(BaseModel):
@@ -364,6 +375,22 @@ async def ticket(ticket_id: str, request: Request):
         )
 
     raise HTTPException(status_code=403, detail="当前帐号无权查询工单")
+
+
+@ticket_router.get(
+    "/tickets/{ticket_id}/escalation",
+    response_model=AgentTicketEscalationResponse,
+)
+async def ticket_escalation(ticket_id: str, request: Request) -> AgentTicketEscalationResponse:
+    """返回客服队列中工单的通知投递状态，不返回供应商响应正文。"""
+    user = request.state.user
+    if user["role"] != "agent":
+        raise HTTPException(status_code=403, detail="只有客服可以查询通知状态")
+
+    escalation = await get_agent_ticket_escalation(ticket_id, user["id"])
+    if escalation is None:
+        raise HTTPException(status_code=404, detail="工单不存在")
+    return AgentTicketEscalationResponse(**escalation)
 
 
 @ticket_router.post("/tickets/{ticket_id}/claim", response_model=ClaimResponse)

@@ -5,6 +5,7 @@ from typing import Literal
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from config import settings
 from service.checkout_refund_service import (
     CustomerRefundResult,
     FinanceRefundDecisionUnavailableError,
@@ -27,7 +28,7 @@ from service.checkout_service import (
     refresh_customer_payment_status,
     resume_checkout_session,
 )
-from store.checkout_refund_store import list_finance_refunds
+from store.checkout_refund_store import list_finance_anomalies, list_finance_refunds
 from store.checkout_store import list_customer_checkout_orders
 
 checkout_router = APIRouter(prefix="/api/v1/checkout", tags=["沙箱结算"])
@@ -100,6 +101,26 @@ class FinanceRefundListResponse(BaseModel):
     """财务可见的退款队列。"""
 
     refunds: list[FinanceRefundItem]
+
+
+class FinanceAnomalyItem(BaseModel):
+    """财务异常扫描的一条只读事实摘要。"""
+
+    anomaly_type: str
+    reference_id: str
+    order_no: str
+    status: str
+    amount_cents: int
+    currency: str
+    reason: str
+    occurred_at: str
+    age_seconds: int
+
+
+class FinanceAnomalyListResponse(BaseModel):
+    """需要财务关注的支付/退款异常。"""
+
+    anomalies: list[FinanceAnomalyItem]
 
 
 class FinanceRefundDecisionRequest(BaseModel):
@@ -233,6 +254,15 @@ async def finance_refunds(request: Request) -> FinanceRefundListResponse:
             for refund in refunds
         ]
     )
+
+
+@checkout_router.get("/finance/anomalies", response_model=FinanceAnomalyListResponse)
+async def finance_anomalies(request: Request) -> FinanceAnomalyListResponse:
+    """扫描长时间未收敛的支付/退款事实；只读，不改变业务状态。"""
+    if request.state.user["role"] != "finance":
+        raise HTTPException(status_code=403, detail="只有财务可以查看资金异常")
+    anomalies = await list_finance_anomalies(timeout_minutes=settings.finance_anomaly_timeout_minutes)
+    return FinanceAnomalyListResponse(anomalies=[FinanceAnomalyItem(**anomaly.__dict__) for anomaly in anomalies])
 
 
 @checkout_router.post("/finance/refunds/{refund_id}/approve", response_model=CheckoutRefundResponse)

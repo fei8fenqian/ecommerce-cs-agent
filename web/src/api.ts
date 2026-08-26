@@ -22,6 +22,14 @@ export interface Ticket {
   assigned_agent_id?: number;
 }
 
+export interface TicketEscalation {
+  status: "PENDING" | "DELIVERING" | "DELIVERED" | "RETRY_WAIT" | "DLQ" | null;
+  attempts: number;
+  next_attempt_at: string | null;
+  delivered_at: string | null;
+  last_error_code: string | null;
+}
+
 export interface TicketMessage {
   message_id: number;
   author_role: "customer" | "agent" | "ai";
@@ -91,10 +99,19 @@ export interface CheckoutSession {
   order_no: string;
   amount_cents: number;
   payment_url: string;
+  payment_form_action?: string | null;
+  payment_form_fields?: Record<string, string> | null;
+  payment_qr_code?: string | null;
 }
 
 export interface PublicAssistantResponse {
   answer: string;
+}
+
+/** 详情页传给服务端的商品定位；服务端会重新读取公开商品事实。 */
+export interface ProductContextRef {
+  category: "laptops" | "phones" | "components";
+  productId: string;
 }
 
 export interface CheckoutOrder {
@@ -108,6 +125,44 @@ export interface CheckoutOrder {
   tracking_company: string | null;
   tracking_number: string | null;
   created_at: string;
+  refund_id: string | null;
+  refund_status: string | null;
+}
+
+/** 新商城订单的全额退款状态；支付网关原始字段不会发送给浏览器。 */
+export interface CheckoutRefund {
+  refund_id: string;
+  order_no: string;
+  status: "PENDING_CONFIRMATION" | "PENDING_FINANCE_APPROVAL" | "PROCESSING" | "SUCCEEDED" | "FAILED" | "REJECTED";
+  amount_cents: number;
+  currency: "CNY";
+  reason: string;
+  requested_at: string;
+  idempotent_replay: boolean;
+}
+
+export interface FinanceRefund {
+  refund_id: string;
+  order_no: string;
+  status: string;
+  amount_cents: number;
+  currency: string;
+  reason: string;
+  requested_at: string;
+  finance_decision_note: string;
+  finance_decided_at: string | null;
+}
+
+export interface FinanceAnomaly {
+  anomaly_type: string;
+  reference_id: string;
+  order_no: string;
+  status: string;
+  amount_cents: number;
+  currency: string;
+  reason: string;
+  occurred_at: string;
+  age_seconds: number;
 }
 
 export interface CartItem {
@@ -226,12 +281,19 @@ export async function streamChat(
   sessionId: string | undefined,
   onEvent: (event: ChatStreamEvent) => void,
   replaceFromSequence?: number,
+  product?: ProductContextRef,
 ): Promise<void> {
   const response = await fetch("/api/v1/chat/stream", {
     method: "POST",
     credentials: "same-origin",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}`, Accept: "text/event-stream" },
-    body: JSON.stringify({ query, session_id: sessionId, replace_from_sequence: replaceFromSequence }),
+    body: JSON.stringify({
+      query,
+      session_id: sessionId,
+      replace_from_sequence: replaceFromSequence,
+      product_category: product?.category,
+      product_id: product?.productId,
+    }),
   });
   if (!response.ok || !response.body) {
     const body = (await response.json().catch(() => ({}))) as ErrorBody;
@@ -284,17 +346,21 @@ export function getProductDetail(
 }
 
 /** 匿名访客可用的公开导购，不创建服务端会话，也不会访问个人订单。 */
-export function askPublicAssistant(query: string): Promise<PublicAssistantResponse> {
+export function askPublicAssistant(query: string, product?: ProductContextRef): Promise<PublicAssistantResponse> {
   return api<PublicAssistantResponse>("/api/v1/products/assistant", {
     method: "POST",
-    body: JSON.stringify({ query }),
+    body: JSON.stringify({
+      query,
+      product_category: product?.category,
+      product_id: product?.productId,
+    }),
   });
 }
 
 /** 创建待支付订单后返回支付宝沙箱的浏览器跳转地址。 */
 export function createCheckout(
   token: string,
-  category: "laptops" | "phones",
+  category: "laptops" | "phones" | "components",
   productId: string,
   returnOrigin: string,
 ): Promise<CheckoutSession> {
@@ -307,7 +373,7 @@ export function createCheckout(
 /** 将商品加入当前客户的持久化购物车；价格和库存会在结算时再次核验。 */
 export function addCartItem(
   token: string,
-  category: "laptops" | "phones",
+  category: "laptops" | "phones" | "components",
   productId: string,
   quantity = 1,
 ): Promise<CartItem> {
@@ -368,6 +434,39 @@ export function refreshCheckoutPayment(token: string, orderNo: string): Promise<
   }, token);
 }
 
+/** 创建待确认退款；付款金额由服务端从已支付交易读取，浏览器不能传金额。 */
+export function requestCheckoutRefund(
+  token: string,
+  orderNo: string,
+  reason: string,
+  idempotencyKey: string,
+): Promise<CheckoutRefund> {
+  return api<CheckoutRefund>(`/api/v1/checkout/orders/${encodeURIComponent(orderNo)}/refunds`, {
+    method: "POST",
+    headers: { "Idempotency-Key": idempotencyKey },
+    body: JSON.stringify({ reason }),
+  }, token);
+}
+
+/** 客户明确确认后才会提交一次支付宝沙箱退款。 */
+export function confirmCheckoutRefund(
+  token: string,
+  refundId: string,
+  idempotencyKey: string,
+): Promise<CheckoutRefund> {
+  return api<CheckoutRefund>(`/api/v1/checkout/refunds/${encodeURIComponent(refundId)}/confirm`, {
+    method: "POST",
+    headers: { "Idempotency-Key": idempotencyKey },
+  }, token);
+}
+
+/** 查询已提交退款的支付宝状态；不会再次请求退款。 */
+export function refreshCheckoutRefund(token: string, refundId: string): Promise<CheckoutRefund> {
+  return api<CheckoutRefund>(`/api/v1/checkout/refunds/${encodeURIComponent(refundId)}/refresh`, {
+    method: "POST",
+  }, token);
+}
+
 /** 运营查看应用自有订单的发货队列。 */
 export async function listOperatorFulfillments(token: string): Promise<Fulfillment[]> {
   const response = await api<{ fulfillments: Fulfillment[] }>("/api/v1/fulfillments", {}, token);
@@ -392,6 +491,42 @@ export async function listMyOrders(token: string): Promise<CustomerOrder[]> {
   return response.orders;
 }
 
+export async function listFinanceRefunds(token: string): Promise<FinanceRefund[]> {
+  const response = await api<{ refunds: FinanceRefund[] }>("/api/v1/checkout/finance/refunds", {}, token);
+  return response.refunds;
+}
+
+export async function listFinanceAnomalies(token: string): Promise<FinanceAnomaly[]> {
+  const response = await api<{ anomalies: FinanceAnomaly[] }>("/api/v1/checkout/finance/anomalies", {}, token);
+  return response.anomalies;
+}
+
+export function approveFinanceRefund(
+  token: string,
+  refundId: string,
+  decisionNote: string,
+  idempotencyKey: string,
+): Promise<CheckoutRefund> {
+  return api<CheckoutRefund>(`/api/v1/checkout/finance/refunds/${encodeURIComponent(refundId)}/approve`, {
+    method: "POST",
+    headers: { "Idempotency-Key": idempotencyKey },
+    body: JSON.stringify({ decision_note: decisionNote }),
+  }, token);
+}
+
+export function rejectFinanceRefund(
+  token: string,
+  refundId: string,
+  decisionNote: string,
+  idempotencyKey: string,
+): Promise<CheckoutRefund> {
+  return api<CheckoutRefund>(`/api/v1/checkout/finance/refunds/${encodeURIComponent(refundId)}/reject`, {
+    method: "POST",
+    headers: { "Idempotency-Key": idempotencyKey },
+    body: JSON.stringify({ decision_note: decisionNote }),
+  }, token);
+}
+
 export async function listSessions(token: string): Promise<SessionItem[]> {
   const response = await api<{ sessions: SessionItem[] }>("/api/v1/sessions", {}, token);
   return response.sessions;
@@ -412,6 +547,10 @@ export async function listTickets(token: string): Promise<Ticket[]> {
 
 export function getTicket(token: string, ticketId: string): Promise<Ticket> {
   return api(`/api/v1/tickets/${encodeURIComponent(ticketId)}`, {}, token);
+}
+
+export function getTicketEscalation(token: string, ticketId: string): Promise<TicketEscalation> {
+  return api(`/api/v1/tickets/${encodeURIComponent(ticketId)}/escalation`, {}, token);
 }
 
 export async function listTicketMessages(token: string, ticketId: string): Promise<TicketMessage[]> {
