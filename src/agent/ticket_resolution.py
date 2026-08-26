@@ -16,6 +16,7 @@ from store.ticket_store import (
     claim_next_ticket_for_ai,
     complete_ai_ticket,
     escalate_ai_ticket,
+    send_ticket_to_human_queue,
 )
 
 logger = logging.getLogger(__name__)
@@ -57,6 +58,22 @@ class TicketResolutionAgent:
         self._llm_client = llm_client
         self._claim_timeout_seconds = claim_timeout_seconds
 
+    async def _handoff_to_human(
+        self,
+        ticket_id: str,
+        customer_reply: str,
+        *,
+        reason: TicketEscalationReason,
+    ) -> None:
+        """将 AI 工单交回人工队列，并在升级记录表不可用时保住核心状态。"""
+        try:
+            await escalate_ai_ticket(ticket_id, customer_reply, escalation_reason=reason)
+        except Exception:
+            # 人工升级记录是通知/审计能力，不能阻塞工单回人工队列这一核心业务动作。
+            # send_ticket_to_human_queue 只更新 tickets，避免升级表未迁移时工单卡死。
+            logger.warning("人工升级记录写入失败，先回收工单到人工队列")
+            await send_ticket_to_human_queue(ticket_id)
+
     async def process_next(self) -> bool:
         """处理队列中的一张工单。
 
@@ -80,10 +97,10 @@ class TicketResolutionAgent:
             )
             if reason is not None:
                 logger.info("工单进入人工队列", extra={"escalation_reason": reason.value})
-                await escalate_ai_ticket(
+                await self._handoff_to_human(
                     ticket_id,
                     _NEED_MORE_DETAILS_REPLY,
-                    escalation_reason=reason,
+                    reason=reason,
                 )
                 return True
 
@@ -113,10 +130,10 @@ class TicketResolutionAgent:
                     "模型建议工单转人工",
                     extra={"escalation_reason": TicketEscalationReason.MODEL_ESCALATION.value},
                 )
-                await escalate_ai_ticket(
+                await self._handoff_to_human(
                     ticket_id,
                     _NEED_MORE_DETAILS_REPLY,
-                    escalation_reason=TicketEscalationReason.MODEL_ESCALATION,
+                    reason=TicketEscalationReason.MODEL_ESCALATION,
                 )
                 return True
 
@@ -131,10 +148,10 @@ class TicketResolutionAgent:
                 "AI 工单处理失败，已转人工队列",
                 extra={"escalation_reason": TicketEscalationReason.AGENT_UNAVAILABLE.value},
             )
-            await escalate_ai_ticket(
+            await self._handoff_to_human(
                 ticket_id,
                 _AGENT_UNAVAILABLE_REPLY,
-                escalation_reason=TicketEscalationReason.AGENT_UNAVAILABLE,
+                reason=TicketEscalationReason.AGENT_UNAVAILABLE,
             )
             return True
 

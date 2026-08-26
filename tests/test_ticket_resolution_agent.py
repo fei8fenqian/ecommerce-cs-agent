@@ -129,6 +129,24 @@ async def test_model_failure_moves_ticket_to_human_queue() -> None:
 
 
 @pytest.mark.asyncio
+async def test_handoff_falls_back_to_ticket_status_when_escalation_record_fails() -> None:
+    """升级记录表不可用时，工单仍必须回到可认领的人工状态。"""
+    llm = SimpleNamespace(chat=AsyncMock(side_effect=RuntimeError("provider unavailable")))
+    agent = TicketResolutionAgent(llm, claim_timeout_seconds=120)
+    fallback = AsyncMock(return_value=True)
+
+    with (
+        patch("agent.ticket_resolution.claim_next_ticket_for_ai", new=AsyncMock(return_value=TICKET)),
+        patch("agent.ticket_resolution.hybrid_search", new=AsyncMock(return_value=KNOWLEDGE)),
+        patch("agent.ticket_resolution.escalate_ai_ticket", new=AsyncMock(side_effect=RuntimeError("table missing"))),
+        patch("agent.ticket_resolution.send_ticket_to_human_queue", new=fallback),
+    ):
+        assert await agent.process_next() is True
+
+    fallback.assert_awaited_once_with("ticket-ai-1")
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("issue", "reason"),
     [

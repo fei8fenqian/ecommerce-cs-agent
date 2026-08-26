@@ -65,6 +65,17 @@ class TestRouteNormal:
         assert intent.confidence == 1.0
 
     @pytest.mark.asyncio
+    async def test_troubleshooting_routes_to_knowledge_rag_not_planning_graph(self):
+        """普通故障咨询应快速给排障建议，不应先规划订单/工具链。"""
+        router = _router('{"target": "plan_execute", "scenario": "troubleshoot", "confidence": 0.95}')
+
+        intent = await router.route("电脑清灰后 Wi-Fi 信号很差")
+
+        assert intent.target == "rag"
+        assert intent.table == "knowledge_chunks"
+        assert intent.scenario == ""
+
+    @pytest.mark.asyncio
     async def test_rag_target(self):
         router = _router('{"target": "rag", "table": "laptop_products", "confidence": 0.95}')
         intent = await router.route("推荐一款笔记本")

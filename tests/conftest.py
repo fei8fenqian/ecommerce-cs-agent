@@ -11,8 +11,8 @@ import pytest_asyncio
 
 from config import settings
 
-# 默认测试库跟随当前可演示的客服 Agent 分支；Harness 仍是独立、未启用分支。
-EXPECTED_SCHEMA_REVISION = "f2a6b8c4d903"
+# 默认测试库跟随当前可演示的客服 Agent 生产迁移合并点；Harness 仍是独立、未启用分支。
+EXPECTED_SCHEMA_REVISION = "m8c5d2e9f701"
 REQUIRED_TABLES = {
     "component_products",
     "knowledge_chunks",
@@ -27,6 +27,7 @@ REQUIRED_TABLES = {
     "refunds",
     "audit_events",
     "outbox_events",
+    "ticket_human_escalations",
 }
 
 
@@ -48,7 +49,7 @@ async def _validate_schema(conn: psycopg.AsyncConnection) -> None:
         raise RuntimeError(
             "测试数据库缺少 Alembic 创建的表: "
             + ", ".join(sorted(missing_tables))
-            + "; 请先执行 PG_DBNAME=<test_db> alembic upgrade head。"
+            + "; 请先执行 PG_DBNAME=<test_db> alembic upgrade m8c5d2e9f701。"
         )
 
     cur = await conn.execute("SELECT version_num FROM alembic_version")

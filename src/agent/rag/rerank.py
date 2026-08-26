@@ -1,3 +1,5 @@
+from numbers import Real
+
 from FlagEmbedding import FlagReranker
 
 from config import settings
@@ -25,9 +27,18 @@ def rerank(query: str, docs: list[dict], top_k: int = settings.rerank_top_k) -> 
     docs: [{"id": ..., "content": ..., ...}, ...]
     返回 top_k 条，按 rerank_score 降序。
     """
-    pairs: list[tuple[str, str]] = [(query, doc["content"]) for doc in docs]
+    # FlagEmbedding 对空 pairs 和单条 pair 的返回形状不稳定：前者没有必要加载模型，
+    # 后者在部分版本会返回单个数值而不是列表。两者都应是正常的“候选不足”情况。
+    if not docs:
+        return []
+
+    pairs: list[tuple[str, str]] = [(query, str(doc.get("content") or "")) for doc in docs]
     # 每个 score 对应一对 (query, doc)
-    scores: list[float] = _get_reranker().compute_score(pairs)
+    raw_scores = _get_reranker().compute_score(pairs)
+    if isinstance(raw_scores, Real):
+        scores = [float(raw_scores)]
+    else:
+        scores = [float(score) for score in raw_scores]
 
     for doc, score in zip(docs, scores):
         doc["rerank_score"] = float(score)

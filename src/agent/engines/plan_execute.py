@@ -648,7 +648,12 @@ class PlanAndExecuteAgent:
         scenario: str = "build_pc",
         tool_context: ToolContext | None = None,
     ) -> AsyncGenerator[dict, None]:
-        """SSE 流式执行 Plan-and-Execute"""
+        """SSE 流式执行 Plan-and-Execute。
+
+        LangGraph 在同时订阅 ``updates`` 与 ``values`` 时，当前版本会产出
+        ``(mode, payload)`` 元组。这里先按 mode 解析，再把节点更新转换为前端
+        可消费的 ``node_complete`` 事件；不能把 mode 字符串当成节点字典。
+        """
         initial_state = PlanExecuteState(
             messages=history or [],
             query=query,
@@ -657,13 +662,23 @@ class PlanAndExecuteAgent:
             max_iterations=self.max_iterations,
         )
 
-        full_state = None
+        full_state: dict[str, Any] = dict(initial_state)
 
         async for chunk in self._graph.astream(initial_state, stream_mode=["updates", "values"]):
-            # chunk 是 tuple: ({"planner": {"plan": [...]}}, {*完整state*})
-            node_delta, full_state = chunk
-            node_name = list(node_delta.keys())[0]
-            yield {"event": "node_complete", "name": node_name, "data": node_delta}
+            if isinstance(chunk, tuple) and len(chunk) == 2:
+                mode, payload = chunk
+                if mode == "values" and isinstance(payload, dict):
+                    full_state = payload
+                    continue
+                if mode == "updates" and isinstance(payload, dict):
+                    for node_name, node_delta in payload.items():
+                        yield {"event": "node_complete", "name": node_name, "data": {node_name: node_delta}}
+                    continue
+
+            # 兼容仅订阅 updates 的 LangGraph 版本，避免升级依赖后再次让诊断分支崩溃。
+            if isinstance(chunk, dict):
+                for node_name, node_delta in chunk.items():
+                    yield {"event": "node_complete", "name": node_name, "data": {node_name: node_delta}}
 
         yield {"event": "done", "data": full_state}
 
