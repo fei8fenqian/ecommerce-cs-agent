@@ -126,3 +126,52 @@ async def test_model_failure_moves_ticket_to_human_queue() -> None:
     handoff_call = handoff.await_args
     assert handoff_call is not None
     assert "智能诊断暂时不可用" in handoff_call.args[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("issue", "reason"),
+    [
+        ("请转人工客服处理", "EXPLICIT_HUMAN_REQUEST"),
+        ("我要求退款并查询支付", "ORDER_OR_PAYMENT_ACTION"),
+        ("我要投诉你们，问题一直没有解决", "COMPLAINT_OR_DISPUTE"),
+    ],
+)
+async def test_deterministic_high_risk_requests_skip_llm(issue: str, reason: str) -> None:
+    """高风险或明确人工诉求不应先让模型自由回答。"""
+    llm = SimpleNamespace(chat=AsyncMock())
+    agent = TicketResolutionAgent(llm, claim_timeout_seconds=120)
+    handoff = AsyncMock(return_value=True)
+    ticket = {**TICKET, "issue": issue}
+
+    with (
+        patch("agent.ticket_resolution.claim_next_ticket_for_ai", new=AsyncMock(return_value=ticket)),
+        patch("agent.ticket_resolution.hybrid_search", new=AsyncMock(return_value=KNOWLEDGE)) as search,
+        patch("agent.ticket_resolution.escalate_ai_ticket", new=handoff),
+        patch("agent.ticket_resolution.logger") as logger,
+    ):
+        assert await agent.process_next() is True
+
+    search.assert_awaited_once()
+    llm.chat.assert_not_awaited()
+    handoff.assert_awaited_once()
+    assert logger.info.call_args.kwargs["extra"]["escalation_reason"] == reason
+
+
+@pytest.mark.asyncio
+async def test_repeated_unresolved_follow_up_is_escalated() -> None:
+    """AI 已回复后客户再次追问且无依据时，不循环生成低质量回复。"""
+    llm = SimpleNamespace(chat=AsyncMock())
+    agent = TicketResolutionAgent(llm, claim_timeout_seconds=120)
+    handoff = AsyncMock(return_value=True)
+    ticket = {**TICKET, "previous_ai_reply": True}
+
+    with (
+        patch("agent.ticket_resolution.claim_next_ticket_for_ai", new=AsyncMock(return_value=ticket)),
+        patch("agent.ticket_resolution.hybrid_search", new=AsyncMock(return_value=[])),
+        patch("agent.ticket_resolution.escalate_ai_ticket", new=handoff),
+    ):
+        assert await agent.process_next() is True
+
+    llm.chat.assert_not_awaited()
+    handoff.assert_awaited_once()

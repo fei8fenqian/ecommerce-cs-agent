@@ -11,6 +11,7 @@ from typing import Any, Protocol
 
 from agent.rag.retrieve import hybrid_search
 from log_config import redact_text
+from service.ticket_escalation import TicketEscalationReason, classify_ticket_escalation
 from store.ticket_store import (
     claim_next_ticket_for_ai,
     complete_ai_ticket,
@@ -72,8 +73,18 @@ class TicketResolutionAgent:
             safe_issue = redact_text(str(ticket["issue"]))
             documents = await hybrid_search(safe_issue, table="knowledge_chunks")
             context = _knowledge_context(documents)
-            if not context:
-                await escalate_ai_ticket(ticket_id, _NEED_MORE_DETAILS_REPLY)
+            reason = classify_ticket_escalation(
+                safe_issue,
+                previous_ai_reply=bool(ticket.get("previous_ai_reply", False)),
+                knowledge_available=bool(context),
+            )
+            if reason is not None:
+                logger.info("工单进入人工队列", extra={"escalation_reason": reason.value})
+                await escalate_ai_ticket(
+                    ticket_id,
+                    _NEED_MORE_DETAILS_REPLY,
+                    escalation_reason=reason,
+                )
                 return True
 
             response = await self._llm_client.chat(
@@ -98,7 +109,15 @@ class TicketResolutionAgent:
             )
             answer = str(getattr(response, "content", "") or "").strip()
             if not answer or _ESCALATE_MARKER in answer:
-                await escalate_ai_ticket(ticket_id, _NEED_MORE_DETAILS_REPLY)
+                logger.info(
+                    "模型建议工单转人工",
+                    extra={"escalation_reason": TicketEscalationReason.MODEL_ESCALATION.value},
+                )
+                await escalate_ai_ticket(
+                    ticket_id,
+                    _NEED_MORE_DETAILS_REPLY,
+                    escalation_reason=TicketEscalationReason.MODEL_ESCALATION,
+                )
                 return True
 
             await complete_ai_ticket(ticket_id, answer)
@@ -108,8 +127,15 @@ class TicketResolutionAgent:
         except Exception:
             # 依赖异常和未知模型异常都不能让工单无限重试或泄露给客户；但客户必须
             # 看得到 Agent 已接手及后续去向，不能只留下一个没有解释的状态。
-            logger.warning("AI 工单处理失败，已转人工队列")
-            await escalate_ai_ticket(ticket_id, _AGENT_UNAVAILABLE_REPLY)
+            logger.warning(
+                "AI 工单处理失败，已转人工队列",
+                extra={"escalation_reason": TicketEscalationReason.AGENT_UNAVAILABLE.value},
+            )
+            await escalate_ai_ticket(
+                ticket_id,
+                _AGENT_UNAVAILABLE_REPLY,
+                escalation_reason=TicketEscalationReason.AGENT_UNAVAILABLE,
+            )
             return True
 
 
