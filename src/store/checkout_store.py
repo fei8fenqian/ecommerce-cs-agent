@@ -9,6 +9,7 @@ from infra.db_pool import get_connection, put_connection
 from store.refund_store_types import AsyncConnection
 
 CheckoutCategory = Literal["laptops", "phones", "components"]
+CURRENT_PAYMENT_NO_PREFIX = "PMV2"
 _PRODUCT_TABLES: dict[CheckoutCategory, str] = {
     "laptops": "laptop_products",
     "phones": "phone_products",
@@ -51,12 +52,14 @@ class CartCheckoutLine:
     """一次购物车结算时需要在付款成功后消费的商品数量快照。
 
     这不是购物车行的外键：客户在付款前仍可调整或删除购物车，因此只保留当时的
-    商品标识和数量。付款成功时再在同一事务内做一次保守扣减。
+    商品标识和数量。``unit_amount_cents`` 只用于判断待支付订单是否仍与当前购物车
+    价格一致，不写入消费快照。付款成功时再在同一事务内做一次保守扣减。
     """
 
     category: CheckoutCategory
     product_id: str
     quantity: int
+    unit_amount_cents: int | None = None
 
 
 @dataclass(frozen=True)
@@ -413,6 +416,7 @@ async def find_reusable_pending_checkout(
               AND o.status = 'PENDING_PAYMENT'
               AND p.status IN ('PENDING', 'PROCESSING')
               AND p.provider = 'alipay_sandbox'
+              AND p.merchant_payment_no LIKE %s
               AND i.catalog_category = %s
               AND i.catalog_product_id = %s
               AND i.quantity = %s
@@ -422,6 +426,7 @@ async def find_reusable_pending_checkout(
             """,
             (
                 customer_user_id,
+                f"{CURRENT_PAYMENT_NO_PREFIX}%",
                 product.category,
                 product.product_id,
                 quantity,
@@ -463,6 +468,71 @@ async def get_customer_latest_pending_checkout(customer_user_id: int) -> Reusabl
         )
         row = await cursor.fetchone()
         return None if row is None else ReusablePendingCheckout(str(row[0]), str(row[1]), int(row[2]), str(row[3]))
+    finally:
+        await put_connection(connection)
+
+
+async def find_reusable_pending_cart_checkout(
+    customer_user_id: int,
+    cart_lines: list[CartCheckoutLine],
+    total_amount_cents: int,
+) -> ReusablePendingCheckout | None:
+    """只复用与当前购物车快照完全一致的待支付订单。
+
+    当前购物车发生增删或数量变化时，旧订单的金额和商品快照不能继续使用；否则
+    浏览器会把新购物车错误地带到旧的支付宝交易。
+    """
+    if any(line.unit_amount_cents is None for line in cart_lines):
+        return None
+    expected_lines = sorted(
+        (line.category, line.product_id, line.quantity, line.unit_amount_cents) for line in cart_lines
+    )
+    if not expected_lines:
+        return None
+
+    connection = await get_connection()
+    try:
+        cursor = await connection.execute(
+            """
+            SELECT o.order_no, p.merchant_payment_no, p.amount_cents,
+                   c.catalog_category, c.catalog_product_id, c.quantity, i.unit_amount_cents,
+                   i.product_name
+            FROM sales_orders AS o
+            JOIN payment_transactions AS p ON p.sales_order_id = o.id
+            -- checkout_cart_lines is the cart-origin marker.  A direct-buy order
+            -- can have identical sales_order_items, but must never be reused by
+            -- cart checkout because it may carry an unrelated payment attempt.
+            JOIN checkout_cart_lines AS c
+              ON c.sales_order_id = o.id AND c.consumed_at IS NULL
+            JOIN sales_order_items AS i
+              ON i.sales_order_id = o.id
+             AND i.catalog_category = c.catalog_category
+             AND i.catalog_product_id = c.catalog_product_id
+            WHERE o.customer_user_id = %s
+              AND o.status = 'PENDING_PAYMENT'
+              AND p.status IN ('PENDING', 'PROCESSING')
+              AND p.provider = 'alipay_sandbox'
+              AND p.merchant_payment_no LIKE %s
+            ORDER BY o.created_at DESC
+            """,
+            (customer_user_id, f"{CURRENT_PAYMENT_NO_PREFIX}%"),
+        )
+        rows = await cursor.fetchall()
+        candidates: dict[tuple[str, str, int], tuple[list[tuple[str, str, int, int]], str]] = {}
+        for row in rows:
+            key = (str(row[0]), str(row[1]), int(row[2]))
+            lines, subject = candidates.setdefault(key, ([], str(row[7])))
+            lines.append((str(row[3]), str(row[4]), int(row[5]), int(row[6])))
+
+        for (order_no, merchant_payment_no, amount_cents), (existing_lines, subject) in candidates.items():
+            if amount_cents == total_amount_cents and sorted(existing_lines) == expected_lines:
+                return ReusablePendingCheckout(
+                    order_no=order_no,
+                    merchant_payment_no=merchant_payment_no,
+                    amount_cents=amount_cents,
+                    subject=subject,
+                )
+        return None
     finally:
         await put_connection(connection)
 
@@ -547,19 +617,19 @@ async def _consume_paid_cart_lines(connection: AsyncConnection, sales_order_id: 
     """保守消费一笔已付款购物车订单对应的购物车快照。
 
     ``consumed_at`` 是幂等闸门：支付宝回调和主动查询即使同时或重复确认成功，
-    也只有第一笔事务能取得待消费行。客户付款前将数量调小或手工删除时不强行
-    覆盖其新选择；将数量调大时，仅扣除本次已经付款的原始数量。
+    也只有第一笔事务能取得待消费行。消费时还会比较购物车行的 ``updated_at``
+    与快照时间；客户付款前调数量、删除后重加或加入同款时，不强行覆盖其新选择。
     """
     cursor = await connection.execute(
         """
         UPDATE checkout_cart_lines
         SET consumed_at = NOW()
         WHERE sales_order_id = %s AND consumed_at IS NULL
-        RETURNING catalog_category, catalog_product_id, quantity
+        RETURNING catalog_category, catalog_product_id, quantity, created_at
         """,
         (sales_order_id,),
     )
-    for category, product_id, quantity in await cursor.fetchall():
+    for category, product_id, quantity, snapshot_created_at in await cursor.fetchall():
         await connection.execute(
             """
             DELETE FROM cart_items AS i
@@ -571,8 +641,9 @@ async def _consume_paid_cart_lines(connection: AsyncConnection, sales_order_id: 
               AND i.catalog_category = %s
               AND i.catalog_product_id = %s
               AND i.quantity = %s
+              AND i.updated_at <= %s
             """,
-            (sales_order_id, category, product_id, quantity),
+            (sales_order_id, category, product_id, quantity, snapshot_created_at),
         )
         await connection.execute(
             """
@@ -586,8 +657,9 @@ async def _consume_paid_cart_lines(connection: AsyncConnection, sales_order_id: 
               AND i.catalog_category = %s
               AND i.catalog_product_id = %s
               AND i.quantity > %s
+              AND i.updated_at <= %s
             """,
-            (quantity, sales_order_id, category, product_id, quantity),
+            (quantity, sales_order_id, category, product_id, quantity, snapshot_created_at),
         )
 
 

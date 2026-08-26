@@ -11,6 +11,7 @@ from config import settings
 from exceptions import DependencyUnavailableError
 from infra.alipay_sandbox import AlipayGatewayError, AlipaySandboxClient, AlipayTradeNotFoundError
 from store.checkout_store import (
+    CURRENT_PAYMENT_NO_PREFIX,
     CheckoutCategory,
     apply_alipay_callback,
     apply_alipay_trade_query,
@@ -94,6 +95,46 @@ async def build_alipay_checkout_session(
     )
 
 
+async def build_alipay_qr_checkout_session(
+    client: AlipaySandboxClient,
+    *,
+    order_no: str,
+    merchant_payment_no: str,
+    amount_cents: int,
+    subject: str,
+) -> CheckoutSession:
+    """为商城购物车创建支付宝二维码支付会话。
+
+    Args:
+        client: 已完成配置校验的支付宝沙箱客户端。
+        order_no: 本地商城订单号。
+        merchant_payment_no: 支付宝可见的商户交易号。
+        amount_cents: 服务端确定的订单总金额（分）。
+        subject: 收银台展示的订单标题。
+
+    Returns:
+        包含支付宝二维码内容的支付会话。二维码本身不代表支付成功，付款结果
+        仍须通过交易查询或异步通知确认。
+
+    Raises:
+        DependencyUnavailableError: 支付宝无法创建二维码，不能把订单伪装成可支付。
+    """
+    try:
+        qr_code = await client.precreate_trade(
+            merchant_payment_no=merchant_payment_no,
+            amount_cents=amount_cents,
+            subject=subject,
+        )
+    except AlipayGatewayError as exc:
+        raise DependencyUnavailableError("支付宝暂时无法创建付款二维码") from exc
+    return CheckoutSession(
+        order_no=order_no,
+        amount_cents=amount_cents,
+        payment_url="",
+        payment_qr_code=qr_code,
+    )
+
+
 def build_browser_return_url(return_origin: str | None, order_no: str) -> str | None:
     """仅接受本地开发前端的固定 origin，避免客户端把支付回跳变成开放重定向。"""
     if return_origin not in {"http://127.0.0.1:5173", "http://localhost:5173"}:
@@ -139,7 +180,7 @@ async def create_checkout_session(
     now = datetime.now(UTC)
     suffix = uuid4().hex[:12].upper()
     order_no = f"SO{now:%Y%m%d%H%M%S}{suffix}"
-    merchant_payment_no = f"PM{now:%Y%m%d%H%M%S}{suffix}"
+    merchant_payment_no = f"{CURRENT_PAYMENT_NO_PREFIX}{now:%Y%m%d%H%M%S}{suffix}"
     created = await create_checkout_order(
         sales_order_id=uuid4(),
         order_no=order_no,
@@ -165,7 +206,10 @@ async def resume_checkout_session(
     order_no: str,
     return_origin: str | None,
 ) -> CheckoutSession:
-    """为客户本人的现有待支付订单重新生成支付宝付款页，不再创建第二笔本地订单。"""
+    """为客户本人的现有待支付订单重新生成付款入口，不再创建第二笔本地订单。
+
+    新旧订单统一重新生成电脑网站支付表单，不创建第二笔本地订单。
+    """
     pending = await get_customer_pending_payment(customer_user_id, order_no)
     if pending is None:
         raise CheckoutUnavailableError("payment is not resumable")

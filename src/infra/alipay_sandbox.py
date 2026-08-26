@@ -104,8 +104,8 @@ class AlipaySandboxClient:
     ) -> str:
         """构建已 RSA2 签名的电脑网站支付跳转链接。
 
-        新客户端优先使用 :meth:`build_page_pay_form` 的 POST 表单；保留此方法
-        是为了兼容已有订单页和外部调用方。
+        实际浏览器支付使用 :meth:`build_page_pay_form` 的 POST 表单。这里保留
+        完整 URL 仅供兼容已有调用方和测试，且与表单使用相同的无回调参数集。
         """
         return self.build_page_pay_form(
             merchant_payment_no=merchant_payment_no,
@@ -152,11 +152,13 @@ class AlipaySandboxClient:
                 ),
             }
         )
-        parameters["sign"] = self._sign(self._canonical(parameters))
+        parameters["sign"] = self._sign(self._request_canonical(parameters))
         # 页面支付完成后以前端回跳为触发点，由服务端 query_trade 收敛状态。
         # 沙箱的临时 trycloudflare 回调会使其在创建收银台时重定向到 /error，故不
         # 传 notify_url；生产适配器必须改用稳定、可公网访问的异步回调地址。
-        # charset 必须留在 action 查询字符串中，同时参与原始签名。
+        # 沙箱要求 charset 位于 gateway URL 查询字符串中。签名已在上方生成，
+        # 因而它仍参与签名；不要再作为隐藏表单字段重复发送，否则网关会按两份
+        # charset 走不稳定的解析路径，拿不到正常的 auth.htm 收银台跳转。
         charset = parameters.pop("charset")
         return AlipayPagePayForm(action=f"{self.gateway}?charset={charset}", fields=parameters)
 
@@ -196,7 +198,7 @@ class AlipaySandboxClient:
                 ),
             }
         )
-        parameters["sign"] = self._sign(self._canonical(parameters))
+        parameters["sign"] = self._sign(self._request_canonical(parameters))
         try:
             async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
                 response = await client.post(self.gateway, data=parameters)
@@ -241,7 +243,7 @@ class AlipaySandboxClient:
         parameters["biz_content"] = json.dumps(
             {"out_trade_no": merchant_payment_no}, ensure_ascii=True, separators=(",", ":")
         )
-        parameters["sign"] = self._sign(self._canonical(parameters))
+        parameters["sign"] = self._sign(self._request_canonical(parameters))
         try:
             async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
                 response = await client.post(self.gateway, data=parameters)
@@ -284,7 +286,7 @@ class AlipaySandboxClient:
         parameters["biz_content"] = json.dumps(
             {"out_trade_no": merchant_payment_no}, ensure_ascii=True, separators=(",", ":")
         )
-        parameters["sign"] = self._sign(self._canonical(parameters))
+        parameters["sign"] = self._sign(self._request_canonical(parameters))
         try:
             async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
                 response = await client.post(self.gateway, data=parameters)
@@ -336,7 +338,7 @@ class AlipaySandboxClient:
             ensure_ascii=True,
             separators=(",", ":"),
         )
-        parameters["sign"] = self._sign(self._canonical(parameters))
+        parameters["sign"] = self._sign(self._request_canonical(parameters))
         try:
             async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
                 response = await client.post(self.gateway, data=parameters)
@@ -394,7 +396,7 @@ class AlipaySandboxClient:
             ensure_ascii=True,
             separators=(",", ":"),
         )
-        parameters["sign"] = self._sign(self._canonical(parameters))
+        parameters["sign"] = self._sign(self._request_canonical(parameters))
         try:
             async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
                 response = await client.post(self.gateway, data=parameters)
@@ -473,6 +475,15 @@ class AlipaySandboxClient:
     @staticmethod
     def _canonical(parameters: Mapping[str, str]) -> str:
         return "&".join(f"{key}={value}" for key, value in sorted(parameters.items()) if value is not None)
+
+    @classmethod
+    def _request_canonical(cls, parameters: Mapping[str, str]) -> str:
+        """构造支付宝请求签名原文，只排除最终生成的 ``sign`` 字段。
+
+        支付宝请求中的 ``sign_type=RSA2`` 是公共请求参数，也必须参与请求签名；
+        只有回调验签才按回调协议同时排除 ``sign`` 和 ``sign_type``。
+        """
+        return cls._canonical({key: value for key, value in parameters.items() if key != "sign"})
 
     @staticmethod
     def _format_amount(amount_cents: int) -> str:

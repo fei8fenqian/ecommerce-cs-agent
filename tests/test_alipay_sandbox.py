@@ -49,7 +49,7 @@ def test_page_pay_url_is_signed_by_application_private_key():
 
     app_key.public_key().verify(
         signature,
-        client._canonical(params).encode("utf-8"),
+        client._request_canonical(params).encode("utf-8"),
         padding.PKCS1v15(),
         hashes.SHA256(),
     )
@@ -77,11 +77,12 @@ def test_page_pay_form_reuses_the_signed_fields_for_browser_post():
 
     app_key.public_key().verify(
         signature,
-        client._canonical(signable).encode("utf-8"),
+        client._request_canonical(signable).encode("utf-8"),
         padding.PKCS1v15(),
         hashes.SHA256(),
     )
     assert form.action == "https://sandbox.example/gateway.do?charset=utf-8"
+    assert "charset" not in form.fields
     assert form.fields["method"] == "alipay.trade.page.pay"
     assert "notify_url" not in form.fields
     assert json.loads(form.fields["biz_content"])["subject"] == "Geex Digital Order"
@@ -125,11 +126,12 @@ async def test_precreate_returns_signed_qr_code_for_server_confirmed_payment():
     signature = base64.b64decode(captured.pop("sign"))
     app_key.public_key().verify(
         signature,
-        client._canonical(captured).encode("utf-8"),
+        client._request_canonical(captured).encode("utf-8"),
         padding.PKCS1v15(),
         hashes.SHA256(),
     )
     assert captured["method"] == "alipay.trade.precreate"
+    assert "sign_type=RSA2" in client._request_canonical(captured)
     assert "notify_url" not in captured
     assert "\\u" in captured["biz_content"]
     assert json.loads(captured["biz_content"])["total_amount"] == "669.00"
@@ -207,7 +209,7 @@ async def test_refund_request_is_signed_and_uses_only_server_calculated_amount()
     signature = base64.b64decode(captured.pop("sign"))
     app_key.public_key().verify(
         signature,
-        client._canonical(captured).encode("utf-8"),
+        client._request_canonical(captured).encode("utf-8"),
         padding.PKCS1v15(),
         hashes.SHA256(),
     )
@@ -262,7 +264,7 @@ async def test_refund_query_is_signed_with_both_local_references():
     signature = base64.b64decode(captured.pop("sign"))
     app_key.public_key().verify(
         signature,
-        client._canonical(captured).encode("utf-8"),
+        client._request_canonical(captured).encode("utf-8"),
         padding.PKCS1v15(),
         hashes.SHA256(),
     )
