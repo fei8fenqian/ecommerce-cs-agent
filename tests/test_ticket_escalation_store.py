@@ -9,6 +9,7 @@ import pytest
 from service.ticket_escalation import TicketEscalationReason
 from store.ticket_store import (
     claim_human_escalation,
+    enqueue_human_ticket,
     escalate_ai_ticket,
     mark_human_escalation_delivered,
     mark_human_escalation_retry,
@@ -93,6 +94,41 @@ async def test_escalation_record_failure_rolls_back_customer_handoff() -> None:
 
     connection.rollback.assert_awaited_once()
     connection.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_enqueue_human_ticket_moves_chat_ticket_and_creates_delivery_record() -> None:
+    """聊天入口的工单必须在 AI worker 领取前一次性进入人工通知队列。"""
+    status_cursor = _cursor(row=("AI待处理",))
+    update_cursor = _cursor(rowcount=1)
+    existing_cursor = _cursor(row=None)
+    generation_cursor = _cursor(row=(1,))
+    insert_cursor = _cursor()
+    connection = SimpleNamespace(
+        set_autocommit=AsyncMock(),
+        execute=AsyncMock(
+            side_effect=[status_cursor, update_cursor, existing_cursor, generation_cursor, insert_cursor]
+        ),
+        commit=AsyncMock(),
+        rollback=AsyncMock(),
+    )
+
+    with (
+        patch("store.ticket_store.get_connection", new=AsyncMock(return_value=connection)),
+        patch("store.ticket_store.put_connection", new=AsyncMock()),
+    ):
+        assert (
+            await enqueue_human_ticket(
+                "ticket-1",
+                escalation_reason=TicketEscalationReason.EXPLICIT_HUMAN_REQUEST,
+            )
+            is True
+        )
+
+    connection.commit.assert_awaited_once()
+    assert "FOR UPDATE" in str(connection.execute.await_args_list[0].args[0])
+    assert "SET status = '待人工处理'" in str(connection.execute.await_args_list[1].args[0])
+    assert connection.execute.await_args_list[-1].args[1] == ("ticket-1", 1, "EXPLICIT_HUMAN_REQUEST")
 
 
 @pytest.mark.asyncio

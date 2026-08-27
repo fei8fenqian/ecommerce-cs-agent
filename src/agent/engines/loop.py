@@ -74,6 +74,8 @@ class LoopResult:
     # 复杂客服工作流在 AgentLoop 前已读取的、仅来自受控工具的业务事实。普通
     # AgentLoop 保持为空；API 层会把它写回持久化 Support Case。
     verified_facts: dict[str, Any] = field(default_factory=dict)
+    # SupportWorkflow 的结构化执行评估；普通聊天保持为空。
+    workflow_progress: dict[str, Any] = field(default_factory=dict)
 
 
 class AgentLoop:

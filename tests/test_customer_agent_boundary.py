@@ -3,7 +3,7 @@
 from agent.engines.loop import AgentLoop
 from agent.tools.search_product import _customer_visible_content
 from agent.tools_registry import ToolRegistry
-from api.chat import _customer_action_suffix
+from api.chat import _append_customer_action_suffix, _customer_action_suffix
 
 
 def test_customer_prompt_forbids_internal_inventory_facts():
@@ -29,3 +29,11 @@ def test_customer_action_links_point_to_first_party_pages():
     assert "?page=catalog" in _customer_action_suffix("rag", "laptop_products", "我想买这台")
     assert "?page=orders" in _customer_action_suffix("agent", "", "帮我查物流")
     assert "?page=tickets" in _customer_action_suffix("ticket", "", "我要退款")
+
+
+def test_customer_action_link_is_not_duplicated_when_answer_already_contains_it():
+    answer = "请前往订单页申请退款。\n\n[前往我的订单申请退款](?page=orders)"
+
+    result = _append_customer_action_suffix(answer, "agent", "", "确认退款")
+
+    assert result == answer

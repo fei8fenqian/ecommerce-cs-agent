@@ -26,8 +26,10 @@ from service.customer_support_policy import (
     decide_customer_support_action,
 )
 from service.support_case_service import SupportCaseService
+from service.ticket_escalation import TicketEscalationReason, classify_ticket_escalation
 from store.product_catalog_store import build_public_product_context, get_product_detail
 from store.support_case_store import SupportCase
+from store.ticket_store import enqueue_human_ticket
 
 _chat_logger = logging.getLogger(__name__)
 
@@ -244,6 +246,7 @@ async def _await_support_case_customer(
     *,
     case: SupportCase | None,
     intent: Intent,
+    workflow_progress: dict[str, object] | None = None,
 ) -> None:
     """将复杂请求的下一轮语义显式保存，避免短回复退化为新问题。"""
     if case is None or case.status == "AWAITING_STAFF":
@@ -255,13 +258,22 @@ async def _await_support_case_customer(
     if not requests:
         return
     primary = requests[0]
+    execution_status = str((workflow_progress or {}).get("goal_status") or "")
     pending = {
-        "kind": "customer_confirmation" if primary.risk != "read_only" else "customer_choice",
+        "kind": (
+            "execution_blocked"
+            if execution_status in {"blocked", "unresolved"}
+            else "customer_confirmation"
+            if primary.risk != "read_only"
+            else "customer_choice"
+        ),
         "operation": primary.operation,
         "next_step": primary.next_step,
         "missing_facts": primary.missing_facts,
         "options_limit": 3,
     }
+    if workflow_progress:
+        pending["execution"] = workflow_progress
     pending_command = {
         "status": "PROPOSED_NOT_EXECUTED",
         "operation": primary.operation,
@@ -293,10 +305,16 @@ async def _record_support_case_facts(
     return await service.record_verified_facts(case, facts=loop_result.verified_facts)
 
 
-def _support_case_needs_customer_turn(intent: Intent, case: SupportCase | None = None) -> bool:
+def _support_case_needs_customer_turn(
+    intent: Intent,
+    case: SupportCase | None = None,
+    workflow_progress: dict[str, object] | None = None,
+) -> bool:
     """判断 Workflow 是否确实还需要客户选择/补充/确认。"""
     if case is not None and case.pending:
         # 现有 pending 是案件状态，不会因用户提出另一件事而被覆盖或提前完成。
+        return True
+    if str((workflow_progress or {}).get("goal_status") or "") in {"blocked", "unresolved"}:
         return True
     requests = intent.support_requests
     if not requests:
@@ -331,14 +349,23 @@ async def _persist_support_case_progress(
     case = await _record_support_case_facts(request, case=case, loop_result=loop_result)
     if case is None:
         return None
-    if _support_case_needs_customer_turn(intent, case):
-        await _await_support_case_customer(request, case=case, intent=intent)
+    if _support_case_needs_customer_turn(intent, case, loop_result.workflow_progress):
+        await _await_support_case_customer(
+            request,
+            case=case,
+            intent=intent,
+            workflow_progress=loop_result.workflow_progress,
+        )
         return case
     service = getattr(request.app.state, "support_case_service", None)
     if isinstance(service, SupportCaseService):
         await service.complete(
             case,
-            outcome={"completion": "read_only_answer_returned", "request_count": len(intent.support_requests)},
+            outcome={
+                "completion": "read_only_answer_returned",
+                "request_count": len(intent.support_requests),
+                "execution": loop_result.workflow_progress,
+            },
         )
     return case
 
@@ -467,7 +494,11 @@ async def _create_customer_ticket(
     ticket_issue = _build_ticket_issue(issue, history)
     # 仅这个函数会在售后策略已经返回 CREATE_TICKET 后被调用。普通 Agent Loop
     # 使用的 context 会阻止 create_ticket，避免模型绕过聊天入口的动作闸门。
-    authorized_tool_context = ToolContext(user_id=tool_context.user_id, role=tool_context.role)
+    authorized_tool_context = ToolContext(
+        user_id=tool_context.user_id,
+        role=tool_context.role,
+        ticket_queue_status="待人工处理",
+    )
     result = await registry.execute(
         "create_ticket",
         tool_context=authorized_tool_context,
@@ -478,7 +509,16 @@ async def _create_customer_ticket(
     if not ticket_id:
         raise DependencyUnavailableError("工单服务暂时不可用")
 
-    return ticket_id, f"已为您创建售后工单 {ticket_id}。智能客服正在处理中，您也可以在当前会话补充问题细节。"
+    # 这里的工单来自聊天入口的人工边界决策，不能再落入 AI worker 队列。
+    # 只有正式应用注册了 SupportCaseService 时才执行队列迁移；保留没有完整
+    # lifespan 的 HTTP 单元测试和兼容调用的原有行为。
+    if isinstance(getattr(request.app.state, "support_case_service", None), SupportCaseService):
+        escalation_reason = classify_ticket_escalation(ticket_issue) or TicketEscalationReason.MODEL_ESCALATION
+        queued = await enqueue_human_ticket(ticket_id, escalation_reason=escalation_reason)
+        if not queued:
+            raise DependencyUnavailableError("人工客服队列暂时不可用")
+
+    return ticket_id, f"已为您创建售后工单 {ticket_id}，已转人工客服处理。您可以在当前会话补充问题细节。"
 
 
 def _build_context(docs: list[dict], *, customer_view: bool) -> str:
@@ -513,6 +553,20 @@ def _customer_action_suffix(intent_target: str, table: str, query: str, product_
             return f"\n\n[去商品目录查看](?page=catalog&q={quote(search)})"
         return "\n\n[去商品目录查看](?page=catalog)"
     return ""
+
+
+def _append_customer_action_suffix(
+    answer: str,
+    intent_target: str,
+    table: str,
+    query: str,
+    product_name: str = "",
+) -> str:
+    """追加稳定的站内链接，但不重复模型已经生成的同一链接。"""
+    suffix = _customer_action_suffix(intent_target, table, query, product_name)
+    if suffix and suffix.strip() not in answer:
+        return answer + suffix
+    return answer
 
 
 def _entities_from_retrieval(table: str, docs: list[dict]) -> dict[str, str]:
@@ -690,7 +744,7 @@ async def chat(chat_req: ChatRequest, request: Request):
                 tool_context=tool_context,
                 history=ctx.messages,
             )
-            answer += _customer_action_suffix(intent.target, intent.table, effective_query)
+            answer = _append_customer_action_suffix(answer, intent.target, intent.table, effective_query)
             await session.add_turn_simple(ctx.session_id, user_id, chat_req.query, answer)
             return ChatResponse(
                 answer=answer,
@@ -773,7 +827,8 @@ async def chat(chat_req: ChatRequest, request: Request):
             )
 
         if tool_context.role == "customer":
-            loop_result.answer += _customer_action_suffix(
+            loop_result.answer = _append_customer_action_suffix(
+                loop_result.answer,
                 intent.target,
                 intent.table,
                 effective_query,
@@ -961,7 +1016,7 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                 if confirmed_human_handoff:
                     answer += "\n\n[查看售后进度](?page=tickets)"
                 else:
-                    answer += _customer_action_suffix(intent.target, intent.table, effective_query)
+                    answer = _append_customer_action_suffix(answer, intent.target, intent.table, effective_query)
                 if not await _is_current_chat_run(session_id, chat_run_id):
                     yield f"data: {json.dumps(_superseded_stream_event(request), ensure_ascii=False)}\n\n"
                     return
@@ -1017,7 +1072,8 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                     raise
                 answer = workflow_result.answer
                 if tool_context.role == "customer":
-                    answer += _customer_action_suffix(
+                    answer = _append_customer_action_suffix(
+                        answer,
                         intent.target,
                         intent.table,
                         effective_query,
@@ -1140,6 +1196,8 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                             effective_query,
                             last_entities.get("product", ""),
                         )
+                        if suffix and suffix.strip() in answer:
+                            suffix = ""
                     if suffix:
                         answer += suffix
                         yield f"data: {json.dumps({'event': 'token', 'content': suffix}, ensure_ascii=False)}\n\n"

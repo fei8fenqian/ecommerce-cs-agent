@@ -13,6 +13,7 @@ from store.support_case_store import (
     SupportCaseStatus,
     create_open_case,
     get_open_case,
+    get_open_case_by_ticket_id,
     replace_case,
 )
 
@@ -169,6 +170,14 @@ class SupportCaseService:
             event_type="CASE_COMPLETED",
             event_payload=safe_outcome,
         )
+
+    async def complete_for_ticket(self, ticket_id: str, *, outcome: dict[str, Any]) -> bool:
+        """在关联人工工单完成后结束等待人工的 Case。"""
+        case = await get_open_case_by_ticket_id(ticket_id)
+        if case is None:
+            return False
+        completed = await self.complete(case, outcome=outcome)
+        return completed is not None
 
     async def fail(self, case: SupportCase, *, reason: str) -> SupportCase | None:
         """记录可理解的失败状态，调用方不得把失败答复伪装为成功。"""

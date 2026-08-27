@@ -104,6 +104,18 @@ class TestCreateTicketExecute:
         assert result.data["ticket_id"].startswith("TK")
 
     @pytest.mark.asyncio
+    async def test_server_can_place_chat_handoff_directly_in_human_queue(self, _setup):
+        """聊天编排注入的队列状态不经过模型参数，避免 AI 抢到人工工单。"""
+        context = ToolContext(user_id=_setup.user_id, role=_setup.role, ticket_queue_status="待人工处理")
+        result = await CreateTicket().execute(issue="需要人工处理", tool_context=context)
+
+        assert result.is_success is True
+        assert result.data["status"] == "待人工处理"
+        ticket = await get_ticket(result.data["ticket_id"])
+        assert ticket is not None
+        assert ticket["status"] == "待人工处理"
+
+    @pytest.mark.asyncio
     async def test_create_ticket_empty_contact(self, _setup):
         """不提供联系方式 → 仍成功"""
         tool = CreateTicket()

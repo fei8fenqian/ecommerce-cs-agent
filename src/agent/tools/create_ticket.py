@@ -25,7 +25,8 @@ class CreateTicket(BaseTool):
     def description(self) -> str:
         return (
             "创建客服工单，转人工处理。"
-            "用户投诉、要求退款赔偿、情绪激动、明确要求转人工、报告产品故障申请维修保修时使用。"
+            "仅在用户明确要求人工/报修，出现安全风险、确认异常或自助排查无效时使用；"
+            "普通 3C 参数、订单、物流、退款流程和设备故障咨询先由 Agent 处理。"
             "issue: 问题描述（必填）"
             "customer_name: 客户称呼（选填）"
             "phone: 联系电话（选填）"
@@ -79,6 +80,9 @@ class CreateTicket(BaseTool):
             urgency = "medium"
 
         ticket_id = f"TK{datetime.now().strftime('%Y%m%d%H%M%S')}{random.randint(100, 999)}"
+        initial_status = tool_context.ticket_queue_status or "AI待处理"
+        if initial_status not in {"AI待处理", "待人工处理"}:
+            initial_status = "AI待处理"
 
         try:
             await store_create_ticket(
@@ -88,8 +92,9 @@ class CreateTicket(BaseTool):
                 issue=issue,
                 urgency=urgency,
                 customer_user_id=tool_context.user_id,
-                # 只有经受控 Agent 工具创建的明确售后诉求进入自动处理队列。
-                status="AI待处理",
+                # 普通 Agent 工具创建的明确售后诉求进入 AI 队列；聊天入口已完成
+                # 人工边界判断时，由服务端上下文直接写入人工队列，避免提交后竞态。
+                status=initial_status,
             )
 
             return ToolResult(
@@ -98,8 +103,12 @@ class CreateTicket(BaseTool):
                 data={
                     "ticket_id": ticket_id,
                     "urgency": urgency,
-                    "status": "AI待处理",
-                    "message": f"工单 {ticket_id} 已创建，智能客服正在处理中",
+                    "status": initial_status,
+                    "message": (
+                        f"工单 {ticket_id} 已创建，已转人工客服处理"
+                        if initial_status == "待人工处理"
+                        else f"工单 {ticket_id} 已创建，智能客服正在处理中"
+                    ),
                 },
             )
 

@@ -642,6 +642,94 @@ async def send_ticket_to_human_queue(ticket_id: str) -> bool:
             await put_connection(conn)
 
 
+async def enqueue_human_ticket(
+    ticket_id: str,
+    *,
+    escalation_reason: TicketEscalationReason,
+) -> bool:
+    """将聊天入口创建的工单原子放入人工队列。
+
+    聊天入口已经完成了确定性的人机边界判断，因此这类工单不能先进入
+    ``AI待处理`` 再等待 worker 二次判断；否则人工请求可能被 AI 短暂领取，
+    也可能在危险请求上生成不合适的自动回复。状态迁移和通知队列记录使用
+    同一事务，并按工单行加锁保证重复调用幂等。
+    """
+    conn = None
+    try:
+        conn = await get_connection()
+        await conn.set_autocommit(False)
+        status_cursor = await conn.execute(
+            """
+            SELECT status
+            FROM public.tickets
+            WHERE ticket_id = %s
+            FOR UPDATE
+            """,
+            (ticket_id,),
+        )
+        status_row = await status_cursor.fetchone()
+        if status_row is None:
+            await conn.rollback()
+            return False
+
+        status = str(status_row[0] or "")
+        if status in {"AI待处理", "AI处理中"}:
+            await conn.execute(
+                """
+                UPDATE public.tickets
+                SET status = '待人工处理', ai_processed_at = NOW()
+                WHERE ticket_id = %s
+                """,
+                (ticket_id,),
+            )
+        elif status not in {"待人工处理"}:
+            await conn.rollback()
+            return False
+
+        existing_cursor = await conn.execute(
+            """
+            SELECT status
+            FROM public.ticket_human_escalations
+            WHERE ticket_id = %s
+            ORDER BY escalation_generation DESC
+            LIMIT 1
+            """,
+            (ticket_id,),
+        )
+        existing_row = await existing_cursor.fetchone()
+        if existing_row is not None and str(existing_row[0]) != "DLQ":
+            await conn.commit()
+            return True
+
+        generation_cursor = await conn.execute(
+            """
+            SELECT COALESCE(MAX(escalation_generation), 0) + 1
+            FROM public.ticket_human_escalations
+            WHERE ticket_id = %s
+            """,
+            (ticket_id,),
+        )
+        generation_row = await generation_cursor.fetchone()
+        escalation_generation = int(generation_row[0])
+        await conn.execute(
+            """
+            INSERT INTO public.ticket_human_escalations
+                (ticket_id, escalation_generation, reason_code)
+            VALUES (%s, %s, %s)
+            """,
+            (ticket_id, escalation_generation, escalation_reason.value),
+        )
+        await conn.commit()
+        return True
+    except Exception:
+        if conn is not None:
+            await conn.rollback()
+        raise
+    finally:
+        if conn is not None:
+            await put_connection(conn)
+
+
 async def escalate_ai_ticket(
     ticket_id: str,
     content: str,

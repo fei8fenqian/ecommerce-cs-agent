@@ -20,6 +20,7 @@ from exceptions import BaseAppException
 from infra.casbin_enforcer import init_casbin
 from middleware.auth import AuthMiddleware
 from middleware.request_id import RequestIDMiddleware
+from service.support_case_service import SupportCaseService
 
 USERS_BY_TOKEN = {
     "customer-a-token": {"id": 101, "username": "customer-a", "role": "customer"},
@@ -200,6 +201,24 @@ async def test_customer_can_confirm_ai_result_and_close_own_ticket() -> None:
     assert response.status_code == 200
     assert response.json() == {"ok": True, "status": "已关闭"}
     closed.assert_awaited_once_with("ticket-a", 101)
+
+
+@pytest.mark.asyncio
+async def test_ticket_close_completes_linked_support_case() -> None:
+    app = make_app()
+    closed = AsyncMock(return_value=True)
+    support_cases = SupportCaseService()
+    support_cases.complete_for_ticket = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    app.state.support_case_service = support_cases
+
+    with patch("api.tickets.close_customer_ticket", new=closed):
+        response = await request(app, "customer-a-token", "POST", "/api/v1/tickets/ticket-a/close")
+
+    assert response.status_code == 200
+    support_cases.complete_for_ticket.assert_awaited_once_with(
+        "ticket-a",
+        outcome={"completion": "ticket_closed", "ticket_id": "ticket-a"},
+    )
 
 
 @pytest.mark.asyncio

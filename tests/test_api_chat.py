@@ -584,13 +584,15 @@ class TestChatEndpoint:
         )
 
         transport = httpx.ASGITransport(app=client.app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
-            response = await http_client.post("/api/v1/chat", json={"query": "是"})
+        with patch("api.chat.enqueue_human_ticket", new=AsyncMock(return_value=True)) as enqueue:
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+                response = await http_client.post("/api/v1/chat", json={"query": "是"})
 
         assert response.status_code == 200
         assert "TK-DEMO-001" in response.json()["answer"]
         client.app.state.registry.execute.assert_awaited_once()
         service.mark_awaiting_staff.assert_awaited_once()
+        enqueue.assert_awaited_once()
 
     def test_read_only_support_case_can_complete_without_a_customer_turn(self):
         assert (

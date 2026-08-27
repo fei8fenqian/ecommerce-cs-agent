@@ -1,3 +1,4 @@
+import logging
 from typing import Any
 from uuid import uuid4
 
@@ -6,6 +7,7 @@ from pydantic import BaseModel, Field
 
 from agent.rag.retrieve import hybrid_search
 from log_config import redact_text
+from service.support_case_service import SupportCaseService
 from store.ticket_message_store import (
     create_agent_ticket_message,
     create_customer_ticket_message,
@@ -431,6 +433,16 @@ async def close_ticket(ticket_id: str, request: Request) -> TicketCloseResponse:
     if not closed:
         # 统一不暴露不存在、越权或不处于可关闭状态的差异。
         raise HTTPException(status_code=404, detail="工单不存在")
+    support_case_service = getattr(request.app.state, "support_case_service", None)
+    if isinstance(support_case_service, SupportCaseService):
+        try:
+            await support_case_service.complete_for_ticket(
+                ticket_id,
+                outcome={"completion": "ticket_closed", "ticket_id": ticket_id},
+            )
+        except Exception:
+            # 工单已经成功关闭；Case 同步失败不能伪装成关闭失败，交给后续巡检修复。
+            logging.getLogger(__name__).exception("support case completion sync failed after ticket close")
     return TicketCloseResponse()
 
 

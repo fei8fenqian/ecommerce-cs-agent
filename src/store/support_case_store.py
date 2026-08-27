@@ -131,6 +131,27 @@ async def get_open_case(*, session_id: UUID, customer_user_id: int) -> SupportCa
         await put_connection(connection)
 
 
+async def get_open_case_by_ticket_id(ticket_id: str) -> SupportCase | None:
+    """读取等待人工工单对应的活动 Case。"""
+    connection = await get_connection()
+    try:
+        cursor = await connection.execute(
+            f"""
+            SELECT {_CASE_COLUMNS}
+            FROM public.support_cases
+            WHERE status = 'AWAITING_STAFF'
+              AND pending #>> '{{summary,ticket_id}}' = %s
+            ORDER BY updated_at DESC, id DESC
+            LIMIT 1
+            """,
+            (ticket_id,),
+        )
+        row = await cursor.fetchone()
+        return _case_from_row(row) if row is not None else None
+    finally:
+        await put_connection(connection)
+
+
 async def create_open_case(
     *,
     session_id: UUID,

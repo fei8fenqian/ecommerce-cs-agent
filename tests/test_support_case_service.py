@@ -116,6 +116,33 @@ async def test_resume_customer_response_keeps_pending_and_records_event(monkeypa
     assert captured["event_type"] == "CUSTOMER_RESPONSE"
 
 
+@pytest.mark.asyncio
+async def test_complete_for_ticket_closes_linked_staff_case(monkeypatch):
+    case = _case(status="AWAITING_STAFF", version=4)
+    case = SupportCase(**{**case.__dict__, "pending": {"summary": {"ticket_id": "TK-1"}}})
+    captured: dict = {}
+
+    async def get_case(ticket_id: str):
+        assert ticket_id == "TK-1"
+        return case
+
+    async def replace(current, **kwargs):
+        captured.update(kwargs)
+        return SupportCase(**{**current.__dict__, "status": "COMPLETED", "version": 5})
+
+    monkeypatch.setattr("service.support_case_service.get_open_case_by_ticket_id", get_case)
+    monkeypatch.setattr("service.support_case_service.replace_case", replace)
+
+    result = await SupportCaseService().complete_for_ticket(
+        "TK-1",
+        outcome={"completion": "ticket_closed"},
+    )
+
+    assert result is True
+    assert captured["status"] == "COMPLETED"
+    assert captured["event_type"] == "CASE_COMPLETED"
+
+
 def test_prompt_context_exposes_case_state_but_not_internal_audit_fields():
     context = SupportCaseService.to_prompt_context(_case(status="AWAITING_CUSTOMER"))
 
