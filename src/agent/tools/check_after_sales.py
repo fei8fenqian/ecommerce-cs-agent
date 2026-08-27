@@ -66,13 +66,16 @@ class CheckAfterSales(BaseTool):
             tickets = await list_customer_tickets(tool_context.user_id)
 
         after_sales: list[dict[str, object]] = []
-        if not ticket_id.strip() and not tickets:
+        after_sales_lookup_failed = False
+        if not ticket_id.strip():
             try:
                 after_sales = await list_customer_after_sale_summaries(tool_context.user_id)
             except Exception:
                 # 旧环境可能还未部署售后申请表；不能把依赖故障说成“没有申请”。
-                return ToolResult(name=self.name, status="error", error="售后状态暂时无法查询")
+                after_sales_lookup_failed = True
 
+        if not tickets and not after_sales and after_sales_lookup_failed:
+            return ToolResult(name=self.name, status="error", error="售后状态暂时无法查询")
         if not tickets and not after_sales:
             return ToolResult(name=self.name, status="error", error="当前没有可查询的售后工单")
 
@@ -104,4 +107,6 @@ class CheckAfterSales(BaseTool):
         # 保持原有工单响应契约；只有查到售后申请时才增加新字段。
         if visible_after_sales:
             data["after_sales"] = visible_after_sales
+        if after_sales_lookup_failed:
+            data["after_sales_lookup"] = "unavailable"
         return ToolResult(name=self.name, status="success", data=data)
