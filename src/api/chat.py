@@ -251,9 +251,16 @@ async def _await_support_case_customer(
         "missing_facts": primary.missing_facts,
         "options_limit": 3,
     }
+    pending_command = {
+        "status": "PROPOSED_NOT_EXECUTED",
+        "operation": primary.operation,
+        "risk": primary.risk,
+        "requires_explicit_confirmation": primary.risk != "read_only",
+    }
     await service.await_customer(
         case,
         pending=pending,
+        pending_command=pending_command,
         request_stack=_support_case_payloads(intent),
     )
 

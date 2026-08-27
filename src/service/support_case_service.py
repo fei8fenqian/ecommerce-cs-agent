@@ -97,6 +97,7 @@ class SupportCaseService:
         case: SupportCase,
         *,
         pending: dict[str, Any],
+        pending_command: dict[str, Any] | None = None,
         request_stack: list[dict[str, Any]] | None = None,
         selected_subjects: dict[str, Any] | None = None,
         verified_facts: dict[str, Any] | None = None,
@@ -110,6 +111,9 @@ class SupportCaseService:
             selected_subjects=selected_subjects if selected_subjects is not None else case.selected_subjects,
             verified_facts=verified_facts if verified_facts is not None else case.verified_facts,
             pending=safe_pending,
+            pending_command=(
+                self._json_object(pending_command) if pending_command is not None else case.pending_command
+            ),
             event_type="AWAITING_CUSTOMER",
             event_payload={"pending_kind": safe_pending.get("kind", "question")},
         )

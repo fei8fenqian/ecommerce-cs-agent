@@ -88,11 +88,13 @@ async def test_await_customer_persists_only_a_structured_pending_question(monkey
     result = await SupportCaseService().await_customer(
         case,
         pending={"kind": "choice", "options": ["等待", "取消缺货商品"]},
+        pending_command={"status": "PROPOSED_NOT_EXECUTED", "operation": "partial_fulfillment"},
     )
 
     assert result == case
     assert captured["status"] == "AWAITING_CUSTOMER"
     assert captured["pending"]["kind"] == "choice"
+    assert captured["pending_command"]["status"] == "PROPOSED_NOT_EXECUTED"
     assert captured["event_type"] == "AWAITING_CUSTOMER"
 
 
