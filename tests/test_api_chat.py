@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from agent.engines.loop import LoopResult
-from agent.llm.intent_router import Intent
+from agent.llm.intent_router import Intent, SupportRequest
 from agent.llm.resolve import resolve_pronouns
 from agent.tools_registry import ToolResult
 from api.chat import (
@@ -28,6 +28,7 @@ from api.chat import (
     _entities_from_retrieval,
     _is_confirmed_human_handoff,
     _is_current_chat_run,
+    _support_case_needs_customer_turn,
     chat_router,
     chat_stream,
 )
@@ -590,6 +591,27 @@ class TestChatEndpoint:
         assert "TK-DEMO-001" in response.json()["answer"]
         client.app.state.registry.execute.assert_awaited_once()
         service.mark_awaiting_staff.assert_awaited_once()
+
+    def test_read_only_support_case_can_complete_without_a_customer_turn(self):
+        assert (
+            _support_case_needs_customer_turn(
+                Intent(
+                    target="agent",
+                    domain="delivery",
+                    operation="track_order",
+                    next_step="LOOKUP",
+                    requests=[
+                        SupportRequest(
+                            domain="delivery",
+                            operation="track_order",
+                            next_step="LOOKUP",
+                            risk="read_only",
+                        )
+                    ],
+                )
+            )
+            is False
+        )
 
     def test_empty_query_rejected(self, client):
         """空 query → 400 (pydantic 校验 min_length=1)"""

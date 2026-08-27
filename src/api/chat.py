@@ -182,6 +182,33 @@ async def _resume_pending_case(
     return await service.resume_customer_response(case)
 
 
+async def _merge_new_support_request(
+    request: Request,
+    *,
+    case: SupportCase | None,
+    intent: Intent,
+) -> SupportCase | None:
+    """把已判断为新诉求的内容加入现有案件，避免覆盖未完成的 pending。"""
+    if case is None or intent.case_update != "new_request" or not intent.support_requests:
+        return case
+    service = getattr(request.app.state, "support_case_service", None)
+    if not isinstance(service, SupportCaseService):
+        return case
+    existing = IntentRouter.support_requests_from_case_payloads(case.request_stack)
+    merged_payloads = [item.to_case_payload() for item in existing]
+    for item in intent.support_requests:
+        payload = item.to_case_payload()
+        if payload not in merged_payloads:
+            merged_payloads.append(payload)
+    merged_payloads = merged_payloads[:3]
+    updated = await service.record_requests(
+        case,
+        request_stack=merged_payloads,
+        event_payload={"request_count": len(merged_payloads), "reason": "NEW_REQUEST_DURING_ACTIVE_CASE"},
+    )
+    return updated or case
+
+
 async def _mark_support_case_awaiting_staff(
     request: Request,
     *,
@@ -246,6 +273,56 @@ async def _record_support_case_facts(
     # 乐观锁竞争时不使用旧 Case 覆盖另一标签页的新选择；本轮仍可完成回答，下一轮
     # 会重新读取最新状态。
     return await service.record_verified_facts(case, facts=loop_result.verified_facts)
+
+
+def _support_case_needs_customer_turn(intent: Intent, case: SupportCase | None = None) -> bool:
+    """判断 Workflow 是否确实还需要客户选择/补充/确认。"""
+    if case is not None and case.pending:
+        # 现有 pending 是案件状态，不会因用户提出另一件事而被覆盖或提前完成。
+        return True
+    requests = intent.support_requests
+    if not requests:
+        return False
+    for item in requests:
+        if item.risk != "read_only":
+            return True
+        if item.missing_facts:
+            return True
+        if item.next_step in {"ASK_CLARIFICATION", "ASK_CHOICE", "CONFIRM", "ESCALATE"}:
+            return True
+        if item.operation in {
+            "after_sales_transition",
+            "return_logistics",
+            "delivery_instruction",
+            "delivery_exception",
+            "refund_request",
+            "human_handoff",
+        }:
+            return True
+    return False
+
+
+async def _persist_support_case_progress(
+    request: Request,
+    *,
+    case: SupportCase | None,
+    intent: Intent,
+    loop_result: LoopResult,
+) -> SupportCase | None:
+    """在记录事实后确定性地结束 Case，或保存下一轮待处理状态。"""
+    case = await _record_support_case_facts(request, case=case, loop_result=loop_result)
+    if case is None:
+        return None
+    if _support_case_needs_customer_turn(intent, case):
+        await _await_support_case_customer(request, case=case, intent=intent)
+        return case
+    service = getattr(request.app.state, "support_case_service", None)
+    if isinstance(service, SupportCaseService):
+        await service.complete(
+            case,
+            outcome={"completion": "read_only_answer_returned", "request_count": len(intent.support_requests)},
+        )
+    return case
 
 
 def _chat_run_key(session_id: str) -> str:
@@ -610,6 +687,7 @@ async def chat(chat_req: ChatRequest, request: Request):
                     request, intent=intent, session_id=ctx.session_id, customer_user_id=user_id
                 )
             )
+            support_case = await _merge_new_support_request(request, case=support_case, intent=intent)
             case_context = SupportCaseService.to_prompt_context(support_case) if support_case is not None else ""
             loop_result = await support_workflow.run(
                 effective_query,
@@ -619,12 +697,12 @@ async def chat(chat_req: ChatRequest, request: Request):
                 support_requests=_support_case_payloads(intent),
                 tool_context=tool_context,
             )
-            support_case = await _record_support_case_facts(
+            await _persist_support_case_progress(
                 request,
                 case=support_case,
+                intent=intent,
                 loop_result=loop_result,
             )
-            await _await_support_case_customer(request, case=support_case, intent=intent)
         elif intent.target == "rag":
             docs = await hybrid_search(
                 effective_query,
@@ -881,6 +959,7 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                         request, intent=intent, session_id=session_id, customer_user_id=user_id
                     )
                 )
+                support_case = await _merge_new_support_request(request, case=support_case, intent=intent)
                 case_context = SupportCaseService.to_prompt_context(support_case) if support_case is not None else ""
                 workflow_result = await support_workflow.run(
                     effective_query,
@@ -911,12 +990,12 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                 stream_res["total_steps"] = workflow_result.total_steps
                 stream_res["total_tokens"] = workflow_result.total_tokens
                 phase = "persist"
-                support_case = await _record_support_case_facts(
+                await _persist_support_case_progress(
                     request,
                     case=support_case,
+                    intent=intent,
                     loop_result=workflow_result,
                 )
-                await _await_support_case_customer(request, case=support_case, intent=intent)
                 await session.add_turn(
                     session_id,
                     user_id,

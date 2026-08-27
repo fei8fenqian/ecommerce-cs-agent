@@ -135,6 +135,32 @@ _ROUTE_TOOLS = {
 }
 _ROUTE_RISKS = {"read_only", "customer_confirmation", "staff_approval", "prohibited"}
 _CASE_UPDATES = {"none", "continue", "new_request"}
+_OPERATION_MINIMUM_TOOLS = {
+    "track_order": ("track_order",),
+    "refund_status": ("track_order",),
+    "refund_request": ("track_order",),
+    "refund": ("track_order",),
+    "after_sales_transition": ("check_after_sales",),
+    "return_logistics": ("check_after_sales",),
+    "repair": ("track_order",),
+    "delivery_instruction": ("track_order",),
+    "delivery_exception": ("track_order",),
+    "invoice": ("track_order",),
+    "price_protection": ("track_order",),
+}
+_CUSTOMER_CONFIRMATION_OPERATIONS = {
+    "refund_request",
+    "refund",
+    "exchange",
+    "repair",
+    "invoice",
+    "price_protection",
+    "installation",
+    "delivery_instruction",
+    "delivery_exception",
+    "return_logistics",
+    "after_sales_transition",
+}
 
 
 @dataclass(frozen=True)
@@ -569,6 +595,14 @@ class IntentRouter:
                 continue
             next_step = cls._validated_route_value(raw.get("next_step"), _ROUTE_NEXT_STEPS, "LOOKUP")
             risk = cls._validated_route_value(raw.get("risk"), _ROUTE_RISKS, "read_only")
+            required_tools = cls._validated_tools(raw.get("required_tools"))
+            for tool in _OPERATION_MINIMUM_TOOLS.get(operation, ()):
+                if tool not in required_tools:
+                    required_tools.append(tool)
+            if operation == "human_handoff":
+                risk = "staff_approval"
+            elif operation in _CUSTOMER_CONFIRMATION_OPERATIONS and risk == "read_only":
+                risk = "customer_confirmation"
             requests.append(
                 SupportRequest(
                     domain=domain,
@@ -578,7 +612,7 @@ class IntentRouter:
                     customer_claims=cls._validated_text_list(raw.get("customer_claims"), max_items=6, max_length=160),
                     missing_facts=cls._validated_text_list(raw.get("missing_facts"), max_items=6, max_length=120),
                     next_step=next_step,
-                    required_tools=cls._validated_tools(raw.get("required_tools")),
+                    required_tools=required_tools,
                     risk=risk,
                 )
             )
