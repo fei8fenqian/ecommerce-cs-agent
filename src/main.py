@@ -8,6 +8,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from agent.engines.loop import AgentLoop
 from agent.engines.plan_execute import PlanAndExecuteAgent
+from agent.engines.support_workflow import SupportWorkflowAgent
 from agent.llm.intent_router import IntentRouter
 from agent.llm.llm_client import LLMClient
 from agent.llm.session import SessionManager
@@ -55,6 +56,7 @@ from middleware.auth import AuthMiddleware
 from middleware.metrics import MetricsMiddleware
 from middleware.rate_limit import RateLimitMiddleware
 from middleware.request_id import RequestIDMiddleware
+from service.support_case_service import SupportCaseService
 from service.ticket_escalation_worker import TicketEscalationNotificationWorker
 from store.user_store import seed_users
 
@@ -140,6 +142,8 @@ async def lifespan(app: FastAPI):
         max_iterations=settings.max_iterations,
     )
     agent = AgentLoop(llm, registry, max_steps=settings.max_steps)
+    support_workflow_agent = SupportWorkflowAgent(agent, registry)
+    support_case_service = SupportCaseService()
     session = SessionManager()
 
     mcp_managers: list[MCPClientManager] = []
@@ -169,6 +173,8 @@ async def lifespan(app: FastAPI):
     app.state.intent_router = intent_router
     app.state.registry = registry
     app.state.plan_execute_agent = plan_execute_agent
+    app.state.support_workflow_agent = support_workflow_agent
+    app.state.support_case_service = support_case_service
     app.state.agent = agent
     app.state.session = session
     app.state.mcp_managers = mcp_managers

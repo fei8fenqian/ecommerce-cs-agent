@@ -5,7 +5,9 @@
 
 import asyncio
 import json
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -21,8 +23,10 @@ from agent.llm.resolve import resolve_pronouns
 from agent.tools_registry import ToolResult
 from api.chat import (
     ChatRequest,
+    _build_ticket_issue,
     _claim_chat_run,
     _entities_from_retrieval,
+    _is_confirmed_human_handoff,
     _is_current_chat_run,
     chat_router,
     chat_stream,
@@ -34,6 +38,8 @@ from api.errors import (
     handle_validation_error,
 )
 from exceptions import BaseAppException, DependencyUnavailableError, LLMError
+from service.support_case_service import SupportCaseService
+from store.support_case_store import SupportCase
 
 # 本文件只测试 HTTP 编排，避免 SessionManager 导入时为了下载 tokenizer
 # 访问外网。真实 tokenizer 由 SessionManager/集成环境单独验证。
@@ -110,8 +116,10 @@ class _MockAgentLoop:
 
     def __init__(self, answer: str = "Mock 回答"):
         self._answer = answer
+        self.last_context = ""
 
     async def run(self, query, *, context="", history=None, system_prompt_extra="", tool_context=None):
+        self.last_context = context
         return LoopResult(
             answer=self._answer,
             total_steps=1,
@@ -131,12 +139,92 @@ class _MockAgentLoop:
         }
 
 
+class _MockSupportWorkflow:
+    """记录复杂客服请求是否进入独立 Workflow。"""
+
+    def __init__(self, answer: str = "复杂流程回答"):
+        self.answer = answer
+        self.calls: list[dict] = []
+
+    async def run(
+        self,
+        query,
+        *,
+        context="",
+        history=None,
+        system_prompt_extra="",
+        case_context="",
+        support_requests=None,
+        tool_context=None,
+    ):
+        self.calls.append(
+            {
+                "query": query,
+                "context": context,
+                "history": history,
+                "system_prompt_extra": system_prompt_extra,
+                "case_context": case_context,
+                "support_requests": support_requests,
+                "tool_context": tool_context,
+            }
+        )
+        return LoopResult(
+            answer=self.answer,
+            total_steps=2,
+            total_tokens=12,
+            total_latency_ms=10.0,
+        )
+
+
 def test_product_retrieval_records_current_product_for_next_turn():
     assert _entities_from_retrieval(
         "laptop_products",
         [{"title": "惠普 惠普锐Pro"}],
     ) == {"product": "惠普 惠普锐Pro"}
     assert _entities_from_retrieval("knowledge_chunks", [{"title": "售后政策"}]) == {}
+
+
+def test_ticket_issue_keeps_recent_customer_context():
+    issue = _build_ticket_issue(
+        "我哪知道订单号，反正就是最近的那单，我想退了",
+        [
+            {"role": "user", "content": "刚买的电脑突然开不了机，没摔过也没进水"},
+            {"role": "assistant", "content": "请提供订单号"},
+        ],
+    )
+
+    assert "电脑突然开不了机" in issue
+    assert "订单号" in issue
+    assert "客户售后诉求" in issue
+
+
+def test_detail_page_chat_reads_selected_product_context(client):
+    """从详情页进入客服时，模型必须拿到该商品的真实公开规格。"""
+    product = {
+        "id": "memory-1",
+        "product_name": "Pallas II DDR5 6000 32G",
+        "brand": "宏碁",
+        "price": 669.0,
+        "description": "DDR5 内存套装",
+        "product_type": "内存",
+        "specifications": [{"name": "XMP", "value": "支持 XMP 3.0"}],
+    }
+    with (
+        patch("api.chat.get_product_detail", new=AsyncMock(return_value=product)),
+        patch("api.chat.hybrid_search", new=AsyncMock(return_value=[])),
+    ):
+        response = client.post(
+            "/api/v1/chat",
+            json={
+                "query": "介绍这款商品",
+                "product_category": "components",
+                "product_id": "memory-1",
+            },
+        )
+
+    assert response.status_code == 200
+    assert "Pallas II DDR5 6000 32G" in client.app.state.agent.last_context
+    assert "支持 XMP 3.0" in client.app.state.agent.last_context
 
 
 class _MockSessionManager:
@@ -232,6 +320,7 @@ def client():
     app.state.plan_execute_agent = _MockAgentLoop(
         answer=json.dumps({"answer": "逐步诊断结果", "plan": ["步骤1", "步骤2"]})
     )
+    app.state.support_workflow_agent = _MockSupportWorkflow()
     return TestClient(app)
 
 
@@ -378,6 +467,130 @@ class TestChatEndpoint:
             history=session._sessions["follow-up-session"].history,
         )
 
+    @pytest.mark.asyncio
+    async def test_complex_support_route_uses_support_workflow(self, client):
+        """多步骤客服请求进入 SupportWorkflow，不再直接调用普通 AgentLoop。"""
+        route = AsyncMock(
+            return_value=Intent(
+                target="agent",
+                query="核对部分发货订单并询问客户选择",
+                confidence=1.0,
+                domain="order_fulfillment",
+                operation="partial_fulfillment",
+                state="needs_customer_choice",
+                next_step="ASK_CHOICE",
+                required_tools=["track_order", "check_stock"],
+            )
+        )
+        client.app.state.intent_router.route = route
+        client.app.state.agent.run = AsyncMock(side_effect=AssertionError("不应走普通 AgentLoop"))
+
+        transport = httpx.ASGITransport(app=client.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+            response = await http_client.post(
+                "/api/v1/chat",
+                json={"query": "订单里有一件缺货，另一件有货，怎么处理？"},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["answer"].startswith("复杂流程回答")
+        assert response.json()["total_steps"] == 2
+        assert len(client.app.state.support_workflow_agent.calls) == 1
+        assert client.app.state.support_workflow_agent.calls[0]["system_prompt_extra"]
+        route.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_short_reply_resumes_pending_support_case(self, client):
+        """“第一个”必须回到待选 Case，而不是被路由成孤立 RAG 问题。"""
+        active_case = SupportCase(
+            case_id=uuid4(),
+            session_id=UUID("00000000-0000-0000-0000-000000000001"),
+            customer_user_id=1,
+            status="AWAITING_CUSTOMER",
+            request_stack=[
+                {
+                    "domain": "refund",
+                    "operation": "refund_request",
+                    "next_step": "LOOKUP",
+                    "required_tools": ["track_order"],
+                    "risk": "customer_confirmation",
+                }
+            ],
+            selected_subjects={},
+            verified_facts={"track_order": {"status": "success", "data": {"count": 2}}},
+            pending={"kind": "customer_choice", "options_limit": 2},
+            pending_command={},
+            version=2,
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+            completed_at=None,
+        )
+        service = SupportCaseService()
+        service.get_active = AsyncMock(return_value=active_case)  # type: ignore[method-assign]
+        resumed_case = SupportCase(**{**active_case.__dict__, "status": "ACTIVE", "version": 3})
+        service.resume_customer_response = AsyncMock(return_value=resumed_case)  # type: ignore[method-assign]
+        service.await_customer = AsyncMock(return_value=resumed_case)  # type: ignore[method-assign]
+        client.app.state.support_case_service = service
+        route = AsyncMock(return_value=Intent(target="rag", query="第一个", confidence=0.9, case_update="continue"))
+        client.app.state.intent_router.route = route
+
+        transport = httpx.ASGITransport(app=client.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+            response = await http_client.post("/api/v1/chat", json={"query": "第一个"})
+
+        assert response.status_code == 200
+        assert route.await_args.kwargs["case_context"]
+        service.resume_customer_response.assert_awaited_once_with(active_case)
+        workflow_call = client.app.state.support_workflow_agent.calls[0]
+        assert workflow_call["support_requests"][0]["operation"] == "refund_request"
+        assert workflow_call["support_requests"][0]["required_tools"] == ["track_order"]
+
+    @pytest.mark.asyncio
+    async def test_human_ticket_is_created_only_after_case_confirmation(self, client):
+        active_case = SupportCase(
+            case_id=uuid4(),
+            session_id=UUID("00000000-0000-0000-0000-000000000002"),
+            customer_user_id=1,
+            status="AWAITING_CUSTOMER",
+            request_stack=[
+                {
+                    "domain": "human",
+                    "operation": "human_handoff",
+                    "next_step": "ASK_CLARIFICATION",
+                    "required_tools": [],
+                    "risk": "staff_approval",
+                }
+            ],
+            selected_subjects={},
+            verified_facts={},
+            pending={"kind": "customer_confirmation"},
+            pending_command={},
+            version=2,
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+            completed_at=None,
+        )
+        assert _is_confirmed_human_handoff(active_case, "是") is True
+
+        service = SupportCaseService()
+        service.get_active = AsyncMock(return_value=active_case)  # type: ignore[method-assign]
+        resumed_case = SupportCase(**{**active_case.__dict__, "status": "ACTIVE", "version": 3})
+        service.resume_customer_response = AsyncMock(return_value=resumed_case)  # type: ignore[method-assign]
+        service.mark_awaiting_staff = AsyncMock(return_value=resumed_case)  # type: ignore[method-assign]
+        client.app.state.support_case_service = service
+        client.app.state.intent_router.route = AsyncMock(
+            return_value=Intent(target="rag", query="是", confidence=0.9, case_update="continue")
+        )
+
+        transport = httpx.ASGITransport(app=client.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+            response = await http_client.post("/api/v1/chat", json={"query": "是"})
+
+        assert response.status_code == 200
+        assert "TK-DEMO-001" in response.json()["answer"]
+        client.app.state.registry.execute.assert_awaited_once()
+        service.mark_awaiting_staff.assert_awaited_once()
+
     def test_empty_query_rejected(self, client):
         """空 query → 400 (pydantic 校验 min_length=1)"""
         resp = client.post("/api/v1/chat", json={"query": ""})
@@ -431,6 +644,78 @@ class TestChatStreamEndpoint:
         client.app.state.agent.run_stream.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_refund_progress_update_does_not_create_a_second_ticket(self, client):
+        """“已经退了”是退款进度说明，不能被误判为新的售后工单。"""
+        client.app.state.intent_router = _MockTicketIntentRouter()
+        client.app.state.agent.run_stream = AsyncMock()
+
+        transport = httpx.ASGITransport(app=client.app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+            response = await http_client.post("/api/v1/chat/stream", json={"query": "已经退了"})
+
+        assert response.status_code == 200
+        assert '"name": "create_ticket"' not in response.text
+        assert "不用重复创建工单" in response.text
+        assert "?page=orders" in response.text
+        client.app.state.registry.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_refund_human_request_is_guided_before_ticket_creation(self, client):
+        """第一次“退款并转人工”先给自助入口，避免一句话直接制造人工任务。"""
+        client.app.state.intent_router = _MockTicketIntentRouter()
+        client.app.state.agent.run_stream = AsyncMock()
+
+        transport = httpx.ASGITransport(app=client.app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+            response = await http_client.post("/api/v1/chat/stream", json={"query": "我要退款，请转人工"})
+
+        assert response.status_code == 200
+        assert '"name": "create_ticket"' not in response.text
+        assert "仍需人工" in response.text
+        client.app.state.registry.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_refund_human_request_after_guidance_can_create_ticket(self, client):
+        """客户已收到入口仍坚持人工时，才允许创建人工售后任务。"""
+        client.app.state.intent_router = _MockTicketIntentRouter()
+        session = client.app.state.session
+        session._sessions["refund-human-session"] = SessionContext(
+            session_id="refund-human-session",
+            messages=[
+                {
+                    "role": "assistant",
+                    "content": "[前往我的订单申请退款](?page=orders)",
+                }
+            ],
+        )
+
+        transport = httpx.ASGITransport(app=client.app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+            response = await http_client.post(
+                "/api/v1/chat/stream",
+                json={"query": "退款页面我不想弄，转人工", "session_id": "refund-human-session"},
+            )
+
+        assert response.status_code == 200
+        assert '"name": "create_ticket"' in response.text
+        client.app.state.registry.execute.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_customer_ticket_result_is_not_hidden_when_session_history_save_fails(self, client):
+        """工单已落库时，会话存档失败不能把成功业务动作伪装成 AI 服务故障。"""
+        client.app.state.intent_router = _MockTicketIntentRouter()
+        client.app.state.session.add_turn_simple = AsyncMock(side_effect=TypeError("persistence failed"))
+
+        transport = httpx.ASGITransport(app=client.app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+            response = await http_client.post("/api/v1/chat/stream", json={"query": "电脑冒烟了"})
+
+        assert response.status_code == 200
+        assert '"event": "done"' in response.text
+        assert "TK-DEMO-001" in response.text
+        assert "DEPENDENCY_UNAVAILABLE" not in response.text
+
+    @pytest.mark.asyncio
     async def test_stream_short_confirmation_defaults_to_stock_lookup(self, client):
         """短确认在流式路径也会直接进入库存查询。"""
         session = client.app.state.session
@@ -465,6 +750,36 @@ class TestChatStreamEndpoint:
             "查询 微星魔影15 的实时库存",
             history=session._sessions["stream-follow-up"].history,
         )
+
+    @pytest.mark.asyncio
+    async def test_stream_complex_support_route_uses_support_workflow(self, client):
+        """流式入口与普通入口使用同一复杂客服 Workflow。"""
+        route = AsyncMock(
+            return_value=Intent(
+                target="agent",
+                query="核对配送和部分发货状态",
+                confidence=1.0,
+                domain="order_fulfillment",
+                operation="partial_fulfillment",
+                state="needs_customer_choice",
+                next_step="ASK_CHOICE",
+                required_tools=["track_order", "check_stock"],
+            )
+        )
+        client.app.state.intent_router.route = route
+        client.app.state.agent.run_stream = AsyncMock(side_effect=AssertionError("不应走普通流式 AgentLoop"))
+
+        transport = httpx.ASGITransport(app=client.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+            response = await http_client.post(
+                "/api/v1/chat/stream",
+                json={"query": "一件缺货一件有货，能不能先发有货的？"},
+            )
+
+        assert response.status_code == 200
+        assert '"event": "done"' in response.text
+        assert "复杂流程回答" in response.text
+        assert len(client.app.state.support_workflow_agent.calls) == 1
 
     @pytest.mark.asyncio
     async def test_stream_cancellation_does_not_continue_or_save(self, client):

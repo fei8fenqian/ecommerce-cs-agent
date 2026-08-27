@@ -47,6 +47,9 @@ class TestIntent:
         assert intent.table == "laptop_products"
         assert intent.query == "xxx"
         assert intent.confidence == 0.9
+        assert intent.state == "unknown"
+        assert intent.required_tools == []
+        assert intent.requests == []
 
 
 # =============================================================================
@@ -107,22 +110,192 @@ class TestRouteNormal:
         assert intent.target == "agent"
         assert intent.query == "查询 惠普锐Pro 的实时库存"
         assert intent.confidence == 1.0
+        assert intent.domain == "inventory"
+        assert intent.operation == "check_stock"
+        assert intent.required_tools == ["check_stock"]
 
     @pytest.mark.asyncio
-    async def test_ticket_target(self):
+    async def test_delivery_query_gets_read_only_track_order_route(self):
+        router = _router("not valid JSON")
+
+        intent = await router.route("客服，我昨天下的订单为什么现在还没发货")
+
+        assert intent.target == "agent"
+        assert intent.domain == "delivery"
+        assert intent.operation == "track_order"
+        assert intent.next_step == "LOOKUP"
+        assert intent.required_tools == ["track_order"]
+
+    @pytest.mark.asyncio
+    async def test_partial_fulfillment_gets_order_and_stock_read_only_route(self):
+        router = _router("not valid JSON")
+
+        intent = await router.route("一件商品缺货，另一件有货，帮我看看怎么处理")
+
+        assert intent.target == "agent"
+        assert intent.domain == "order_fulfillment"
+        assert intent.operation == "partial_fulfillment"
+        assert intent.state == "needs_customer_choice"
+        assert intent.required_tools == ["track_order", "check_stock"]
+
+    @pytest.mark.asyncio
+    async def test_after_sales_progress_gets_read_only_status_route(self):
+        router = _router("not valid JSON")
+
+        intent = await router.route("我已经提交售后了，帮我查一下进度")
+
+        assert intent.target == "agent"
+        assert intent.domain == "after_sales"
+        assert intent.operation == "check_after_sales"
+        assert intent.required_tools == ["check_after_sales"]
+
+    @pytest.mark.asyncio
+    async def test_exchange_to_return_is_a_multi_step_support_workflow(self):
+        """换货中的商品改退货必须先核验售后状态，再决定后续动作。"""
+        router = _router(
+            '{"target":"agent","domain":"after_sales","operation":"after_sales_transition",'
+            '"state":"in_progress","next_step":"LOOKUP","required_tools":["check_after_sales"],'
+            '"confidence":0.95,"requests":[{"domain":"after_sales",'
+            '"operation":"after_sales_transition","next_step":"LOOKUP",'
+            '"required_tools":["check_after_sales"],"risk":"customer_confirmation"}]}'
+        )
+
+        intent = await router.route("上午申请了换货，但这块主板和我的 CPU 不兼容，只能退货再买别的型号")
+
+        assert intent.target == "agent"
+        assert intent.domain == "after_sales"
+        assert intent.operation == "after_sales_transition"
+        assert intent.next_step == "LOOKUP"
+        assert intent.required_tools == ["check_after_sales"]
+        assert intent.use_workflow is True
+
+    @pytest.mark.asyncio
+    async def test_delivery_area_policy_does_not_force_order_lookup(self):
+        router = _router("not valid JSON")
+
+        intent = await router.route("这个订单能送到村里吗")
+
+        assert intent.target == "rag"
+        assert intent.table == "knowledge_chunks"
+
+    @pytest.mark.asyncio
+    async def test_delivery_and_device_issue_are_left_for_multi_intent_model_route(self):
+        router = _router(
+            '{"target":"agent","domain":"delivery","operation":"track_order",'
+            '"state":"new","next_step":"ASK_CLARIFICATION",'
+            '"required_tools":["track_order"],"confidence":0.9}'
+        )
+
+        intent = await router.route("手机坏了，请问什么时候订单派送")
+
+        assert intent.target == "agent"
+        assert intent.next_step == "ASK_CLARIFICATION"
+        assert intent.required_tools == ["track_order"]
+
+    @pytest.mark.asyncio
+    async def test_structured_route_fields_are_validated(self):
+        router = _router(
+            '{"target":"agent","domain":"delivery","operation":"track_order",'
+            '"state":"in_progress","next_step":"LOOKUP",'
+            '"required_tools":["track_order","not_a_tool"],"confidence":0.9}'
+        )
+
+        intent = await router.route("请帮我处理这个事情")
+
+        assert intent.domain == "delivery"
+        assert intent.operation == "track_order"
+        assert intent.state == "in_progress"
+        assert intent.next_step == "LOOKUP"
+        assert intent.required_tools == ["track_order"]
+
+    @pytest.mark.asyncio
+    async def test_multiple_customer_requests_are_preserved_for_support_workflow(self):
+        router = _router(
+            '{"target":"agent","confidence":0.96,"requests":['
+            '{"domain":"after_sales","operation":"after_sales_transition",'
+            '"desired_outcome":"exchange_to_return","subject_refs":["current_order"],'
+            '"missing_facts":["after_sale_stage"],"next_step":"LOOKUP",'
+            '"required_tools":["check_after_sales"],"risk":"customer_confirmation"},'
+            '{"domain":"product","operation":"product_compatibility",'
+            '"desired_outcome":"find_compatible_board","next_step":"LOOKUP",'
+            '"required_tools":["search_component"],"risk":"read_only"}]}'
+        )
+
+        intent = await router.route("换货中的主板和 CPU 不兼容，想退货再买能用的型号")
+
+        assert len(intent.requests) == 2
+        assert intent.requests[0].desired_outcome == "exchange_to_return"
+        assert intent.requests[0].risk == "customer_confirmation"
+        assert intent.requests[1].operation == "product_compatibility"
+        assert intent.required_tools == ["check_after_sales", "search_component"]
+        assert intent.use_workflow is True
+
+    @pytest.mark.asyncio
+    async def test_invalid_support_request_values_do_not_reach_case_state(self):
+        router = _router(
+            '{"target":"agent","domain":"delivery","operation":"track_order",'
+            '"next_step":"LOOKUP","confidence":0.9,"requests":['
+            '{"domain":"unknown","operation":"drop_database","risk":"staff_approval"},'
+            '{"domain":"delivery","operation":"track_order",'
+            '"subject_refs":["a","a",42],"next_step":"LOOKUP",'
+            '"required_tools":["track_order","drop_database"],"risk":"read_only"}]}'
+        )
+
+        intent = await router.route("请帮我处理这个事情")
+
+        assert len(intent.requests) == 1
+        assert intent.requests[0].subject_refs == ["a"]
+        assert intent.requests[0].required_tools == ["track_order"]
+
+    @pytest.mark.asyncio
+    async def test_active_case_context_allows_router_to_mark_pending_reply(self):
+        router = _router('{"target":"rag","table":"knowledge_chunks","confidence":0.9,"case_update":"continue"}')
+
+        intent = await router.route(
+            "第一个",
+            case_context='{"case_status":"AWAITING_CUSTOMER","pending":{"kind":"choice"}}',
+        )
+
+        assert intent.case_update == "continue"
+
+    @pytest.mark.asyncio
+    async def test_explicit_refund_becomes_fact_first_support_workflow_not_ticket(self):
         router = _router('{"target": "ticket", "table": "", "confidence": 0.88}')
         intent = await router.route("我要退款")
-        assert intent.target == "ticket"
-        assert intent.table == ""  # ticket 强制置空
+        assert intent.target == "agent"
+        assert intent.operation == "refund_request"
+        assert intent.required_tools == ["track_order"]
+        assert intent.use_workflow is True
+
+    @pytest.mark.asyncio
+    async def test_explicit_human_request_is_clarified_before_staff_handoff(self):
+        router = _router("not valid JSON")
+        intent = await router.route("退款的事转人工")
+
+        assert intent.target == "agent"
+        # 退款目标优先，流程先核验订单，而不是仅因为“人工”直接建单。
+        assert intent.operation == "refund_request"
+        assert intent.next_step == "LOOKUP"
+
+    @pytest.mark.asyncio
+    async def test_refund_progress_is_a_read_only_status_lookup_not_a_new_refund(self):
+        router = _router("not valid JSON")
+        intent = await router.route("我已经退了，钱怎么还没到账")
+
+        assert intent.target == "agent"
+        assert intent.operation == "refund_status"
+        assert intent.required_tools == ["track_order"]
+        assert intent.use_workflow is False
 
     @pytest.mark.asyncio
     async def test_explicit_after_sale_request_bypasses_classifier(self):
-        """明确申请售后时不应因分类模型波动错过受控工单闭环。"""
+        """明确退款进入受控事实核验流程，不能因模型波动直接建单。"""
         router = _router("not valid JSON")
 
         intent = await router.route("我要申请退款")
 
-        assert intent.target == "ticket"
+        assert intent.target == "agent"
+        assert intent.operation == "refund_request"
         assert intent.query == "我要申请退款"
         assert intent.confidence == 1.0
 
@@ -132,7 +305,9 @@ class TestRouteNormal:
 
         intent = await router.route("需要人工")
 
-        assert intent.target == "ticket"
+        assert intent.target == "agent"
+        assert intent.operation == "human_handoff"
+        assert intent.next_step == "ASK_CLARIFICATION"
         assert intent.confidence == 1.0
 
     @pytest.mark.asyncio
@@ -223,4 +398,5 @@ class TestRouteMarkdown:
     async def test_json_wrapped_in_generic_markdown(self):
         router = _router('```\n{"target": "ticket", "table": "", "confidence": 0.85}\n```')
         intent = await router.route("投诉")
-        assert intent.target == "ticket"
+        assert intent.target == "agent"
+        assert intent.operation == "human_handoff"
