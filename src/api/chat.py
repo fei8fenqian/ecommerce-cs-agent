@@ -343,6 +343,24 @@ async def _persist_support_case_progress(
     return case
 
 
+async def _fail_support_case(
+    request: Request,
+    *,
+    case: SupportCase | None,
+    error: BaseException,
+) -> None:
+    """记录 Workflow 失败，不把异常堆栈或工具原始报文写入 Case。"""
+    if case is None:
+        return
+    service = getattr(request.app.state, "support_case_service", None)
+    if not isinstance(service, SupportCaseService):
+        return
+    try:
+        await service.fail(case, reason=f"{type(error).__name__}: workflow execution failed")
+    except Exception:
+        _chat_logger.exception("support case failure state persistence failed")
+
+
 def _chat_run_key(session_id: str) -> str:
     """返回单个会话的最新流式运行标识键。"""
     return f"chat:active-run:{session_id}"
@@ -708,14 +726,18 @@ async def chat(chat_req: ChatRequest, request: Request):
             )
             support_case = await _merge_new_support_request(request, case=support_case, intent=intent)
             case_context = SupportCaseService.to_prompt_context(support_case) if support_case is not None else ""
-            loop_result = await support_workflow.run(
-                effective_query,
-                history=ctx.history,
-                system_prompt_extra=agent_prompt_extra,
-                case_context=case_context,
-                support_requests=_support_case_payloads(intent),
-                tool_context=tool_context,
-            )
+            try:
+                loop_result = await support_workflow.run(
+                    effective_query,
+                    history=ctx.history,
+                    system_prompt_extra=agent_prompt_extra,
+                    case_context=case_context,
+                    support_requests=_support_case_payloads(intent),
+                    tool_context=tool_context,
+                )
+            except Exception as exc:
+                await _fail_support_case(request, case=support_case, error=exc)
+                raise
             await _persist_support_case_progress(
                 request,
                 case=support_case,
@@ -981,14 +1003,18 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                 )
                 support_case = await _merge_new_support_request(request, case=support_case, intent=intent)
                 case_context = SupportCaseService.to_prompt_context(support_case) if support_case is not None else ""
-                workflow_result = await support_workflow.run(
-                    effective_query,
-                    history=history,
-                    system_prompt_extra=extra_prompt,
-                    case_context=case_context,
-                    support_requests=_support_case_payloads(intent),
-                    tool_context=tool_context,
-                )
+                try:
+                    workflow_result = await support_workflow.run(
+                        effective_query,
+                        history=history,
+                        system_prompt_extra=extra_prompt,
+                        case_context=case_context,
+                        support_requests=_support_case_payloads(intent),
+                        tool_context=tool_context,
+                    )
+                except Exception as exc:
+                    await _fail_support_case(request, case=support_case, error=exc)
+                    raise
                 answer = workflow_result.answer
                 if tool_context.role == "customer":
                     answer += _customer_action_suffix(
