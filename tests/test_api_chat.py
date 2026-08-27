@@ -615,6 +615,33 @@ class TestChatEndpoint:
             is False
         )
 
+    def test_resolved_workflow_can_complete_after_pending_reply(self):
+        """旧 pending 仅供恢复上下文，不能阻止已解决的本轮工作流结束。"""
+        case = SupportCase(
+            case_id=uuid4(),
+            session_id=UUID("00000000-0000-0000-0000-000000000001"),
+            customer_user_id=1,
+            status="ACTIVE",
+            request_stack=[],
+            selected_subjects={},
+            verified_facts={},
+            pending={"kind": "customer_choice", "options_limit": 2},
+            pending_command={},
+            version=2,
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+            completed_at=None,
+        )
+
+        assert (
+            _support_case_needs_customer_turn(
+                Intent(target="agent", domain="delivery", operation="track_order"),
+                case,
+                {"goal_status": "resolved", "next_action": "ANSWER"},
+            )
+            is False
+        )
+
     def test_empty_query_rejected(self, client):
         """空 query → 400 (pydantic 校验 min_length=1)"""
         resp = client.post("/api/v1/chat", json={"query": ""})

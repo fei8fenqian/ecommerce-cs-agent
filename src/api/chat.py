@@ -311,10 +311,15 @@ def _support_case_needs_customer_turn(
     workflow_progress: dict[str, object] | None = None,
 ) -> bool:
     """判断 Workflow 是否确实还需要客户选择/补充/确认。"""
+    progress_status = str((workflow_progress or {}).get("goal_status") or "")
+    # 客户恢复 pending 后，Case 仍会暂存旧问题供本轮模型理解；旧 pending 本身
+    # 不能覆盖当前执行评估，否则即使事实已核验完成，Case 也会永远停在等待客户。
+    if progress_status == "resolved":
+        return False
+    if progress_status in {"blocked", "unresolved", "awaiting_customer"}:
+        return True
     if case is not None and case.pending:
         # 现有 pending 是案件状态，不会因用户提出另一件事而被覆盖或提前完成。
-        return True
-    if str((workflow_progress or {}).get("goal_status") or "") in {"blocked", "unresolved"}:
         return True
     requests = intent.support_requests
     if not requests:
