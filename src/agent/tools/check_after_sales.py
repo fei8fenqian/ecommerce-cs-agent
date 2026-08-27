@@ -1,8 +1,9 @@
 """客户售后进度查询工具。"""
 
-from typing import Any
+from typing import Any, cast
 
 from agent.tools_registry import BaseTool, ToolContext, ToolResult
+from store.after_sale_store import list_customer_after_sale_summaries
 from store.ticket_store import get_customer_ticket, list_customer_tickets
 
 
@@ -20,10 +21,11 @@ class CheckAfterSales(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "查询当前登录客户自己的售后工单进度。"
-            "用户询问售后进度、工单状态、人工处理到哪了、刚才报修有没有结果时使用。"
+            "查询当前登录客户自己的售后申请或售后工单进度。"
+            "用户询问退货、换货、退款审核、取件、售后申请、工单状态或人工处理到哪了时使用。"
             "如果用户没有提供工单号，ticket_id 传空字符串，工具会返回最近的本人售后工单。"
-            "只能查询，不能创建、认领、修改或关闭工单。"
+            "结果中的 after_sales 是售后申请，tickets 是人工工单；两者不是同一状态。"
+            "只能查询，不能创建、认领、修改或关闭任何申请。"
         )
 
     @property
@@ -63,7 +65,15 @@ class CheckAfterSales(BaseTool):
         else:
             tickets = await list_customer_tickets(tool_context.user_id)
 
-        if not tickets:
+        after_sales: list[dict[str, object]] = []
+        if not ticket_id.strip() and not tickets:
+            try:
+                after_sales = await list_customer_after_sale_summaries(tool_context.user_id)
+            except Exception:
+                # 旧环境可能还未部署售后申请表；不能把依赖故障说成“没有申请”。
+                return ToolResult(name=self.name, status="error", error="售后状态暂时无法查询")
+
+        if not tickets and not after_sales:
             return ToolResult(name=self.name, status="error", error="当前没有可查询的售后工单")
 
         visible_tickets = [
@@ -75,8 +85,23 @@ class CheckAfterSales(BaseTool):
             }
             for ticket in tickets
         ]
-        return ToolResult(
-            name=self.name,
-            status="success",
-            data={"count": len(visible_tickets), "tickets": visible_tickets},
-        )
+        visible_after_sales = [
+            {
+                "after_sale_id": str(item.get("after_sale_id") or ""),
+                "order_id": str(item.get("order_id") or ""),
+                "status": str(item.get("status") or "UNKNOWN"),
+                "reason_code": str(item.get("reason_code") or "UNKNOWN"),
+                "refund_amount_cents": int(cast(int, item.get("refund_amount_cents") or 0)),
+                "submitted_at": str(item.get("submitted_at") or ""),
+                "updated_at": str(item.get("updated_at") or ""),
+            }
+            for item in after_sales
+        ]
+        data: dict[str, object] = {
+            "count": len(visible_tickets) + len(visible_after_sales),
+            "tickets": visible_tickets,
+        }
+        # 保持原有工单响应契约；只有查到售后申请时才增加新字段。
+        if visible_after_sales:
+            data["after_sales"] = visible_after_sales
+        return ToolResult(name=self.name, status="success", data=data)

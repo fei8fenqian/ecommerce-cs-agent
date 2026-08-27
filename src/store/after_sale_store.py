@@ -7,6 +7,7 @@ from uuid import UUID
 
 from psycopg.types.json import Jsonb
 
+from infra.db_pool import get_connection, put_connection
 from service.after_sale_types import (
     AfterSaleStatus,
     Currency,
@@ -47,6 +48,51 @@ _ACTIVE_STATUSES = tuple(
         AfterSaleStatus.REFUND_PROCESSING,
     )
 )
+
+
+async def list_customer_after_sale_summaries(
+    customer_user_id: int,
+    *,
+    order_id: str = "",
+    limit: int = 20,
+) -> list[dict[str, object]]:
+    """读取客户本人售后申请的安全摘要，不返回支付凭证或客服内部字段。"""
+    bounded_limit = max(1, min(limit, 50))
+    where = "customer_user_id = %s"
+    params: list[object] = [customer_user_id]
+    if order_id.strip():
+        where += " AND order_id = %s"
+        params.append(order_id.strip())
+
+    connection = await get_connection()
+    try:
+        cursor = await connection.execute(
+            f"""
+            SELECT id::text, order_id, status, reason_code, refund_amount_cents,
+                   submitted_at, updated_at
+            FROM public.after_sale_requests
+            WHERE {where}
+            ORDER BY updated_at DESC, id DESC
+            LIMIT %s
+            """,
+            (*params, bounded_limit),
+        )
+        rows = await cursor.fetchall()
+        return [
+            {
+                "after_sale_id": str(row[0]),
+                "order_id": str(row[1]),
+                "status": str(row[2]),
+                "reason_code": str(row[3]),
+                "refund_amount_cents": int(row[4]),
+                "submitted_at": str(row[5]),
+                "updated_at": str(row[6]),
+            }
+            for row in rows
+        ]
+    finally:
+        await put_connection(connection)
+
 
 _RECORD_COLUMNS = """
     id, order_id, customer_user_id, assigned_agent_id, status, currency,
