@@ -77,6 +77,12 @@ class ToolContext:
 
     user_id: int
     role: str
+    # 同一用户在不同业务入口拥有不同的临时能力。默认不限制，以保持内部确定性
+    # 服务和旧调用兼容；客户聊天入口会显式阻止模型直接调用高风险工具。
+    blocked_tools: frozenset[str] = field(default_factory=frozenset)
+    # 若提供则是本次调用的能力上限。以后新增退款、改址、取消订单等工具时，未加入
+    # 白名单的工具默认不可见且不可执行。
+    allowed_tools: frozenset[str] | None = None
 
 
 # =============================================================================
@@ -199,6 +205,22 @@ class ToolRegistry:
                 status="error",
                 error="缺少当前用户身份，无法执行该工具",
             )
+        if tool_context is not None and name in tool_context.blocked_tools:
+            return ToolResult(
+                name=name,
+                status="error",
+                error="当前流程未授予调用该工具的权限",
+            )
+        if (
+            tool_context is not None
+            and tool_context.allowed_tools is not None
+            and name not in tool_context.allowed_tools
+        ):
+            return ToolResult(
+                name=name,
+                status="error",
+                error="当前流程未授予调用该工具的权限",
+            )
         try:
             if tool.requires_tool_context:
                 kwargs["tool_context"] = tool_context
@@ -210,7 +232,7 @@ class ToolRegistry:
             return ToolResult(name=name, status="error", error=str(e))
 
     # -- OpenAI 格式导出 tool schema ------------------------------------------------------
-    def to_openai_schemas(self) -> list[dict[str, Any]]:
+    def to_openai_schemas(self, tool_context: ToolContext | None = None) -> list[dict[str, Any]]:
         """
         生成 OpenAI function calling 的 tools 参数列表。
 
@@ -221,7 +243,13 @@ class ToolRegistry:
               tools=registry.to_openai_schemas(),
           )
         """
-        return [tool.to_openai_function() for tool in self._tools.values()]
+        blocked_tools = tool_context.blocked_tools if tool_context is not None else frozenset()
+        allowed_tools = tool_context.allowed_tools if tool_context is not None else None
+        return [
+            tool.to_openai_function()
+            for tool in self._tools.values()
+            if tool.name not in blocked_tools and (allowed_tools is None or tool.name in allowed_tools)
+        ]
 
     # -- 便捷方法 ------------------------------------------------------------
     def __len__(self) -> int:

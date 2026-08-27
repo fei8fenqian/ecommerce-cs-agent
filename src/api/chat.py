@@ -55,6 +55,17 @@ chat_router = APIRouter(prefix="/api/v1", tags=["聊天"])
 
 _STREAM_ERROR_MESSAGE = "智能服务暂时不可用，请稍后重试"
 _CHAT_RUN_TTL_SECONDS = 300
+_CUSTOMER_CHAT_READ_TOOLS = frozenset(
+    {
+        "search_product",
+        "check_stock",
+        "track_order",
+        "check_payment_status",
+        "check_after_sales",
+        "compare_products",
+        "search_component",
+    }
+)
 
 
 def _compose_prompt_extras(*parts: str) -> str:
@@ -541,6 +552,7 @@ async def chat(chat_req: ChatRequest, request: Request):
             user_id=user_id,
             role=role,
             blocked_tools=frozenset({"create_ticket"}) if role == "customer" else frozenset(),
+            allowed_tools=_CUSTOMER_CHAT_READ_TOOLS if role == "customer" else None,
         )
         selected_product_context, selected_product_table, selected_product_name = await _selected_product_context(
             chat_req
@@ -782,6 +794,7 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
             user_id=user_id,
             role=role,
             blocked_tools=frozenset({"create_ticket"}) if role == "customer" else frozenset(),
+            allowed_tools=_CUSTOMER_CHAT_READ_TOOLS if role == "customer" else None,
         )
         selected_product_context, selected_product_table, selected_product_name = await _selected_product_context(
             chat_req

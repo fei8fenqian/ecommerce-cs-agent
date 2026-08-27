@@ -2,7 +2,7 @@
 
 import pytest
 
-from agent.tools_registry import BaseTool, ToolRegistry, ToolResult
+from agent.tools_registry import BaseTool, ToolContext, ToolRegistry, ToolResult
 
 
 # =============================================================================
@@ -158,6 +158,28 @@ class TestToolRegistry:
         assert "未知工具" in result.error
 
     @pytest.mark.asyncio
+    async def test_execute_respects_server_granted_tool_capability(self, registry):
+        result = await registry.execute(
+            "fake_success",
+            tool_context=ToolContext(user_id=1, role="customer", blocked_tools=frozenset({"fake_success"})),
+            input="hello",
+        )
+
+        assert result.is_success is False
+        assert "未授予" in result.error
+
+    @pytest.mark.asyncio
+    async def test_execute_rejects_tools_outside_allowed_capability_set(self, registry):
+        result = await registry.execute(
+            "fake_success",
+            tool_context=ToolContext(user_id=1, role="customer", allowed_tools=frozenset({"other_tool"})),
+            input="hello",
+        )
+
+        assert result.is_success is False
+        assert "未授予" in result.error
+
+    @pytest.mark.asyncio
     async def test_execute_tool_raises(self):
         registry = ToolRegistry()
         registry.register(_FakeFail())
@@ -186,6 +208,28 @@ class TestToolRegistry:
         assert len(schemas) == 2
         names = [s["function"]["name"] for s in schemas]
         assert set(names) == {"fake_success", "fake_fail"}
+
+    def test_to_openai_schemas_hides_tools_not_granted_to_this_request(self):
+        registry = ToolRegistry()
+        registry.register(_FakeSuccess())
+        registry.register(_FakeFail())
+
+        schemas = registry.to_openai_schemas(
+            ToolContext(user_id=1, role="customer", blocked_tools=frozenset({"fake_fail"}))
+        )
+
+        assert [schema["function"]["name"] for schema in schemas] == ["fake_success"]
+
+    def test_to_openai_schemas_enforces_allowed_capability_set(self):
+        registry = ToolRegistry()
+        registry.register(_FakeSuccess())
+        registry.register(_FakeFail())
+
+        schemas = registry.to_openai_schemas(
+            ToolContext(user_id=1, role="customer", allowed_tools=frozenset({"fake_success"}))
+        )
+
+        assert [schema["function"]["name"] for schema in schemas] == ["fake_success"]
 
     # -- list_tools -----------------------------------------------------------
     def test_list_tools(self):
