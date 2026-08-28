@@ -23,6 +23,7 @@ from agent.rag.runtime_manifest import load_runtime_knowledge_sources
 from agent.support_control import resolve_workflow
 from config import settings
 from infra.circuit_breaker import CircuitBreaker
+from infra.db_pool import close_pool, init_pool
 
 
 def _load_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -299,13 +300,20 @@ async def _main(args: argparse.Namespace) -> int:
     runtime_sources = sorted(load_runtime_knowledge_sources())
     print(f"Runtime Knowledge sources: {len(runtime_sources)}")
     print(f"Gold SHA256: {_sha256(gold_path)}")
-    result = await _run(
-        records,
-        model=args.model,
-        pre_rag_enabled=args.pre_rag == "on",
-        interval_seconds=args.interval_seconds,
-        similarity_threshold=args.similarity_threshold,
-    )
+    pre_rag_enabled = args.pre_rag == "on"
+    if pre_rag_enabled:
+        await init_pool(minconn=1, maxconn=4)
+    try:
+        result = await _run(
+            records,
+            model=args.model,
+            pre_rag_enabled=pre_rag_enabled,
+            interval_seconds=args.interval_seconds,
+            similarity_threshold=args.similarity_threshold,
+        )
+    finally:
+        if pre_rag_enabled:
+            await close_pool()
     result["gold_path"] = str(gold_path)
     result["gold_sha256"] = _sha256(gold_path)
     result["git_commit"] = _git_commit()
