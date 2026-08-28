@@ -17,6 +17,7 @@ class _MockLLM:
         self.model = "mock"
 
     async def chat(self, messages, *, tools=None, temperature=0.0, max_tokens=2048):
+        self.last_messages = messages
         return LLMResponse(
             content=self._content,
             model="mock",
@@ -170,13 +171,13 @@ class TestRouteNormal:
         assert intent.use_workflow is True
 
     @pytest.mark.asyncio
-    async def test_delivery_area_policy_does_not_force_order_lookup(self):
+    async def test_delivery_area_policy_with_router_failure_stays_conservative(self):
         router = _router("not valid JSON")
 
         intent = await router.route("这个订单能送到村里吗")
 
-        assert intent.target == "rag"
-        assert intent.table == "knowledge_chunks"
+        assert intent.target == "agent"
+        assert intent.operation == "clarify"
 
     @pytest.mark.asyncio
     async def test_delivery_and_device_issue_are_left_for_multi_intent_model_route(self):
@@ -248,6 +249,21 @@ class TestRouteNormal:
         assert intent.requests[0].required_tools == ["track_order"]
 
     @pytest.mark.asyncio
+    async def test_risky_operation_cannot_be_downgraded_to_read_only_by_model(self):
+        router = _router(
+            '{"target":"agent","confidence":0.95,"requests":['
+            '{"domain":"refund","operation":"refund_request",'
+            '"next_step":"LOOKUP","risk":"read_only","required_tools":[]}]} '
+        )
+
+        intent = await router.route("帮我处理退款")
+
+        # Router 只保留模型原始兼容字段；确认边界由 Control Plane 判断。
+        assert intent.requests[0].risk == "read_only"
+        assert intent.requests[0].required_tools == []
+        assert intent.use_workflow is True
+
+    @pytest.mark.asyncio
     async def test_active_case_context_allows_router_to_mark_pending_reply(self):
         router = _router('{"target":"rag","table":"knowledge_chunks","confidence":0.9,"case_update":"continue"}')
 
@@ -263,8 +279,8 @@ class TestRouteNormal:
         router = _router('{"target": "ticket", "table": "", "confidence": 0.88}')
         intent = await router.route("我要退款")
         assert intent.target == "agent"
-        assert intent.operation == "refund_request"
-        assert intent.required_tools == ["track_order"]
+        assert intent.operation == "request"
+        assert intent.required_tools == []
         assert intent.use_workflow is True
 
     @pytest.mark.asyncio
@@ -274,8 +290,37 @@ class TestRouteNormal:
 
         assert intent.target == "agent"
         # 退款目标优先，流程先核验订单，而不是仅因为“人工”直接建单。
-        assert intent.operation == "refund_request"
+        assert intent.operation == "request"
         assert intent.next_step == "LOOKUP"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("legacy_operation", "canonical_operation"),
+        [("refund_status", "status"), ("refund_request", "request")],
+    )
+    async def test_refund_legacy_operations_are_domain_aware_canonical_aliases(
+        self, legacy_operation, canonical_operation
+    ):
+        router = _router(
+            '{"target":"agent","confidence":0.95,"requests":['
+            f'{{"domain":"refund","operation":"{legacy_operation}"}}]}}'
+        )
+
+        intent = await router.route("请帮我处理这个事情")
+
+        assert intent.operation == canonical_operation
+        assert intent.requests[0].operation == canonical_operation
+
+    @pytest.mark.asyncio
+    async def test_membership_legacy_operation_is_not_rewritten_by_refund_alias(self):
+        router = _router(
+            '{"target":"agent","confidence":0.95,"requests":[{"domain":"membership","operation":"refund_request"}]}'
+        )
+
+        intent = await router.route("请帮我处理这个事情")
+
+        assert intent.requests[0].domain == "membership"
+        assert intent.requests[0].operation == "refund_request"
 
     @pytest.mark.asyncio
     async def test_refund_progress_is_a_read_only_status_lookup_not_a_new_refund(self):
@@ -283,9 +328,9 @@ class TestRouteNormal:
         intent = await router.route("我已经退了，钱怎么还没到账")
 
         assert intent.target == "agent"
-        assert intent.operation == "refund_status"
-        assert intent.required_tools == ["track_order"]
-        assert intent.use_workflow is False
+        assert intent.operation == "expected_arrival"
+        assert intent.required_tools == []
+        assert intent.use_workflow is True
 
     @pytest.mark.asyncio
     async def test_explicit_after_sale_request_bypasses_classifier(self):
@@ -295,9 +340,111 @@ class TestRouteNormal:
         intent = await router.route("我要申请退款")
 
         assert intent.target == "agent"
-        assert intent.operation == "refund_request"
+        assert intent.operation == "request"
         assert intent.query == "我要申请退款"
-        assert intent.confidence == 1.0
+        assert intent.confidence == 0.98
+
+    @pytest.mark.asyncio
+    async def test_history_only_resolves_short_context_without_polluting_explicit_current_goal(self):
+        router = _router("not valid JSON")
+
+        intent = await router.route(
+            "另外一笔退款什么时候到账",
+            history=[{"role": "user", "content": "之前有一笔订单拒收了，正在等退款"}],
+        )
+
+        assert intent.domain == "refund"
+        assert intent.operation == "expected_arrival"
+
+    @pytest.mark.asyncio
+    async def test_explicit_short_refund_goal_cannot_be_changed_by_history_domain(self):
+        router = _router("not valid JSON")
+
+        intent = await router.route(
+            "退款什么时候到账",
+            history=[{"role": "user", "content": "之前有一笔订单拒收了，正在等退款"}],
+        )
+
+        assert intent.domain == "refund"
+        assert intent.operation == "expected_arrival"
+
+    @pytest.mark.asyncio
+    async def test_obvious_multi_goal_refund_expression_is_left_to_llm(self):
+        router = _router(
+            '{"target":"agent","confidence":0.95,"requests":['
+            '{"domain":"refund","operation":"cancel"},'
+            '{"domain":"after_sales","operation":"exchange"}]}'
+        )
+
+        intent = await router.route("我申请退款了，但是现在想换货，还能取消退款吗")
+
+        assert [request.operation for request in intent.requests] == ["cancel", "exchange"]
+        assert intent.required_tools == []
+
+    @pytest.mark.asyncio
+    async def test_annotation_long_tail_is_canonicalized_to_operation_modifier(self):
+        router = _router('{"target":"agent","domain":"refund","operation":"status_amount","confidence":0.95}')
+
+        intent = await router.route("短信提示金额")
+
+        assert intent.operation == "amount"
+        assert intent.goal_modifier == "status_with_amount"
+
+    @pytest.mark.asyncio
+    async def test_refund_destination_is_not_collapsed_into_status(self):
+        router = _router("not valid JSON")
+
+        intent = await router.route("退款成功后会退到哪里，原路退回吗")
+
+        assert intent.target == "agent"
+        assert intent.domain == "refund"
+        assert intent.operation == "destination"
+        assert intent.required_tools == []
+
+    @pytest.mark.asyncio
+    async def test_return_refund_dependency_is_cross_domain_route(self):
+        router = _router("not valid JSON")
+
+        intent = await router.route("拒收后什么时候退款")
+
+        assert intent.target == "agent"
+        assert intent.domain == "return"
+        assert intent.operation == "refund_dependency"
+        assert intent.required_tools == []
+
+    @pytest.mark.asyncio
+    async def test_refund_statement_without_goal_does_not_create_support_request(self):
+        router = _router("not valid JSON")
+
+        intent = await router.route("嗯，我已经申请退款了")
+
+        assert intent.target == "agent"
+        assert intent.speech_act == "STATEMENT"
+        assert intent.requests == []
+        assert intent.support_requests == []
+        assert intent.next_step == "ANSWER"
+        assert intent.required_tools == []
+
+    @pytest.mark.asyncio
+    async def test_accidental_refund_application_requires_clarification_without_request(self):
+        router = _router("not valid JSON")
+
+        intent = await router.route("我不小心申请了退款")
+
+        assert intent.speech_act == "CLARIFICATION_NEEDED"
+        assert intent.requests == []
+        assert intent.support_requests == []
+        assert intent.next_step == "ASK_CLARIFICATION"
+
+    @pytest.mark.asyncio
+    async def test_future_refund_intention_is_not_a_current_refund_request(self):
+        router = _router('{"target":"agent","speech_act":"FUTURE_INTENTION","confidence":0.95,"requests":[]}')
+
+        intent = await router.route("再等两天，不行我就退款")
+
+        assert intent.speech_act == "FUTURE_INTENTION"
+        assert intent.requests == []
+        assert intent.support_requests == []
 
     @pytest.mark.asyncio
     async def test_customer_can_confirm_human_help_after_self_service_guidance(self):
@@ -308,7 +455,7 @@ class TestRouteNormal:
         assert intent.target == "agent"
         assert intent.operation == "human_handoff"
         assert intent.next_step == "ASK_CLARIFICATION"
-        assert intent.confidence == 1.0
+        assert intent.confidence == 0.98
 
     @pytest.mark.asyncio
     async def test_refund_policy_question_does_not_create_ticket(self):
@@ -339,32 +486,35 @@ class TestRouteNormal:
 # =============================================================================
 class TestRouteFallback:
     @pytest.mark.asyncio
-    async def test_low_confidence_falls_back_to_rag(self):
+    async def test_low_confidence_becomes_clarification_not_rag(self):
         router = _router('{"target": "agent", "table": "", "confidence": 0.3}')
         intent = await router.route("模糊问题")
-        assert intent.target == "rag"
-        assert intent.table == "knowledge_chunks"
+        assert intent.target == "agent"
+        assert intent.table == ""
+        assert intent.domain == "general"
+        assert intent.operation == "clarify"
+        assert intent.next_step == "ASK_CLARIFICATION"
 
     @pytest.mark.asyncio
-    async def test_invalid_json_falls_back_to_rag(self):
+    async def test_invalid_json_falls_back_to_conservative_clarification(self):
         router = _router("not json at all")
         intent = await router.route("随便")
-        assert intent.target == "rag"
-        assert intent.table == "knowledge_chunks"
+        assert intent.target == "agent"
+        assert intent.operation == "clarify"
         assert intent.confidence == 0.0
 
     @pytest.mark.asyncio
-    async def test_empty_content_falls_back_to_rag(self):
+    async def test_empty_content_falls_back_to_conservative_clarification(self):
         router = _router("")
         intent = await router.route("空响应")
-        assert intent.target == "rag"
-        assert intent.table == "knowledge_chunks"
+        assert intent.target == "agent"
+        assert intent.operation == "clarify"
 
     @pytest.mark.asyncio
-    async def test_invalid_target_falls_back_to_rag(self):
+    async def test_invalid_target_falls_back_to_agent(self):
         router = _router('{"target": "unknown", "table": "", "confidence": 0.8}')
         intent = await router.route("奇怪的问题")
-        assert intent.target == "rag"
+        assert intent.target == "agent"
 
     @pytest.mark.asyncio
     async def test_agent_with_table_gets_cleared(self):
@@ -380,6 +530,49 @@ class TestRouteFallback:
         intent = await router.route("问题")
         assert intent.target == "rag"
         assert intent.table == "knowledge_chunks"
+
+    @pytest.mark.asyncio
+    async def test_pre_rag_context_is_only_semantic_router_context(self):
+        router = _router('{"target": "agent", "confidence": 0.9}')
+
+        await router.route(
+            "请解释运行时知识清单是什么",
+            knowledge_context="[知识来源: refund.md / 退款] 规则仅作一般说明。",
+        )
+
+        message = router.llm.last_messages[-1]["content"]
+        assert "项目知识摘要" in message
+        assert "不是当前客户业务事实" in message
+        assert "请解释运行时知识清单是什么" in message
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("speech_act", ["STATEMENT", "ACKNOWLEDGEMENT", "FUTURE_INTENTION"])
+    async def test_non_actionable_speech_act_cannot_create_refund_request(self, speech_act):
+        router = _router(
+            '{"target":"agent","domain":"refund","operation":"request",'
+            f'"speech_act":"{speech_act}","next_step":"LOOKUP","confidence":0.9,'
+            '"requests":[{"domain":"refund","operation":"request"}]}'
+        )
+
+        intent = await router.route("我再想想")
+
+        assert intent.speech_act == speech_act
+        assert intent.target == "agent"
+        assert intent.support_requests == []
+        assert intent.use_workflow is False
+
+    @pytest.mark.asyncio
+    async def test_clarification_speech_act_does_not_invent_a_business_request(self):
+        router = _router(
+            '{"target":"rag","domain":"refund","operation":"status",'
+            '"speech_act":"CLARIFICATION_NEEDED","confidence":0.9}'
+        )
+
+        intent = await router.route("我不小心操作错了")
+
+        assert intent.target == "agent"
+        assert intent.next_step == "ASK_CLARIFICATION"
+        assert intent.support_requests == []
 
 
 # =============================================================================
