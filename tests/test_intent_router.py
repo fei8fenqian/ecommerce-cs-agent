@@ -289,9 +289,8 @@ class TestRouteNormal:
         intent = await router.route("退款的事转人工")
 
         assert intent.target == "agent"
-        # 退款目标优先，流程先核验订单，而不是仅因为“人工”直接建单。
-        assert intent.operation == "request"
-        assert intent.next_step == "LOOKUP"
+        assert intent.operation == "human_handoff"
+        assert intent.next_step == "ASK_CLARIFICATION"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -367,6 +366,40 @@ class TestRouteNormal:
 
         assert intent.domain == "refund"
         assert intent.operation == "expected_arrival"
+
+    @pytest.mark.asyncio
+    async def test_current_refund_goal_is_not_changed_by_history_domain_when_short(self):
+        router = _router("not valid JSON")
+
+        intent = await router.route(
+            "什么时候退款",
+            history=[{"role": "user", "content": "我申请退货了，正在等仓库收货"}],
+        )
+
+        assert intent.domain == "refund"
+        assert intent.operation == "expected_arrival"
+
+    @pytest.mark.asyncio
+    async def test_current_refund_destination_is_not_changed_by_price_protection_history(self):
+        router = _router("not valid JSON")
+
+        intent = await router.route(
+            "在京东白条里面退款?",
+            history=[{"role": "user", "content": "之前问的是价保差价怎么退"}],
+        )
+
+        assert intent.domain == "refund"
+        assert intent.operation == "destination"
+
+    @pytest.mark.asyncio
+    async def test_refund_noun_alone_does_not_create_request_without_explicit_action(self):
+        router = _router('{"target":"agent","speech_act":"CLARIFICATION_NEEDED","requests":[],"confidence":0.8}')
+
+        intent = await router.route("退款")
+
+        assert intent.speech_act == "CLARIFICATION_NEEDED"
+        assert intent.requests == []
+        assert intent.support_requests == []
 
     @pytest.mark.asyncio
     async def test_obvious_multi_goal_refund_expression_is_left_to_llm(self):

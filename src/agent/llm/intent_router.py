@@ -892,7 +892,8 @@ class IntentRouter:
         # 语义上判断是否需要上下文消歧，而不是把“短句”直接等同于“需要上下文”。
         # 只要当前句已经明确了退款目标，历史只能作为补充声明，不能改变 operation。
         needs_context_resolution = (
-            not current_operation_explicit
+            not current_refund
+            and not current_operation_explicit
             and not any(marker in current for marker in ("另外一笔", "另一笔", "另外一个订单", "两个订单"))
             and (len(current) <= 12 or current.startswith(("那", "这个", "它", "然后", "所以")))
         )
@@ -1126,12 +1127,6 @@ class IntentRouter:
         future_intention_markers = ("再等", "等两天", "如果", "要是", "不行就", "否则", "打算", "准备", "以后", "考虑")
         if "退款" in normalized and any(marker in normalized for marker in future_intention_markers):
             return None
-        if any(marker in normalized for marker in ("退款", "退货", "退钱", "想退", "不想要")):
-            return {
-                "domain": "refund",
-                "operation": "request",
-                "next_step": "LOOKUP",
-            }
         if any(marker in normalized for marker in ("报修", "保修", "申请维修", "送修", "寄修")):
             return {
                 "domain": "warranty",
