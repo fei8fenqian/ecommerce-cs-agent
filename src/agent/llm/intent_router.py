@@ -56,6 +56,11 @@ required_tools、missing_facts、next_step、risk 只是旧链路兼容字段，
 ACKNOWLEDGEMENT、FUTURE_INTENTION 或 CLARIFICATION_NEEDED。STATEMENT、ACKNOWLEDGEMENT 和
 FUTURE_INTENTION 本身不是新的业务执行授权；当前句没有明确目标时不能主动查询或申请退款。
 
+退款主题不等于退款问题：
+- “我刚才有一个退款”“申请的是退款”只是事实补充 → STATEMENT + requests=[]。
+- “好的，知道了”“哦，就是到仓以后退款”若是在复述/确认客服刚给出的结论 → ACKNOWLEDGEMENT + requests=[]。
+- 不得从“退款、仓库、退货”等主题词推断出疑问或动作请求；只有当前句明确提出问题或行动时才生成 request。
+
 除旧字段外，必须返回 requests 数组（最多 3 条），按客户目标的依赖顺序排列。每条 request 是
 对客户请求的候选理解，不是执行授权，格式为：
 {"domain":"after_sales","operation":"after_sales_transition","desired_outcome":"exchange_to_return",
@@ -318,6 +323,12 @@ class IntentRouter:
                 support_hint = self._refund_route_hint(query, history=history) or self._explicit_support_request_hint(
                     query
                 )
+            if support_hint is not None:
+                # Fast-path 只能处理当前句明确是问句或动作请求的高置信表达。陈述、
+                # 复述和致谢即使包含“退款/仓库”等主题词，也必须先交由 LLM 判断
+                # speech act，不能被关键词直接升级成业务请求。
+                if not self._has_explicit_query_or_action_form(query):
+                    support_hint = None
             if support_hint is not None:
                 hint_speech_act = str(support_hint.pop("_speech_act", ""))
                 request = SupportRequest(**support_hint)
@@ -781,6 +792,53 @@ class IntentRouter:
         if "另外" in normalized and not any(marker in normalized for marker in ("另外一笔", "另外一个订单")):
             return True
         return "换货" in normalized and any(marker in normalized for marker in ("退款", "取消", "退货", "不想"))
+
+    @staticmethod
+    def _has_explicit_query_or_action_form(query: str) -> bool:
+        """判断当前句是否足以让 refund fast-path 安全截走。
+
+        只看当前用户句，不借 history 补问句。这里宁可把隐含投诉交给 LLM，也不把
+        “仓库看到东西才能退款”之类复述错误升级成查询。
+        """
+        current = "".join(query.split()).lower()
+        query_markers = (
+            "?",
+            "？",
+            "吗",
+            "么",
+            "怎么",
+            "如何",
+            "为什么",
+            "哪里",
+            "哪儿",
+            "多久",
+            "什么时候",
+            "何时",
+            "能否",
+            "是否",
+            "可以",
+            "能不能",
+        )
+        explicit_action_markers = (
+            "我要退款",
+            "我要申请退款",
+            "帮我退款",
+            "帮我退",
+            "请退款",
+            "麻烦退款",
+            "取消退款",
+            "撤销退款",
+            "不想退款",
+            "不要退款",
+            "不退了",
+            "找人工",
+            "转人工",
+            "人工客服",
+            "需要人工",
+            "仍需人工",
+            "还是要人工",
+        )
+        return any(marker in current for marker in query_markers + explicit_action_markers)
 
     @staticmethod
     def _refund_route_hint(query: str, *, history: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:

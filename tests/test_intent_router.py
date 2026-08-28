@@ -365,6 +365,32 @@ class TestRouteNormal:
         ]
 
     @pytest.mark.asyncio
+    async def test_refund_fast_path_requires_current_query_or_action_form(self):
+        router = _router(
+            '{"target":"agent","speech_act":"ACKNOWLEDGEMENT","confidence":0.95,'
+            '"domain":"general","operation":"answer","requests":[]}'
+        )
+
+        intent = await router.route(
+            "仓库看到东西了才能处理退款",
+            history=[{"role": "assistant", "content": "商品到仓后会安排退款"}],
+        )
+
+        assert intent.route_source == "llm"
+        assert intent.speech_act == "ACKNOWLEDGEMENT"
+        assert intent.support_requests == []
+
+    @pytest.mark.asyncio
+    async def test_refund_fast_path_keeps_explicit_return_refund_query(self):
+        router = _router("not valid JSON")
+
+        intent = await router.route("拒收后什么时候退款？")
+
+        assert intent.route_source == "deterministic_hint"
+        assert intent.domain == "return"
+        assert intent.operation == "refund_dependency"
+
+    @pytest.mark.asyncio
     async def test_refund_progress_is_a_read_only_status_lookup_not_a_new_refund(self):
         router = _router("not valid JSON")
         intent = await router.route("我已经退了，钱怎么还没到账")
