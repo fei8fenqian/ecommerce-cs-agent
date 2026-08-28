@@ -322,6 +322,36 @@ class TestRouteNormal:
         assert intent.requests[0].operation == "refund_request"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("invalid_operation", ["refund_status", "refund_request"])
+    async def test_invalid_domain_operation_pair_becomes_conservative_clarification(self, invalid_operation):
+        router = _router(
+            '{"target":"agent","speech_act":"INFORMATION_QUERY","confidence":0.95,'
+            f'"domain":"after_sales","operation":"{invalid_operation}",'
+            f'"requests":[{{"domain":"after_sales","operation":"{invalid_operation}"}}]}}'
+        )
+
+        intent = await router.route("请帮我确认当前情况")
+
+        assert intent.speech_act == "CLARIFICATION_NEEDED"
+        assert intent.domain == "general"
+        assert intent.operation == "clarify"
+        assert intent.requests == []
+        assert intent.support_requests == []
+
+    @pytest.mark.asyncio
+    async def test_rag_information_goal_still_creates_semantic_request(self):
+        router = _router(
+            '{"target":"rag","table":"knowledge_chunks","speech_act":"INFORMATION_QUERY",'
+            '"domain":"refund","operation":"procedure","next_step":"ANSWER","confidence":0.95}'
+        )
+
+        intent = await router.route("请说明当前退款步骤")
+
+        assert intent.target == "rag"
+        assert [(request.domain, request.operation) for request in intent.requests] == [("refund", "procedure")]
+        assert [(request.domain, request.operation) for request in intent.support_requests] == [("refund", "procedure")]
+
+    @pytest.mark.asyncio
     async def test_refund_progress_is_a_read_only_status_lookup_not_a_new_refund(self):
         router = _router("not valid JSON")
         intent = await router.route("我已经退了，钱怎么还没到账")

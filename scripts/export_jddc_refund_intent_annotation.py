@@ -11,6 +11,19 @@ import json
 from pathlib import Path
 from typing import Any
 
+from agent.goal_taxonomy import GOAL_DEFINITIONS, REFUND_GOAL_ROUTING_GUIDANCE
+
+
+def _refund_workflow_table() -> str:
+    goals = [
+        goal
+        for goal in GOAL_DEFINITIONS
+        if goal.domain in {"refund", "return", "price_protection"}
+        and goal.operation != "clarify"
+        and goal.workflow_key is not None
+    ]
+    return "\n".join(f"| `{goal.key}` | `{goal.workflow_key}` |" for goal in goals)
+
 
 def _load_records(path: Path) -> list[dict[str, Any]]:
     records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -103,21 +116,11 @@ def _header(count: int) -> str:
 2. 普通单目标只填一个对象，格式为 `{{"domain": "refund", "operation": "status"}}`。
 3. 多目标最多填 3 个，按客户目标的业务依赖顺序排列；不要把一个目标拆成多个工具调用。
 4. `primary_goal` 填规范化的 `domain.operation`；没有业务请求时填 `null`。
-5. 退款子域常用 operation：
-   - `status`：退款是否成功、当前进度、退款了吗；
-   - `expected_arrival`：什么时候到账、多久收到；
-   - `destination`：退到哪里、原路退回哪个支付渠道；
-   - `request`：明确现在要申请退款；
-   - `cancel`：撤销/取消已经申请的退款；
-   - `amount`：退款金额、少退、部分退款；
-   - `eligibility`：当前订单是否符合退款资格；
-   - `processing_time`：审核、受理或处理需要多久；
-   - `anomaly`：失败、被拒、反复处理或状态异常；
-   - `procedure`：如何申请、退款流程；
-   - `clarify`：出现退款但当前没有明确目标；
-   - `delivery_after_refund`：退款后是否还要签收/配送等交叉问题。
-6. 跨域目标使用：退货/拒收/回仓后问退款用 `return.refund_dependency`；价保退款进度用
-   `price_protection.refund_status`；不要为了一个细节创造新 operation。
+5. 退款 Goal 定义必须以源码 `agent.goal_taxonomy.REFUND_GOAL_ROUTING_GUIDANCE` 为准：
+
+{REFUND_GOAL_ROUTING_GUIDANCE}
+
+6. 不要为了一个细节创造新 operation；需要保留的细节写在 `notes`。
 
 ## `expected_workflow` 规则
 
@@ -125,17 +128,7 @@ def _header(count: int) -> str:
 
 | canonical goal | 当前 Workflow |
 |---|---|
-| `refund.status` | `refund.refund_status` |
-| `refund.amount` | `refund.refund_detail` |
-| `refund.expected_arrival` | `refund.expected_arrival` |
-| `refund.processing_time` | `refund.processing_time` |
-| `refund.anomaly` | `refund.anomaly` |
-| `refund.destination` | `refund.destination` |
-| `refund.eligibility` | `refund.eligibility` |
-| `refund.request` | `refund.request` |
-| `refund.cancel` | `refund.cancel` |
-| `return.refund_dependency` | `return.refund_dependency` |
-| `price_protection.refund_status` | `price_protection.refund_status` |
+{_refund_workflow_table()}
 
 当前没有注册 Workflow 的目标（例如 `refund.procedure`、`refund.clarify`）填 `null`，不能为了让
 Benchmark 看起来完整而自造 Workflow。没有业务请求时同样填 `null`。

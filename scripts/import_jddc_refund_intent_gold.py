@@ -13,6 +13,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from agent.goal_taxonomy import is_canonical_goal, workflow_key_for_goal
 from agent.support_control import resolve_workflow
 
 ALLOWED_SPEECH_ACTS = {
@@ -68,7 +69,11 @@ def _validate_request(request: Any, *, case_id: str, index: int) -> dict[str, st
     operation = request.get("operation")
     if not isinstance(domain, str) or not domain.strip() or not isinstance(operation, str) or not operation.strip():
         raise ValueError(f"{case_id}: expected_requests[{index}] 必须包含 domain 和 operation")
-    return {"domain": domain.strip(), "operation": operation.strip()}
+    domain = domain.strip()
+    operation = operation.strip()
+    if not is_canonical_goal(domain, operation):
+        raise ValueError(f"{case_id}: expected_requests[{index}] 不是 canonical Goal: {domain}.{operation}")
+    return {"domain": domain, "operation": operation}
 
 
 def _validate_annotation(annotation: dict[str, Any], candidates: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -98,8 +103,14 @@ def _validate_annotation(annotation: dict[str, Any], candidates: dict[str, dict[
         expected_primary_goal = f"{requests[0]['domain']}.{requests[0]['operation']}"
         if primary_goal != expected_primary_goal:
             raise ValueError(f"{case_id}: primary_goal 应为 {expected_primary_goal!r}，实际为 {primary_goal!r}")
+        taxonomy_workflow = workflow_key_for_goal(requests[0]["domain"], requests[0]["operation"])
         workflow = resolve_workflow(requests[0])
         actual_workflow = workflow.key if workflow is not None else None
+        if actual_workflow != taxonomy_workflow:
+            raise ValueError(
+                f"{case_id}: Goal taxonomy Workflow 为 {taxonomy_workflow!r}，"
+                f"但 Control Plane resolve_workflow 为 {actual_workflow!r}"
+            )
         if expected_workflow != actual_workflow:
             raise ValueError(f"{case_id}: expected_workflow 应为 {actual_workflow!r}，实际为 {expected_workflow!r}")
     elif primary_goal is not None or expected_workflow is not None:
