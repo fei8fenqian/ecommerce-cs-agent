@@ -63,6 +63,19 @@ def _git_dirty() -> bool:
         return True
 
 
+def _git_diff_sha256() -> str:
+    """Fingerprint tracked working-tree changes when a run is not cleanly reproducible."""
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--binary", "HEAD"],
+            check=True,
+            capture_output=True,
+        )
+        return hashlib.sha256(result.stdout).hexdigest()
+    except (OSError, subprocess.CalledProcessError):
+        return ""
+
+
 _SPEECH_ACTS = (
     "INFORMATION_QUERY",
     "ACTION_REQUEST",
@@ -318,6 +331,7 @@ async def _main(args: argparse.Namespace) -> int:
     result["gold_sha256"] = _sha256(gold_path)
     result["git_commit"] = _git_commit()
     result["working_tree_dirty"] = _git_dirty()
+    result["git_diff_sha256"] = _git_diff_sha256()
     result["runtime_knowledge_sources"] = runtime_sources
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

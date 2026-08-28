@@ -413,6 +413,18 @@ class TestRouteNormal:
         assert intent.confidence == 0.98
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("query", ["我想申请退款", "麻烦帮我申请退款", "需要你们帮我发起申请退款"])
+    async def test_explicit_refund_request_keeps_action_speech_act(self, query):
+        """Goal 不能反推 speech act，但当前明确动作必须保留为动作请求。"""
+        router = _router("not valid JSON")
+
+        intent = await router.route(query)
+
+        assert intent.route_source == "deterministic_hint"
+        assert intent.speech_act == "ACTION_REQUEST"
+        assert [(request.domain, request.operation) for request in intent.support_requests] == [("refund", "request")]
+
+    @pytest.mark.asyncio
     async def test_history_only_resolves_short_context_without_polluting_explicit_current_goal(self):
         router = _router("not valid JSON")
 
@@ -425,7 +437,7 @@ class TestRouteNormal:
         assert intent.operation == "expected_arrival"
 
     @pytest.mark.asyncio
-    async def test_explicit_short_refund_goal_cannot_be_changed_by_history_domain(self):
+    async def test_weak_arrival_question_uses_recent_return_context(self):
         router = _router("not valid JSON")
 
         intent = await router.route(
@@ -433,11 +445,11 @@ class TestRouteNormal:
             history=[{"role": "user", "content": "之前有一笔订单拒收了，正在等退款"}],
         )
 
-        assert intent.domain == "refund"
-        assert intent.operation == "expected_arrival"
+        assert intent.domain == "return"
+        assert intent.operation == "refund_dependency"
 
     @pytest.mark.asyncio
-    async def test_current_refund_goal_is_not_changed_by_history_domain_when_short(self):
+    async def test_weak_refund_status_followup_uses_recent_return_context(self):
         router = _router("not valid JSON")
 
         intent = await router.route(
@@ -445,8 +457,20 @@ class TestRouteNormal:
             history=[{"role": "user", "content": "我申请退货了，正在等仓库收货"}],
         )
 
-        assert intent.domain == "refund"
-        assert intent.operation == "expected_arrival"
+        assert intent.domain == "return"
+        assert intent.operation == "refund_dependency"
+
+    @pytest.mark.asyncio
+    async def test_weak_refund_status_followup_uses_recent_price_protection_context(self):
+        router = _router("not valid JSON")
+
+        intent = await router.route(
+            "什么时候到账",
+            history=[{"role": "assistant", "content": "价保申请已经受理，正在处理差价退款"}],
+        )
+
+        assert intent.domain == "price_protection"
+        assert intent.operation == "refund_status"
 
     @pytest.mark.asyncio
     async def test_current_refund_destination_is_not_changed_by_price_protection_history(self):
@@ -469,6 +493,28 @@ class TestRouteNormal:
         assert intent.speech_act == "CLARIFICATION_NEEDED"
         assert intent.requests == []
         assert intent.support_requests == []
+
+    @pytest.mark.asyncio
+    async def test_refund_clarification_is_safe_deterministic_noop(self):
+        router = _router("not valid JSON")
+
+        intent = await router.route("我不小心申请了退款")
+
+        assert intent.route_source == "deterministic_hint"
+        assert intent.speech_act == "CLARIFICATION_NEEDED"
+        assert intent.support_requests == []
+
+    @pytest.mark.asyncio
+    async def test_generic_delivery_hint_cannot_steal_unresolved_refund_semantics(self):
+        router = _router(
+            '{"target":"agent","speech_act":"INFORMATION_QUERY","confidence":0.95,'
+            '"domain":"refund","operation":"anomaly","requests":[{"domain":"refund","operation":"anomaly"}]}'
+        )
+
+        intent = await router.route("商家未按双方约定方式发送快递包裹，且不退款")
+
+        assert intent.route_source == "llm"
+        assert [(request.domain, request.operation) for request in intent.support_requests] == [("refund", "anomaly")]
 
     @pytest.mark.asyncio
     async def test_obvious_multi_goal_refund_expression_is_left_to_llm(self):

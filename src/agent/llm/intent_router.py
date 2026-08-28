@@ -60,6 +60,8 @@ FUTURE_INTENTION 本身不是新的业务执行授权；当前句没有明确目
 - “我刚才有一个退款”“申请的是退款”只是事实补充 → STATEMENT + requests=[]。
 - “好的，知道了”“哦，就是到仓以后退款”若是在复述/确认客服刚给出的结论 → ACKNOWLEDGEMENT + requests=[]。
 - 不得从“退款、仓库、退货”等主题词推断出疑问或动作请求；只有当前句明确提出问题或行动时才生成 request。
+- 缺少订单号、商品或其他实体只是后续核验所缺的信息，不等于 Intent 不明确。只要当前 Goal 已清楚，
+  不得因此输出 CLARIFICATION_NEEDED 或丢弃对应 request。
 
 除旧字段外，必须返回 requests 数组（最多 3 条），按客户目标的依赖顺序排列。每条 request 是
 对客户请求的候选理解，不是执行授权，格式为：
@@ -327,13 +329,14 @@ class IntentRouter:
                 # Fast-path 只能处理当前句明确是问句或动作请求的高置信表达。陈述、
                 # 复述和致谢即使包含“退款/仓库”等主题词，也必须先交由 LLM 判断
                 # speech act，不能被关键词直接升级成业务请求。
-                if not self._has_explicit_query_or_action_form(query):
+                hint_speech_act = str(support_hint.get("_speech_act", ""))
+                if hint_speech_act != "CLARIFICATION_NEEDED" and not self._has_explicit_query_or_action_form(query):
                     support_hint = None
             if support_hint is not None:
                 hint_speech_act = str(support_hint.pop("_speech_act", ""))
                 request = SupportRequest(**support_hint)
                 if self._is_valid_domain_operation(request.domain, request.operation):
-                    speech_act = hint_speech_act or self._deterministic_support_speech_act(request)
+                    speech_act = hint_speech_act or self._deterministic_support_speech_act(query)
                     return Intent(
                         target="agent",
                         query=query,
@@ -356,7 +359,11 @@ class IntentRouter:
                     request.operation,
                 )
 
-        workflow_hint = None if case_context else self._obvious_workflow_hint(query)
+        # 当当前句已经在讨论退款、但退款 fast-path 没有高置信答案时，不能让
+        # 泛化订单/物流规则凭“订单、快递、发货”等词抢走语义。交给 LLM 做细分。
+        workflow_hint = None
+        if not case_context and not self._has_refund_semantic(query):
+            workflow_hint = self._obvious_workflow_hint(query)
         if workflow_hint is not None:
             return Intent(
                 target="agent", query=query, confidence=0.98, route_source="deterministic_hint", **workflow_hint
@@ -672,20 +679,13 @@ class IntentRouter:
         return None
 
     @staticmethod
-    def _deterministic_support_speech_act(request: SupportRequest) -> str:
-        """为不经过 LLM 的高置信业务路由补充交互类型。"""
-        if request.operation == "clarify" or request.next_step == "ASK_CLARIFICATION":
-            return "CLARIFICATION_NEEDED"
-        if request.operation in {
-            "request",
-            "cancel",
-            "human_handoff",
-            "exchange",
-            "repair",
-            "refund",
-        }:
-            return "ACTION_REQUEST"
-        return "INFORMATION_QUERY"
+    def _deterministic_support_speech_act(query: str) -> str:
+        """为 fast-path 判断当前话的语气，而不是从 Goal 反推语气。
+
+        ``refund.request`` 可以来自“怎么申请退款”的信息查询，也可以来自“帮我
+        申请退款”的动作请求；二者共享 Goal，但 speech act 不同。
+        """
+        return "ACTION_REQUEST" if IntentRouter._is_explicit_action_request(query) else "INFORMATION_QUERY"
 
     @staticmethod
     def _validated_text(value: object, *, max_length: int) -> str:
@@ -819,18 +819,31 @@ class IntentRouter:
             "可以",
             "能不能",
         )
+        return any(marker in current for marker in query_markers) or IntentRouter._is_explicit_action_request(query)
+
+    @staticmethod
+    def _is_explicit_action_request(query: str) -> bool:
+        current = "".join(query.split()).lower()
         explicit_action_markers = (
             "我要退款",
             "我要申请退款",
+            "我想申请退款",
+            "我想退货退款",
             "帮我退款",
             "帮我退",
+            "帮我申请退款",
             "请退款",
             "麻烦退款",
+            "麻烦帮我申请退款",
+            "需要你们帮我发起申请退款",
+            "确认退款",
+            "只能申请退款",
             "取消退款",
             "撤销退款",
             "不想退款",
             "不要退款",
             "不退了",
+            "我不退款",
             "找人工",
             "转人工",
             "人工客服",
@@ -838,17 +851,47 @@ class IntentRouter:
             "仍需人工",
             "还是要人工",
         )
-        return any(marker in current for marker in query_markers + explicit_action_markers)
+        return any(marker in current for marker in explicit_action_markers)
+
+    @staticmethod
+    def _has_refund_semantic(query: str) -> bool:
+        """当前句已落在退款语义，但 deterministic 还不能可靠细分的保护标记。"""
+        current = "".join(query.split()).lower()
+        return any(marker in current for marker in ("退款", "退钱", "返款", "返钱", "不退款", "退款不了"))
+
+    @staticmethod
+    def _is_weak_refund_status_followup(current: str) -> bool:
+        """识别需借最近会话消歧的退款状态追问。
+
+        这些短问法只说明用户关心退款推进/到账，并未说明它是普通退款、退货回仓链路
+        还是价保退款。它们与“怎么申请”“退到哪里”等当前句即可确定的 Goal 不同。
+        """
+        return any(
+            marker in current
+            for marker in (
+                "什么时候退款",
+                "什么时候可以退款",
+                "多久退款",
+                "退款多久",
+                "退款要多久",
+                "什么时候到账",
+                "多久到账",
+                "何时到账",
+                "多久能收到",
+                "那退款呢",
+            )
+        )
 
     @staticmethod
     def _refund_route_hint(query: str, *, history: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
         """为单目标、高置信退款表达提供语言路由，不生成事实、工具或执行计划。"""
 
         current = "".join(query.split()).lower()
+        # 最近三轮仅用于弱 status follow-up 的语义消歧，绝不进入 verified facts。
         history_text = "".join(
             str(message.get("content") or "")
             for message in (history or [])[-6:]
-            if isinstance(message, dict) and message.get("role") == "user"
+            if isinstance(message, dict) and message.get("role") in {"user", "assistant"}
         )
         history_normalized = "".join(history_text.split()).lower()
         current_refund = any(marker in current for marker in ("退款", "退钱", "返款", "返钱", "退了"))
@@ -900,12 +943,17 @@ class IntentRouter:
             "价格保护",
         )
         current_operation_explicit = any(marker in current for marker in explicit_operation_markers)
+        weak_status_followup = IntentRouter._is_weak_refund_status_followup(current)
         # 语义上判断是否需要上下文消歧，而不是把“短句”直接等同于“需要上下文”。
-        # 只要当前句已经明确了退款目标，历史只能作为补充声明，不能改变 operation。
-        needs_context_resolution = (
+        # 当前明确的 request/cancel/procedure/destination/amount/eligibility 一律由当前句
+        # 决定；退款 status-family 的弱追问才允许最近会话补全其业务链路。
+        separate_order_reference = any(
+            marker in current for marker in ("另外一笔", "另一笔", "另外一个订单", "两个订单")
+        )
+        needs_context_resolution = (weak_status_followup and not separate_order_reference) or (
             not current_refund
             and not current_operation_explicit
-            and not any(marker in current for marker in ("另外一笔", "另一笔", "另外一个订单", "两个订单"))
+            and not separate_order_reference
             and (len(current) <= 12 or current.startswith(("那", "这个", "它", "然后", "所以")))
         )
         context_has_refund = "退款" in history_normalized or "退钱" in history_normalized
@@ -948,13 +996,30 @@ class IntentRouter:
             return hint("request", domain="membership")
         if any(marker in current for marker in ("没有申请退款选项", "没有退款选项", "找不到退款入口")):
             return hint("request", modifier="unavailable")
-        if any(marker in current for marker in ("不打算退", "不想退款", "不要退款", "不退了", "取消退款", "撤销退款")):
+        if any(
+            marker in current
+            for marker in ("不打算退", "不想退款", "不要退款", "不退了", "我不退款", "取消退款", "撤销退款")
+        ):
             return hint("cancel")
         if any(marker in current for marker in ("不用签收", "不用去取", "还需要签收", "自提")) and "退款" in current:
             return hint("delivery_after_refund", modifier="self_pickup")
 
         explicit_request = any(
-            marker in current for marker in ("我要退款", "我要申请退款", "帮我退款", "帮我退", "做退款处理")
+            marker in current
+            for marker in (
+                "我要退款",
+                "我要申请退款",
+                "我想申请退款",
+                "我想退货退款",
+                "帮我退款",
+                "帮我退",
+                "帮我申请退款",
+                "麻烦帮我申请退款",
+                "需要你们帮我发起申请退款",
+                "确认退款",
+                "只能申请退款",
+                "做退款处理",
+            )
         )
         if explicit_request:
             return hint("request")
