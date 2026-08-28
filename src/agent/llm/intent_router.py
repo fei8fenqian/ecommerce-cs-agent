@@ -321,20 +321,28 @@ class IntentRouter:
             if support_hint is not None:
                 hint_speech_act = str(support_hint.pop("_speech_act", ""))
                 request = SupportRequest(**support_hint)
-                speech_act = hint_speech_act or self._deterministic_support_speech_act(request)
-                return Intent(
-                    target="agent",
-                    query=query,
-                    confidence=0.98,
-                    route_source="deterministic_hint",
-                    speech_act=speech_act,
-                    domain=request.domain,
-                    operation=request.operation,
-                    goal_modifier=request.goal_modifier,
-                    state="new",
-                    next_step=request.next_step,
-                    required_tools=request.required_tools,
-                    requests=[] if speech_act in _NON_ACTIONABLE_SPEECH_ACTS | {"CLARIFICATION_NEEDED"} else [request],
+                if self._is_valid_domain_operation(request.domain, request.operation):
+                    speech_act = hint_speech_act or self._deterministic_support_speech_act(request)
+                    return Intent(
+                        target="agent",
+                        query=query,
+                        confidence=0.98,
+                        route_source="deterministic_hint",
+                        speech_act=speech_act,
+                        domain=request.domain,
+                        operation=request.operation,
+                        goal_modifier=request.goal_modifier,
+                        state="new",
+                        next_step=request.next_step,
+                        required_tools=request.required_tools,
+                        requests=[]
+                        if speech_act in _NON_ACTIONABLE_SPEECH_ACTS | {"CLARIFICATION_NEEDED"}
+                        else [request],
+                    )
+                logger.warning(
+                    "deterministic support hint 不在 canonical taxonomy: %s.%s",
+                    request.domain,
+                    request.operation,
                 )
 
         workflow_hint = None if case_context else self._obvious_workflow_hint(query)
@@ -874,9 +882,9 @@ class IntentRouter:
         if current in {"退款", "退钱"} and any(
             marker in history_normalized for marker in ("转人工", "人工客服", "需要人工", "人工")
         ):
-            return hint("human_handoff")
+            return hint("human_handoff", domain="human")
         if any(marker in current for marker in ("客服回电话", "找人工")):
-            return hint("human_handoff")
+            return hint("human_handoff", domain="human")
 
         if "会员" in current and any(marker in current for marker in ("优惠券", "权益", "会员退款")):
             return hint("request", domain="membership")

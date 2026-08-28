@@ -352,6 +352,19 @@ class TestRouteNormal:
         assert [(request.domain, request.operation) for request in intent.support_requests] == [("refund", "procedure")]
 
     @pytest.mark.asyncio
+    async def test_refund_hint_human_handoff_uses_canonical_human_goal(self):
+        router = _router("not valid JSON")
+
+        intent = await router.route("退款这件事我要找人工客服")
+
+        assert intent.route_source == "deterministic_hint"
+        assert intent.domain == "human"
+        assert intent.operation == "human_handoff"
+        assert [(request.domain, request.operation) for request in intent.support_requests] == [
+            ("human", "human_handoff")
+        ]
+
+    @pytest.mark.asyncio
     async def test_refund_progress_is_a_read_only_status_lookup_not_a_new_refund(self):
         router = _router("not valid JSON")
         intent = await router.route("我已经退了，钱怎么还没到账")
