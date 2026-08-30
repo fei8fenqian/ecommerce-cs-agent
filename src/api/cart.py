@@ -58,7 +58,7 @@ class CartCheckoutRequest(BaseModel):
 
 
 class CartCheckoutResponse(BaseModel):
-    """支付宝沙箱跳转所需的订单与地址。"""
+    """购物车支付宝沙箱二维码付款所需的订单信息。"""
 
     order_no: str
     amount_cents: int

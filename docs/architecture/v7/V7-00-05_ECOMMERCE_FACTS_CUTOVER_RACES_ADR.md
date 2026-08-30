@@ -1,7 +1,7 @@
 # V7-00-05：电商事实切换与支付库存竞态 ADR
 
 状态：架构草案，待负责人冻结
-依赖：PLAN_V7.md、S0_DECISION_RECORD.md、V7-00-01 至 V7-00-04
+依赖：[PLAN_V7.md](../../plans/PLAN_V7.md)、[S0_DECISION_RECORD.md](../../product/refund/S0_DECISION_RECORD.md)、V7-00-01 至 V7-00-04
 范围：定义 V7 canonical 电商事实、legacy 隔离、事件职责、迁移切片与支付库存竞态；不创建表、不迁移、不连接数据库、不接支付或物流。
 
 ## 1. 背景

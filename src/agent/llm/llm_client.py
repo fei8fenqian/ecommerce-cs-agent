@@ -142,6 +142,8 @@ class LLMClient:
         tools: list[dict[str, Any]] | None = None,
         temperature: float = 0.0,
         max_tokens: int = 2048,
+        extra_body: dict[str, Any] | None = None,
+        response_format: dict[str, Any] | None = None,
     ) -> LLMResponse:
         """
         异步调用 LLM，带自动重试。
@@ -183,6 +185,8 @@ class LLMClient:
                         tools=tools,
                         temperature=temperature,
                         max_tokens=max_tokens,
+                        extra_body=extra_body,
+                        response_format=response_format,
                     ),
                     timeout=self.timeout,
                 )

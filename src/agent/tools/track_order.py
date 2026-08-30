@@ -67,7 +67,7 @@ class TrackOrder(BaseTool):
             )
 
             if not orders:
-                msg = "订单不存在" if order_id else "当前没有可查询订单"
+                msg = "订单不存在" if order_id else "当前没有订单可查询"
                 return ToolResult(name=self.name, status="error", error=msg)
 
             # 单号查询返回单个订单，手机号查询返回列表

@@ -62,6 +62,11 @@ FUTURE_INTENTION 本身不是新的业务执行授权；当前句没有明确目
 - 不得从“退款、仓库、退货”等主题词推断出疑问或动作请求；只有当前句明确提出问题或行动时才生成 request。
 - 缺少订单号、商品或其他实体只是后续核验所缺的信息，不等于 Intent 不明确。只要当前 Goal 已清楚，
   不得因此输出 CLARIFICATION_NEEDED 或丢弃对应 request。
+- 用户描述退款失败、无法操作、商家拒绝处理、一直未到账或其他当前未解决的问题，即使没有问号，
+  通常也是需要解释或推进的 INFORMATION_QUERY，应输出对应 canonical request；不要把它当成普通 FYI。
+- 但如果用户只是在比较或陈述多个已经发生的结果，且没有要求解释、处理或继续推进，仍是 STATEMENT。
+  最近客服已经说明规则/时长后，用户回复“没事”“可以”“知道了”等接受性内容，仍是 ACKNOWLEDGEMENT，
+  不得因为其中出现“退款”而生成 request。
 
 除旧字段外，必须返回 requests 数组（最多 3 条），按客户目标的依赖顺序排列。每条 request 是
 对客户请求的候选理解，不是执行授权，格式为：
@@ -235,7 +240,9 @@ class Intent:
             return []
         if self.requests:
             return self.requests
-        if self.target == "agent" and self.domain and self.domain != "general":
+        # target 只是旧执行链兼容投影；合法 canonical Goal 不能因为模型把 target
+        # 误写为 rag 就丢失其 SupportRequest。
+        if self.domain and self.domain != "general" and is_canonical_goal(self.domain, self.operation or ""):
             return [
                 SupportRequest(
                     domain=self.domain,
@@ -251,7 +258,7 @@ class Intent:
     @property
     def use_workflow(self) -> bool:
         """判断是否需要进入复杂客服 Workflow，而不是普通单轮 AgentLoop。"""
-        return self.target == "agent" and (
+        return (
             any(
                 resolve_workflow({"domain": request.domain, "operation": request.operation}) is not None
                 for request in self.support_requests
@@ -330,7 +337,10 @@ class IntentRouter:
                 # 复述和致谢即使包含“退款/仓库”等主题词，也必须先交由 LLM 判断
                 # speech act，不能被关键词直接升级成业务请求。
                 hint_speech_act = str(support_hint.get("_speech_act", ""))
-                if hint_speech_act != "CLARIFICATION_NEEDED" and not self._has_explicit_query_or_action_form(query):
+                if hint_speech_act not in {
+                    "CLARIFICATION_NEEDED",
+                    "STATEMENT",
+                } and not self._has_explicit_query_or_action_form(query):
                     support_hint = None
             if support_hint is not None:
                 hint_speech_act = str(support_hint.pop("_speech_act", ""))
@@ -800,6 +810,11 @@ class IntentRouter:
         只看当前用户句，不借 history 补问句。这里宁可把隐含投诉交给 LLM，也不把
         “仓库看到东西才能退款”之类复述错误升级成查询。
         """
+        return IntentRouter._has_information_query_form(query) or IntentRouter._is_explicit_action_request(query)
+
+    @staticmethod
+    def _has_information_query_form(query: str) -> bool:
+        """判断当前句是否明确是信息查询，优先于动作短语匹配。"""
         current = "".join(query.split()).lower()
         query_markers = (
             "?",
@@ -819,29 +834,23 @@ class IntentRouter:
             "可以",
             "能不能",
         )
-        return any(marker in current for marker in query_markers) or IntentRouter._is_explicit_action_request(query)
+        return any(marker in current for marker in query_markers)
 
     @staticmethod
     def _is_explicit_action_request(query: str) -> bool:
         current = "".join(query.split()).lower()
+        # “申请退款”“能申请退款吗”等包含“请退款”字符，但语义是询问。先识别
+        # 完整问句形态，避免短 substring 把 information query 升级为写型请求。
+        if IntentRouter._has_information_query_form(query):
+            return False
+        if IntentRouter._is_explicit_refund_request(query):
+            return True
         explicit_action_markers = (
-            "我要退款",
-            "我要申请退款",
-            "我想申请退款",
-            "我想退货退款",
-            "帮我退款",
-            "帮我退",
-            "帮我申请退款",
-            "请退款",
-            "麻烦退款",
-            "麻烦帮我申请退款",
-            "需要你们帮我发起申请退款",
-            "确认退款",
-            "只能申请退款",
             "取消退款",
             "撤销退款",
             "不想退款",
             "不要退款",
+            "不要退款了",
             "不退了",
             "我不退款",
             "找人工",
@@ -852,6 +861,35 @@ class IntentRouter:
             "还是要人工",
         )
         return any(marker in current for marker in explicit_action_markers)
+
+    @staticmethod
+    def _is_explicit_refund_request(query: str) -> bool:
+        """匹配完整退款申请动作短语，不把“申请退款”里的“请退款”当作动作。"""
+        current = "".join(query.split()).lower()
+        if IntentRouter._has_information_query_form(query):
+            return False
+        request_markers = (
+            "我要退款",
+            "我要申请退款",
+            "我想退款",
+            "我想申请退款",
+            "我想退货退款",
+            "帮我退款",
+            "帮我退",
+            "帮我申请退款",
+            "麻烦帮我退款",
+            "请帮我退款",
+            "请给我退款",
+            "给我申请退款",
+            "现在帮我申请退款",
+            "麻烦退款",
+            "麻烦帮我申请退款",
+            "需要你们帮我发起申请退款",
+            "确认退款",
+            "只能申请退款",
+            "做退款处理",
+        )
+        return current.startswith("请退款") or any(marker in current for marker in request_markers)
 
     @staticmethod
     def _has_refund_semantic(query: str) -> bool:
@@ -876,6 +914,7 @@ class IntentRouter:
                 "退款要多久",
                 "什么时候到账",
                 "多久到账",
+                "多久能到账",
                 "何时到账",
                 "多久能收到",
                 "那退款呢",
@@ -965,7 +1004,7 @@ class IntentRouter:
         if needs_context_resolution:
             if any(marker in history_normalized for marker in ("价保", "保价", "价格保护", "差价")):
                 context_domain = "price_protection"
-            elif any(marker in history_normalized for marker in ("退货", "拒收", "取件", "回仓", "仓库", "退回")):
+            elif IntentRouter._has_active_return_context(history_normalized):
                 context_domain = "return"
 
         def hint(
@@ -994,7 +1033,9 @@ class IntentRouter:
 
         if "会员" in current and any(marker in current for marker in ("优惠券", "权益", "会员退款")):
             return hint("request", domain="membership")
-        if any(marker in current for marker in ("没有申请退款选项", "没有退款选项", "找不到退款入口")):
+        if any(marker in current for marker in ("没有申请退款选项", "没有退款选项", "找不到退款入口")) or (
+            "找不到" in current and "退款" in current and "申请入口" in current
+        ):
             return hint("request", modifier="unavailable")
         if any(
             marker in current
@@ -1004,24 +1045,7 @@ class IntentRouter:
         if any(marker in current for marker in ("不用签收", "不用去取", "还需要签收", "自提")) and "退款" in current:
             return hint("delivery_after_refund", modifier="self_pickup")
 
-        explicit_request = any(
-            marker in current
-            for marker in (
-                "我要退款",
-                "我要申请退款",
-                "我想申请退款",
-                "我想退货退款",
-                "帮我退款",
-                "帮我退",
-                "帮我申请退款",
-                "麻烦帮我申请退款",
-                "需要你们帮我发起申请退款",
-                "确认退款",
-                "只能申请退款",
-                "做退款处理",
-            )
-        )
-        if explicit_request:
+        if IntentRouter._is_explicit_refund_request(query):
             return hint("request")
 
         if (
@@ -1053,11 +1077,22 @@ class IntentRouter:
         if any(marker in current for marker in procedure_markers):
             return hint("procedure")
         return_dependency_markers = ("退货", "拒收", "取件", "取货", "退回", "回仓", "入库", "仓库", "收货审核")
-        if any(marker in current for marker in return_dependency_markers):
-            if context_domain == "return" or any(
-                marker in current for marker in ("什么时候", "多久", "何时", "到账", "返款", "退款")
-            ):
-                return hint("refund_dependency", domain="return")
+        return_progression_markers = (
+            "什么时候退款",
+            "什么时候可以退款",
+            "多久到账",
+            "多久退款",
+            "退款多久",
+            "退款什么时候",
+            "会自动退款",
+            "自动退款",
+            "退款怎么触发",
+            "怎么触发退款",
+        )
+        if any(marker in current for marker in return_dependency_markers) and any(
+            marker in current for marker in return_progression_markers
+        ):
+            return hint("refund_dependency", domain="return")
 
         if context_domain == "return" and any(marker in current for marker in ("什么时候", "多久", "何时", "到账")):
             return hint("refund_dependency", domain="return")
@@ -1169,6 +1204,31 @@ class IntentRouter:
         if current in {"退款", "退钱"}:
             return hint("clarify", compatibility_next_step="ASK_CLARIFICATION", speech_act="CLARIFICATION_NEEDED")
         return None
+
+    @staticmethod
+    def _has_active_return_context(history: str) -> bool:
+        """仅以已经发生的退货节点为弱 status follow-up 建立语义上下文。"""
+        return any(
+            marker in history
+            for marker in (
+                "已经拒收",
+                "已拒收",
+                "拒收了",
+                "已经退货",
+                "已退货",
+                "申请退货了",
+                "退货申请通过",
+                "商品已经退回",
+                "商品已退回",
+                "已经回仓",
+                "已回仓",
+                "仓库已经收到",
+                "仓库已收到",
+                "商家收到退货",
+                "正在退货处理中",
+                "退货处理中",
+            )
+        )
 
     @staticmethod
     def _explicit_support_request_hint(query: str) -> dict[str, Any] | None:

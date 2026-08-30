@@ -18,10 +18,13 @@ from agent.ticket_resolution import TicketResolutionAgent, TicketResolutionWorke
 from agent.tools import (
     check_after_sales,
     check_payment_status,
+    check_refund_eligibility,
     check_stock,
     compare_products,
     create_ticket,
+    query_refund_status,
     search_component,
+    search_knowledge,
     search_product,
     track_order,
 )
@@ -129,9 +132,12 @@ async def lifespan(app: FastAPI):
     intent_router = IntentRouter(intent_llm)
     registry = ToolRegistry()
     registry.register(search_product.SearchProduct())
+    registry.register(search_knowledge.SearchKnowledge())
     registry.register(check_stock.CheckStock())
     registry.register(track_order.TrackOrder())
     registry.register(check_payment_status.CheckPaymentStatus())
+    registry.register(query_refund_status.QueryRefundStatus())
+    registry.register(check_refund_eligibility.CheckRefundEligibility())
     registry.register(check_after_sales.CheckAfterSales())
     registry.register(create_ticket.CreateTicket())
     registry.register(compare_products.CompareProducts())

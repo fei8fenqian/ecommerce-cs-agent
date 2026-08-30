@@ -134,7 +134,7 @@ export interface CheckoutOrder {
 export interface CheckoutRefund {
   refund_id: string;
   order_no: string;
-  status: "PENDING_CONFIRMATION" | "PENDING_FINANCE_APPROVAL" | "PROCESSING" | "SUCCEEDED" | "FAILED" | "REJECTED";
+  status: "PENDING_CONFIRMATION" | "PENDING_MERCHANT_REVIEW" | "PENDING_FINANCE_APPROVAL" | "PROCESSING" | "SUCCEEDED" | "FAILED" | "REJECTED";
   amount_cents: number;
   currency: "CNY";
   reason: string;

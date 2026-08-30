@@ -1,6 +1,6 @@
 """checkout 退款存储的真实 PostgreSQL 验证。
 
-只能显式指向 ecommerce_agent_s3_test。测试创建完全合成的用户和交易，结束时
+只能显式指向 ecommerce_agent_refund_test。测试创建完全合成的用户和交易，结束时
 按依赖倒序删除，绝不读取或修改业务库及 legacy orders。
 """
 
@@ -12,6 +12,11 @@ import psycopg
 import pytest
 import pytest_asyncio
 
+from agent.engines.loop import LoopResult
+from agent.engines.support_workflow import SupportWorkflowAgent
+from agent.tools.query_refund_status import QueryRefundStatus
+from agent.tools.track_order import TrackOrder
+from agent.tools_registry import ToolContext, ToolRegistry
 from config import settings
 from infra.db_pool import close_pool, init_pool
 from store.checkout_refund_store import (
@@ -21,8 +26,19 @@ from store.checkout_refund_store import (
     start_customer_refund_confirmation,
 )
 
-TARGET_DATABASE = "ecommerce_agent_s3_test"
-EXPECTED_REVISION = "b4e7c2d9f601"
+TARGET_DATABASE = "ecommerce_agent_refund_test"
+EXPECTED_REVISION = "a9e4c7d2f813"
+pytestmark = pytest.mark.skipif(
+    settings.pg_dbname != TARGET_DATABASE,
+    reason=f"checkout refund integration requires {TARGET_DATABASE}",
+)
+
+
+class _WorkflowAnswerAgent:
+    """只固定最终话术，工具和状态判断仍走真实 SupportWorkflow。"""
+
+    async def run(self, query, *, context="", history=None, system_prompt_extra="", tool_context=None):
+        return LoopResult(answer="退款正在处理中，当前没有可信的预计到账时间。", total_steps=0)
 
 
 def _dsn() -> str:
@@ -193,3 +209,41 @@ async def test_refund_request_confirmation_and_success_are_atomic_and_idempotent
         assert await refund_count_cursor.fetchone() == (1,)
     finally:
         await connection.close()
+
+
+@pytest.mark.asyncio
+async def test_support_workflow_reads_real_processing_refund_and_resolves_without_eta(
+    refund_state: RefundIntegrationState,
+) -> None:
+    """真实 checkout 数据经 ToolRegistry 和 Workflow 后，处理中状态可完成查询目标。"""
+    created = await create_customer_refund_request(
+        refund_id=uuid4(),
+        customer_user_id=refund_state.customer_user_id,
+        order_no=refund_state.order_no,
+        merchant_refund_no="RFSYN-WORKFLOW-0001",
+        request_idempotency_key="request-synthetic-workflow-0001",
+        reason="合成工作流测试",
+    )
+    assert created is not None
+    started = await start_customer_refund_confirmation(
+        customer_user_id=refund_state.customer_user_id,
+        refund_id=created.refund_id,
+        confirmation_idempotency_key="confirm-synthetic-workflow-0001",
+    )
+    assert started is not None
+    assert started.refund.status == "PROCESSING"
+
+    registry = ToolRegistry()
+    registry.register(TrackOrder())
+    registry.register(QueryRefundStatus())
+    result = await SupportWorkflowAgent(_WorkflowAnswerAgent(), registry).run(
+        "我申请的退款现在到哪了？",
+        support_requests=[{"domain": "refund", "operation": "refund_status"}],
+        tool_context=ToolContext(user_id=refund_state.customer_user_id, role="customer"),
+    )
+
+    assert result.workflow_progress["goal_status"] == "resolved"
+    assert result.workflow_progress["control_state"] == "RESOLVED"
+    assert result.workflow_progress["decision_facts"]["refund_status"] == "PROCESSING"
+    assert result.workflow_progress["missing_facts"] == []
+    assert "预计到账时间" in result.answer

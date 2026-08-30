@@ -1,6 +1,6 @@
 """S3-02 Store 的真实 PostgreSQL 集成测试。
 
-运行前必须把 ``PG_DBNAME`` 指向 ``ecommerce_agent_s3_test``，并确认数据库已经
+运行前必须把 ``PG_DBNAME`` 指向 ``ecommerce_agent_s3_02_test``，并确认数据库已经
 处于 ``a7d1e8f4c902``。本文件不使用项目 conftest，也不连接业务库。
 所有测试数据使用唯一值，session fixture 结束时删除；测试过程中发生异常时，
 未提交事务由连接回滚。
@@ -64,7 +64,11 @@ from store.refund_store_types import (
 from store.refund_unit_of_work import RefundUnitOfWork
 
 EXPECTED_REVISION = "a7d1e8f4c902"
-TARGET_DATABASE = "ecommerce_agent_s3_test"
+TARGET_DATABASE = "ecommerce_agent_s3_02_test"
+pytestmark = pytest.mark.skipif(
+    settings.pg_dbname != TARGET_DATABASE,
+    reason=f"S3-02 store tests require {TARGET_DATABASE}",
+)
 
 
 def _dsn() -> str:

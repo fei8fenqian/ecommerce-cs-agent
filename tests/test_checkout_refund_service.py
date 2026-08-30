@@ -13,6 +13,7 @@ from service.checkout_refund_service import (
     RefundGatewayUnavailableError,
     approve_finance_refund,
     confirm_customer_refund,
+    generate_customer_refund_entry,
     refresh_customer_refund_status,
     reject_finance_refund_request,
     request_customer_refund,
@@ -33,6 +34,29 @@ def _refund(*, status: str = "PENDING_CONFIRMATION") -> CheckoutRefund:
         reason="不需要了",
         requested_at=datetime.now(UTC).isoformat(),
     )
+
+
+@pytest.mark.asyncio
+async def test_refund_entry_is_only_returned_after_customer_scoped_eligibility_check() -> None:
+    with patch(
+        "service.checkout_refund_service.get_customer_refund_eligibility",
+        new=AsyncMock(return_value=True),
+    ) as eligibility:
+        entry = await generate_customer_refund_entry(customer_user_id=101, order_no="SO202608250001")
+
+    assert entry == "?page=orders&refund_order=SO202608250001"
+    eligibility.assert_awaited_once_with(customer_user_id=101, order_no="SO202608250001")
+
+
+@pytest.mark.asyncio
+async def test_refund_entry_is_not_returned_when_current_customer_is_ineligible() -> None:
+    with patch(
+        "service.checkout_refund_service.get_customer_refund_eligibility",
+        new=AsyncMock(return_value=False),
+    ):
+        entry = await generate_customer_refund_entry(customer_user_id=101, order_no="SO202608250001")
+
+    assert entry is None
 
 
 @pytest.mark.asyncio

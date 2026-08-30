@@ -55,7 +55,8 @@ async def test_track_order_without_parameters_reads_current_customer_orders():
         result = await TrackOrder().execute(tool_context=ToolContext(user_id=101, role="customer"))
 
     assert result.is_success is True
-    assert result.data == {"count": 1, "orders": [order]}
+    expected_order = {**order, "delivery_state": "NOT_SHIPPED"}
+    assert result.data == {"count": 1, "orders": [expected_order], "selection_required": False}
 
 
 @pytest.mark.asyncio

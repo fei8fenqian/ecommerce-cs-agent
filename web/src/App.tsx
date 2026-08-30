@@ -58,12 +58,12 @@ import {
   sendAgentTicketMessage,
   shipFulfillment,
   signIn,
-  signOut,
   streamChat,
   updateCartItem,
 } from "./api";
 
-const STORAGE_KEY = "ecommerce-agent.auth";
+// 登录态只属于当前标签页；避免一个标签页退出时清空所有打开中的工作台。
+const STORAGE_KEY = "ecommerce-agent.tab-auth";
 
 type ChatMessage = {
   id: string;
@@ -91,15 +91,15 @@ function toChatMessages(
 
 function loadAuth(): AuthState | null {
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
+    const raw = window.sessionStorage.getItem(STORAGE_KEY);
     const auth = raw ? (JSON.parse(raw) as AuthState) : null;
     if (!auth?.token || !auth.user || isJwtExpired(auth.token)) {
-      window.localStorage.removeItem(STORAGE_KEY);
+      window.sessionStorage.removeItem(STORAGE_KEY);
       return null;
     }
     return auth;
   } catch {
-    window.localStorage.removeItem(STORAGE_KEY);
+    window.sessionStorage.removeItem(STORAGE_KEY);
     return null;
   }
 }
@@ -119,8 +119,8 @@ function isJwtExpired(token: string): boolean {
 }
 
 function saveAuth(auth: AuthState | null): void {
-  if (auth) window.localStorage.setItem(STORAGE_KEY, JSON.stringify(auth));
-  else window.localStorage.removeItem(STORAGE_KEY);
+  if (auth) window.sessionStorage.setItem(STORAGE_KEY, JSON.stringify(auth));
+  else window.sessionStorage.removeItem(STORAGE_KEY);
 }
 
 function formatDate(value: string | number): string {
@@ -163,7 +163,8 @@ export function App() {
   };
 
   const onSignOut = async (): Promise<void> => {
-    if (auth) await signOut(auth.token).catch(() => undefined);
+    // 此处是“退出当前标签页”，不撤销服务端 token，避免同一账号的其他工作标签被登出。
+    // 需要全端注销时应使用单独的“退出所有设备”命令，而不是复用本地退出按钮。
     saveAuth(null);
     returnToPublicCatalog();
     setAuth(null);
@@ -880,6 +881,7 @@ function CartPage({ auth }: { auth: AuthState }) {
     finally { setLoading(false); }
   };
   useEffect(() => { void load(); }, [auth.token]);
+
   useEffect(() => {
     const resetCheckout = (): void => setCheckingOut(false);
     window.addEventListener("pageshow", resetCheckout);
@@ -978,7 +980,7 @@ function OrderList({ auth }: { auth: AuthState }) {
 
   const checkoutLabel = (order: CheckoutOrder): string => {
     if (order.refund_status === "PENDING_CONFIRMATION") return "待确认退款";
-    if (order.refund_status === "PENDING_FINANCE_APPROVAL") return "待财务审批";
+    if (["PENDING_MERCHANT_REVIEW", "PENDING_FINANCE_APPROVAL"].includes(order.refund_status ?? "")) return "退款申请已提交";
     if (order.refund_status === "PROCESSING") return "退款处理中";
     if (order.refund_status === "SUCCEEDED" || order.status === "REFUNDED") return "已退款";
     if (order.refund_status === "FAILED") return "退款失败";
@@ -989,7 +991,7 @@ function OrderList({ auth }: { auth: AuthState }) {
   };
   const checkoutDetail = (order: CheckoutOrder): string => {
     if (order.refund_status === "PENDING_CONFIRMATION") return "请确认后提交原路全额退款";
-    if (order.refund_status === "PENDING_FINANCE_APPROVAL") return "金额或事实超出自动退款范围，已转财务审批";
+    if (["PENDING_MERCHANT_REVIEW", "PENDING_FINANCE_APPROVAL"].includes(order.refund_status ?? "")) return "商家正在核实退款申请，请留意后续结果";
     if (order.refund_status === "PROCESSING") return "已提交支付宝，正在确认退款结果";
     if (order.refund_status === "SUCCEEDED") return "退款已成功提交至原支付渠道";
     if (order.refund_status === "FAILED") return "支付宝明确拒绝退款，请联系售后";
@@ -1389,6 +1391,7 @@ function FinanceWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: () 
   const [refunds, setRefunds] = useState<FinanceRefund[]>([]);
   const [anomalies, setAnomalies] = useState<FinanceAnomaly[]>([]);
   const [summary, setSummary] = useState<FinanceAnomalySummary | null>(null);
+  const [showSummaryPage, setShowSummaryPage] = useState(false);
   const [summaryBusy, setSummaryBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -1408,6 +1411,14 @@ function FinanceWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: () 
     finally { setLoading(false); }
   };
   useEffect(() => { void load(); }, [auth.token]);
+
+  useEffect(() => {
+    const syncSummaryRoute = (): void => {
+      setShowSummaryPage(new URLSearchParams(window.location.search).get("page") === "finance-summary" && summary !== null);
+    };
+    window.addEventListener("popstate", syncSummaryRoute);
+    return () => window.removeEventListener("popstate", syncSummaryRoute);
+  }, [summary]);
 
   const decide = async (refund: FinanceRefund, action: "approve" | "reject"): Promise<void> => {
     const decisionNote = window.prompt(action === "approve" ? "审批备注（可选）" : "驳回原因（建议填写）", "") ?? "";
@@ -1440,15 +1451,71 @@ function FinanceWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: () 
 
   const generateSummary = async (): Promise<void> => {
     setSummaryBusy(true); setError(""); setSummary(null);
-    try { setSummary(await summarizeFinanceAnomalies(auth.token)); }
+    try {
+      const nextSummary = await summarizeFinanceAnomalies(auth.token);
+      setSummary(nextSummary);
+      window.history.pushState(null, "", `${window.location.pathname}?page=finance-summary`);
+      setShowSummaryPage(true);
+    }
     catch (reason) { setError(reason instanceof Error ? reason.message : "Agent 摘要暂时不可用"); }
     finally { setSummaryBusy(false); }
   };
 
+  if (showSummaryPage && summary) {
+    return <FinanceSummaryPage
+      auth={auth}
+      summary={summary}
+      anomalies={anomalies}
+      onBack={() => {
+        window.history.pushState(null, "", `${window.location.pathname}?page=finance`);
+        setShowSummaryPage(false);
+      }}
+      onSignOut={onSignOut}
+    />;
+  }
+
   return <Shell title="财务工作台" subtitle="查看退款队列和支付结果；审批、支付和退款状态变化必须经过确定性业务服务。" auth={auth} onSignOut={onSignOut}>
     <section className="metric-grid"><Metric label="退款总数" value={loading ? "—" : String(refunds.length)} /><Metric label="待处理" value={loading ? "—" : String(pending)} tone={pending ? "warning" : "normal"} /><Metric label="处理中" value={loading ? "—" : String(processing)} /><Metric label="已成功" value={loading ? "—" : String(succeeded)} /><Metric label="资金异常" value={loading ? "—" : String(anomalies.length)} tone={anomalies.length ? "danger" : "normal"} /></section>
-    <section className="panel finance-anomaly-panel"><div className="section-title"><div><p className="eyebrow">EXCEPTION QUEUE</p><h2>资金异常</h2><p className="muted">仅根据本地支付和退款事实筛选；这里不会自动改变资金状态。</p></div><button className="secondary" onClick={() => void generateSummary()} disabled={loading || summaryBusy || !anomalies.length}>{summaryBusy ? "生成中…" : "生成 Agent 摘要"}</button></div>{loading ? <p className="empty">正在扫描资金异常…</p> : anomalies.length ? <div className="finance-anomaly-list">{anomalies.map((anomaly) => <article className="finance-anomaly-row" key={`${anomaly.anomaly_type}-${anomaly.reference_id}`}><div><strong>{anomalyLabel(anomaly)}</strong><small>{anomaly.order_no} · {formatDate(anomaly.occurred_at)}</small></div><div><span className="status finance-anomaly-status">{anomaly.status}</span><strong>¥{(anomaly.amount_cents / 100).toLocaleString("zh-CN", { minimumFractionDigits: 2 })}</strong></div><p>{anomaly.reason || "需要财务核查本地事实和外部渠道状态"} · 已持续 {Math.max(1, Math.floor(anomaly.age_seconds / 60))} 分钟</p></article>)}</div> : <div className="role-empty"><div className="agent-empty-icon">✓</div><h3>当前没有资金异常</h3><p>支付和退款状态目前均在可接受范围内。</p></div>}{summary && <div className="agent-answer finance-summary"><strong>Agent 核查摘要</strong><p>{summary.summary}</p><small>基于 {summary.anomaly_count} 条扫描事实 · {formatDate(summary.generated_at)}</small></div>}</section>
+    <section className="panel finance-anomaly-panel"><div className="section-title"><div><p className="eyebrow">EXCEPTION QUEUE</p><h2>资金异常</h2><p className="muted">仅根据本地支付和退款事实筛选；这里不会自动改变资金状态。</p></div><button className="secondary" onClick={() => void generateSummary()} disabled={loading || summaryBusy || !anomalies.length}>{summaryBusy ? "生成中…" : "生成 Agent 摘要"}</button></div>{loading ? <p className="empty">正在扫描资金异常…</p> : anomalies.length ? <div className="finance-anomaly-list">{anomalies.map((anomaly) => <article className="finance-anomaly-row" key={`${anomaly.anomaly_type}-${anomaly.reference_id}`}><div><strong>{anomalyLabel(anomaly)}</strong><small>{anomaly.order_no} · {formatDate(anomaly.occurred_at)}</small></div><div><span className="status finance-anomaly-status">{anomaly.status}</span><strong>¥{(anomaly.amount_cents / 100).toLocaleString("zh-CN", { minimumFractionDigits: 2 })}</strong></div><p>{anomaly.reason || "需要财务核查本地事实和外部渠道状态"} · 已持续 {Math.max(1, Math.floor(anomaly.age_seconds / 60))} 分钟</p></article>)}</div> : <div className="role-empty"><div className="agent-empty-icon">✓</div><h3>当前没有资金异常</h3><p>支付和退款状态目前均在可接受范围内。</p></div>}</section>
     <section className="panel finance-refund-panel"><div className="section-title"><div><p className="eyebrow">REFUND QUEUE</p><h2>退款队列</h2><p className="muted">只处理进入财务审批范围的退款；金额和订单事实由服务端确定。</p></div><button className="secondary" onClick={() => void load()} disabled={loading || decisionBusy !== null}>{loading ? "读取中…" : "刷新"}</button></div>{error && <p className="error">{error}</p>}{loading ? <p className="empty">正在读取退款记录…</p> : refunds.length ? <div className="finance-refund-list">{refunds.map((refund) => <article className="finance-refund-row" key={refund.refund_id}><div><strong>{refund.order_no}</strong><small>{refund.refund_id} · {formatDate(refund.requested_at)}</small></div><div><span className={`status finance-status-${refund.status}`}>{refund.status}</span><strong>¥{(refund.amount_cents / 100).toLocaleString("zh-CN", { minimumFractionDigits: 2 })}</strong></div><p>{refund.reason || "客户未填写原因"}</p>{refund.status === "PENDING_FINANCE_APPROVAL" && <div className="finance-decision-actions"><button disabled={decisionBusy !== null} onClick={() => void decide(refund, "approve")}>批准并发起退款</button><button className="secondary" disabled={decisionBusy !== null} onClick={() => void decide(refund, "reject")}>驳回</button></div>}</article>)}</div> : <div className="role-empty"><div className="agent-empty-icon">✓</div><h3>当前没有退款记录</h3><p>客户提交退款申请后，记录会出现在这里。</p></div>}</section>
+  </Shell>;
+}
+
+function FinanceSummaryPage({
+  auth,
+  summary,
+  anomalies,
+  onBack,
+  onSignOut,
+}: {
+  auth: AuthState;
+  summary: FinanceAnomalySummary;
+  anomalies: FinanceAnomaly[];
+  onBack: () => void;
+  onSignOut: () => Promise<void>;
+}) {
+  const anomalyLabel = (anomaly: FinanceAnomaly): string => {
+    if (anomaly.anomaly_type === "REFUND_PENDING_APPROVAL") return "退款待审批";
+    if (anomaly.anomaly_type === "REFUND_FAILED") return "退款失败";
+    if (anomaly.anomaly_type === "REFUND_PROCESSING_TIMEOUT") return "退款处理超时";
+    if (anomaly.anomaly_type === "PAYMENT_PENDING_TIMEOUT") return "支付长时间未完成";
+    return "支付处理超时";
+  };
+
+  return <Shell title="资金异常 Agent 摘要" subtitle="基于本次扫描到的支付和退款事实生成；摘要不会直接改变资金状态。" auth={auth} onSignOut={onSignOut}>
+    <button className="secondary finance-summary-back" onClick={onBack}>← 返回资金异常队列</button>
+    <section className="finance-summary-page">
+      <article className="panel finance-summary-hero">
+        <p className="eyebrow">FINANCE AGENT REPORT</p>
+        <h2>本次核查摘要</h2>
+        <p className="agent-summary-text">{summary.summary}</p>
+        <small>基于 {summary.anomaly_count} 条扫描事实 · 生成于 {formatDate(summary.generated_at)}</small>
+      </article>
+      <section className="panel finance-summary-facts">
+        <div className="section-title"><div><p className="eyebrow">SOURCE FACTS</p><h2>对应异常事实</h2></div><span className="status">只读</span></div>
+        {anomalies.length ? <div className="finance-anomaly-list">{anomalies.map((anomaly) => <article className="finance-anomaly-row" key={`${anomaly.anomaly_type}-${anomaly.reference_id}`}><div><strong>{anomalyLabel(anomaly)}</strong><small>{anomaly.order_no} · {formatDate(anomaly.occurred_at)}</small></div><div><span className="status finance-anomaly-status">{anomaly.status}</span><strong>¥{(anomaly.amount_cents / 100).toLocaleString("zh-CN", { minimumFractionDigits: 2 })}</strong></div><p>{anomaly.reason || "需要财务核查本地事实和外部渠道状态"} · 已持续 {Math.max(1, Math.floor(anomaly.age_seconds / 60))} 分钟</p></article>)}</div> : <p className="empty">本次没有可展示的异常事实。</p>}
+      </section>
+    </section>
   </Shell>;
 }
 

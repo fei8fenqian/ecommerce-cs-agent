@@ -9,6 +9,7 @@ src/core/bm25.py — BM25 关键词检索
 
 import math
 from collections import Counter
+from collections.abc import Collection
 from typing import Any
 
 import jieba
@@ -22,7 +23,14 @@ class BM25Index:
         self.avglen = avglen
 
     @classmethod
-    async def build_from_db(cls, conn: AsyncConnection, table: str, text_col: str = "description"):
+    async def build_from_db(
+        cls,
+        conn: AsyncConnection,
+        table: str,
+        text_col: str = "description",
+        *,
+        source_allowlist: Collection[str] | None = None,
+    ):
         """
         从 PG 表读取文本，建 BM25 索引。
 
@@ -30,9 +38,18 @@ class BM25Index:
         table:    表名（laptop_products / knowledge_chunks）
         text_col: 文本列名（description / content）
         """
+        if source_allowlist is not None and table != "knowledge_chunks":
+            raise ValueError("source_allowlist 仅适用于 knowledge_chunks")
+
         docs: list[dict[str, Any]] = []
         total_len = 0
-        async for row in await conn.execute(f"select id,{text_col} from {table}"):
+        sql = f"select id,{text_col} from {table}"
+        params: tuple[list[str], ...] = ()
+        if source_allowlist is not None:
+            sql += " where source = any(%s)"
+            params = (sorted(source_allowlist),)
+
+        async for row in await conn.execute(sql, params):
             id, content = row
             words = jieba.lcut(content)
             tokens = Counter(words)
@@ -57,7 +74,9 @@ class BM25Index:
         idf: dict[str, float] = {}
         for word, word_docs in inverted.items():
             counts = len(word_docs)
-            idf[word] = math.log((doc_count - counts + 0.5) / (counts + 0.5))
+            # 使用始终为正的 Robertson/Sparck Jones 变体，避免常见词的负 IDF
+            # 让“未命中 score=0”的文档排在真正命中文档前面。
+            idf[word] = math.log(1 + (doc_count - counts + 0.5) / (counts + 0.5))
 
         return cls(docs, idf, avglen)
 
@@ -83,5 +102,8 @@ class BM25Index:
                 score += idf * numerator / denominator
             doc_score.append((doc["id"], score))
 
+        # BM25-only 检索只返回至少命中一个 query token 的文档；零分候选不能
+        # 因为 top_k 被填满而污染 Hybrid 的 RRF 候选集合。
+        doc_score = [(doc_id, score) for doc_id, score in doc_score if score > 0]
         doc_score.sort(key=lambda x: x[1], reverse=True)
         return doc_score[:top_k]

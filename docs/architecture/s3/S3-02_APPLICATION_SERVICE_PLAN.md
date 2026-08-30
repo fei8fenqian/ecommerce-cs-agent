@@ -4,8 +4,8 @@
 >
 > 本文只规划 S3-02。当前不修改业务代码、数据库、迁移、支付适配器或外部集成。
 >
-> 权威规则：`S0_DECISION_RECORD.md`、`S0-01_PRD_REFUND_WORKBENCH.md`、
-> `S0-02_ROLE_MATRIX_STATE_MACHINES.md`、`S0-03_API_SLO_DATA_CLASSIFICATION.md`、
+> 权威规则：[`S0_DECISION_RECORD.md`](../../product/refund/S0_DECISION_RECORD.md)、[`S0-01_PRD_REFUND_WORKBENCH.md`](../../product/refund/S0-01_PRD_REFUND_WORKBENCH.md)、
+> [`S0-02_ROLE_MATRIX_STATE_MACHINES.md`](../../product/refund/S0-02_ROLE_MATRIX_STATE_MACHINES.md)、[`S0-03_API_SLO_DATA_CLASSIFICATION.md`](../../product/refund/S0-03_API_SLO_DATA_CLASSIFICATION.md)、
 > `S3-01_DESIGN_PACKAGE.md`。
 
 ## 1. 目标与边界

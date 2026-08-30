@@ -69,6 +69,58 @@ class _FakeNoResult(BaseTool):
         return "raw string"
 
 
+class _OrderEchoTool(BaseTool):
+    """记录 Registry 最终传给订单读取工具的订单号。"""
+
+    @property
+    def name(self) -> str:
+        return "query_refund_status"
+
+    @property
+    def description(self) -> str:
+        return "test order tool"
+
+    @property
+    def parameters(self) -> dict:
+        return {"type": "object", "properties": {"order_id": {"type": "string"}}, "required": []}
+
+    async def execute(self, **kwargs):
+        return ToolResult(name=self.name, status="success", data={"order_id": kwargs.get("order_id")})
+
+
+class _MismatchedRefundTool(BaseTool):
+    """返回另一个订单的交易事实，Registry 必须拒绝绑定。"""
+
+    @property
+    def name(self) -> str:
+        return "query_refund_status"
+
+    @property
+    def description(self) -> str:
+        return "test mismatched refund tool"
+
+    @property
+    def parameters(self) -> dict:
+        return {"type": "object", "properties": {"order_id": {"type": "string"}}, "required": []}
+
+    async def execute(self, **kwargs):
+        return ToolResult(
+            name=self.name,
+            status="success",
+            data={
+                "refund_lookup": "found",
+                "refunds": [
+                    {
+                        "order_id": "SOREAL_OTHER",
+                        "refund_id": "RF-OTHER",
+                        "status": "PROCESSING",
+                        "amount_cents": 12300,
+                    }
+                ],
+            },
+        )
+
+
 # =============================================================================
 # ToolResult 单元测试
 # =============================================================================
@@ -194,6 +246,49 @@ class TestToolRegistry:
         result = await registry.execute("fake_no_result")
         assert result.is_success is True
         assert result.data["result"] == "raw string"
+
+    @pytest.mark.asyncio
+    async def test_execute_binds_selected_order_to_order_tool(self):
+        registry = ToolRegistry()
+        registry.register(_OrderEchoTool())
+
+        result = await registry.execute(
+            "query_refund_status",
+            tool_context=ToolContext(user_id=1, role="customer", selected_order_id="SOREAL_A7"),
+        )
+
+        assert result.is_success is True
+        assert result.data["order_id"] == "SOREAL_A7"
+
+    @pytest.mark.asyncio
+    async def test_execute_rejects_model_switching_selected_order(self):
+        registry = ToolRegistry()
+        registry.register(_OrderEchoTool())
+
+        result = await registry.execute(
+            "query_refund_status",
+            order_id="SOREAL_A6",
+            tool_context=ToolContext(user_id=1, role="customer", selected_order_id="SOREAL_A7"),
+        )
+
+        assert result.is_success is False
+        assert "已绑定其他订单" in result.error
+
+    @pytest.mark.asyncio
+    async def test_execute_rejects_successful_fact_for_different_returned_order(self):
+        registry = ToolRegistry()
+        registry.register(_MismatchedRefundTool())
+
+        result = await registry.execute(
+            "query_refund_status",
+            order_id="SOREAL_REQUESTED",
+            tool_context=ToolContext(user_id=1, role="customer"),
+        )
+
+        assert result.is_success is False
+        assert "订单主体无法" in result.error
+        assert result.decision_facts == {}
+        assert result.decision_contexts == []
 
     # -- to_openai_schemas ----------------------------------------------------
     def test_to_openai_schemas_empty(self):

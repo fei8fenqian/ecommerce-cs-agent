@@ -16,6 +16,7 @@ from service.checkout_refund_service import (
     RefundNotEligibleError,
     approve_finance_refund,
     confirm_customer_refund,
+    customer_visible_refund_status,
     refresh_customer_refund_status,
     reject_finance_refund_request,
     request_customer_refund,
@@ -179,6 +180,19 @@ def _refund_response(result: CustomerRefundResult) -> CheckoutRefundResponse:
     )
 
 
+def _customer_order_item(order: object) -> CheckoutOrderItem:
+    """将客户订单投影为客户可理解的退款状态，不泄露内部岗位。"""
+    values = dict(vars(order))
+    values["refund_status"] = customer_visible_refund_status(values.get("refund_status"))
+    return CheckoutOrderItem(**values)
+
+
+def _customer_refund_response(result: CustomerRefundResult) -> CheckoutRefundResponse:
+    """客户退款接口不返回内部财务审批状态。"""
+    response = _refund_response(result)
+    return response.model_copy(update={"status": customer_visible_refund_status(response.status)})
+
+
 @checkout_router.post("/orders", response_model=CheckoutSessionResponse, status_code=201)
 async def create_order(body: CreateCheckoutRequest, request: Request) -> CheckoutSessionResponse:
     """客户确认购买后创建待支付订单；不由 Agent 文本直接触发。"""
@@ -239,7 +253,7 @@ async def my_checkout_orders(request: Request) -> CheckoutOrderListResponse:
     if user["role"] != "customer":
         raise HTTPException(status_code=403, detail="只有客户可以查看支付订单")
     orders = await list_customer_checkout_orders(int(user["id"]))
-    return CheckoutOrderListResponse(orders=[CheckoutOrderItem(**order.__dict__) for order in orders])
+    return CheckoutOrderListResponse(orders=[_customer_order_item(order) for order in orders])
 
 
 @checkout_router.get("/finance/refunds", response_model=FinanceRefundListResponse)
@@ -401,7 +415,7 @@ async def refresh_payment(order_no: str, request: Request) -> CheckoutOrderItem:
     order = next((item for item in orders if item.order_no == order_no), None)
     if order is None:
         raise HTTPException(status_code=404, detail="订单不可用或无法核验")
-    return CheckoutOrderItem(**order.__dict__)
+    return _customer_order_item(order)
 
 
 @checkout_router.post("/orders/{order_no}/refunds", response_model=CheckoutRefundResponse, status_code=201)
@@ -424,7 +438,7 @@ async def request_refund(
         )
     except RefundNotEligibleError as exc:
         raise HTTPException(status_code=409, detail="该订单当前不满足退款条件") from exc
-    return _refund_response(result)
+    return _customer_refund_response(result)
 
 
 @checkout_router.post("/refunds/{refund_id}/confirm", response_model=CheckoutRefundResponse)
@@ -449,7 +463,7 @@ async def confirm_refund(
         raise HTTPException(status_code=409, detail="该退款当前不能确认") from exc
     except RefundGatewayUnavailableError as exc:
         raise HTTPException(status_code=503, detail="支付宝退款结果暂时无法确认，请稍后查看订单状态") from exc
-    return _refund_response(result)
+    return _customer_refund_response(result)
 
 
 @checkout_router.post("/refunds/{refund_id}/refresh", response_model=CheckoutRefundResponse)
@@ -469,4 +483,4 @@ async def refresh_refund(refund_id: str, request: Request) -> CheckoutRefundResp
         raise HTTPException(status_code=404, detail="退款不可用或无法核验") from exc
     except RefundGatewayUnavailableError as exc:
         raise HTTPException(status_code=503, detail="支付宝退款状态暂时无法确认，请稍后重试") from exc
-    return _refund_response(result)
+    return _customer_refund_response(result)

@@ -20,7 +20,7 @@ class SearchProduct(BaseTool):
 
     @property
     def description(self) -> str:
-        return "搜索商品参数和知识库文档。当用户询问产品规格、选购建议、售后政策时使用。"
+        return "搜索商品目录中的公开参数和规格。当用户询问商品参数、型号或选购建议时使用。"
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -30,12 +30,11 @@ class SearchProduct(BaseTool):
                 "query": {"type": "string", "description": "用户输入的搜索关键词"},
                 "table": {
                     "type": "string",
-                    "enum": ["laptop_products", "phone_products", "knowledge_chunks"],
+                    "enum": ["laptop_products", "phone_products"],
                     "default": "laptop_products",
                     "description": """根据用户问题类型选择要查询的数据库表：
                     查笔记本参数→laptop_products，
-                    查手机参数→phone_products，
-                    查售后政策/使用指南→knowledge_chunks。""",
+                    查手机参数→phone_products。售后政策和使用指南请使用 search_knowledge。""",
                 },
                 "top_k": {
                     "type": "integer",
@@ -54,6 +53,8 @@ class SearchProduct(BaseTool):
         *,
         tool_context: ToolContext | None = None,
     ) -> ToolResult:
+        if table not in {"laptop_products", "phone_products"}:
+            return ToolResult(name=self.name, status="error", error="search_product 仅支持商品目录")
         try:
             candidates: list[dict] = await hybrid_search(query, table=table, where=None, top_k=top_k)
             if not candidates:

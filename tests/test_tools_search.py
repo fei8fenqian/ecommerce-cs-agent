@@ -4,6 +4,7 @@ import pytest
 import pytest_asyncio
 
 from agent.tools.search_component import CATEGORY_MAP, SearchComponent
+from agent.tools.search_knowledge import SearchKnowledge
 from agent.tools.search_product import SearchProduct
 from agent.tools_registry import ToolResult
 from infra.db_pool import close_pool, init_pool
@@ -37,7 +38,7 @@ class TestSearchProductMeta:
         tables = tool.parameters["properties"]["table"]["enum"]
         assert "laptop_products" in tables
         assert "phone_products" in tables
-        assert "knowledge_chunks" in tables
+        assert "knowledge_chunks" not in tables
 
     def test_to_openai_schema(self):
         tool = SearchProduct()
@@ -71,9 +72,9 @@ class TestSearchProductExecute:
 
     @pytest.mark.asyncio
     async def test_search_knowledge(self, _pool):
-        """搜索知识库"""
-        tool = SearchProduct()
-        result = await tool.execute(query="退货政策", table="knowledge_chunks", top_k=5)
+        """知识搜索使用独立只读 Tool。"""
+        tool = SearchKnowledge()
+        result = await tool.execute(query="退货政策", top_k=5)
         assert isinstance(result, ToolResult)
 
     @pytest.mark.asyncio

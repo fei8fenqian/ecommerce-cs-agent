@@ -14,6 +14,7 @@ from store.checkout_refund_store import (
     CheckoutRefund,
     create_customer_refund_request,
     get_customer_checkout_refund,
+    get_customer_refund_eligibility,
     mark_checkout_refund_failed,
     mark_checkout_refund_succeeded,
     reject_finance_refund,
@@ -28,6 +29,22 @@ class RefundNotEligibleError(ValueError):
 
 class RefundConfirmationUnavailableError(ValueError):
     """退款已经完成、已失败，或确认状态发生并发变化。"""
+
+
+async def generate_customer_refund_entry(*, customer_user_id: int, order_no: str) -> str | None:
+    """返回当前客户可安全进入的退款自助页面，不创建或确认退款。
+
+    入口在服务端再次按客户和订单校验资格后才会返回。链接只进入已登录客户的
+    “我的订单”页面；真正的退款申请与资金确认仍由该页面上的受控 API 完成。
+    """
+    if not await get_customer_refund_eligibility(
+        customer_user_id=customer_user_id,
+        order_no=order_no,
+    ):
+        return None
+    # ``order_no`` 来自服务端订单事实，且 checkout 订单号只允许 SO 前缀；不接受
+    # 模型直接拼接的 URL。前端仍会按登录用户重新读取订单，不能借此跨账户操作。
+    return f"?page=orders&refund_order={order_no}"
 
 
 class RefundGatewayUnavailableError(ValueError):
@@ -50,6 +67,26 @@ class CustomerRefundResult:
     reason: str
     requested_at: str
     idempotent_replay: bool
+
+
+def customer_visible_refund_status(status: str | None) -> str | None:
+    """将退款存储/财务内部状态映射为客户和 Agent 可见的状态。
+
+    财务接口仍然使用 ``CustomerRefundResult.status`` 中的内部原值；只有
+    客户侧投影和客户 Agent 查询使用这里的映射，避免把审批岗位或支付适配器
+    的内部枚举暴露给客户。
+    """
+    if status is None:
+        return None
+    normalized = str(status).upper()
+    return {
+        "PENDING_FINANCE_APPROVAL": "PENDING_MERCHANT_REVIEW",
+        "SUCCEEDED": "COMPLETED",
+        "SUCCESS": "COMPLETED",
+        "REFUND_SUCCESS": "COMPLETED",
+        "REJECTED": "FAILED",
+        "REFUND_FAIL": "FAILED",
+    }.get(normalized, normalized)
 
 
 def _to_result(refund: CheckoutRefund, *, idempotent_replay: bool) -> CustomerRefundResult:

@@ -1,7 +1,7 @@
 # V7-00-02：Harness 运行状态、恢复与副作用契约
 
 状态：架构草案，待负责人冻结
-依赖：PLAN_V7.md、V7-00-01_AGENT_PRODUCT_TASK_CATALOG.md
+依赖：[PLAN_V7.md](../../plans/PLAN_V7.md)、[V7-00-01_AGENT_PRODUCT_TASK_CATALOG.md](V7-00-01_AGENT_PRODUCT_TASK_CATALOG.md)
 范围：冻结 AgentTask、AgentRun、RunStep、运行租约、任务级审批与暂停恢复；不实现数据库 schema、worker、工具或业务领域代码。
 
 ## 1. 原则

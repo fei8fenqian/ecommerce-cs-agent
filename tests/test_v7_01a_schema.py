@@ -11,6 +11,11 @@ import pytest
 from config import settings
 
 EXPECTED_REVISION = "d7a1c4e8b92f"
+TARGET_DATABASE = "ecommerce_agent_v7_test"
+pytestmark = pytest.mark.skipif(
+    settings.pg_dbname != TARGET_DATABASE,
+    reason=f"V7-01A schema tests require {TARGET_DATABASE}",
+)
 EXPECTED_TABLES = {
     "agent_tasks",
     "agent_runs",

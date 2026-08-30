@@ -1,6 +1,6 @@
 """面向 Web 商品目录的只读查询，不承担成交、库存扣减或价格快照职责。"""
 
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 
 from infra.db_pool import get_connection, put_connection
 from infra.product_image_catalog import product_image_urls
@@ -322,3 +322,31 @@ async def get_product_detail(category: ProductCategory, product_id: str) -> dict
         return product
     finally:
         await put_connection(connection)
+
+
+def build_public_product_context(product: Mapping[str, Any]) -> str:
+    """把详情页已展示的商品事实转换为模型可引用的受控上下文。
+
+    该内容来自当前商品 ID 的数据库读取，而不是用户粘贴的长标题或向量检索猜测；
+    不包含仓库、精确库存或内部字段。
+    """
+    price = product.get("price")
+    price_text = f"¥{price}" if isinstance(price, (int, float)) else "价格待询"
+    lines = [
+        "当前商品详情（优先依据）：",
+        f"名称：{str(product.get('product_name') or '')}",
+        f"品牌：{str(product.get('brand') or '')}",
+        f"类别：{str(product.get('product_type') or '')}",
+        f"公开价格：{price_text}",
+        f"简介：{str(product.get('description') or '')[:700]}",
+    ]
+    specifications = product.get("specifications")
+    if isinstance(specifications, list):
+        for specification in specifications[:16]:
+            if not isinstance(specification, Mapping):
+                continue
+            name = str(specification.get("name") or "").strip()
+            value = str(specification.get("value") or "").strip()
+            if name and value:
+                lines.append(f"{name}：{value}")
+    return "\n".join(lines)

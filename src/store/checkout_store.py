@@ -88,6 +88,7 @@ class CustomerCheckoutOrder:
     created_at: str
     refund_id: str | None = None
     refund_status: str | None = None
+    refund_amount_cents: int | None = None
 
 
 @dataclass(frozen=True)
@@ -671,7 +672,7 @@ async def list_customer_checkout_orders(customer_user_id: int, limit: int = 30) 
             """
             SELECT o.order_no, o.status, o.total_amount_cents, MIN(i.product_name), SUM(i.quantity),
                    p.status, f.status, f.carrier, f.tracking_number, o.created_at,
-                   r.id, r.status
+                   r.id, r.status, r.amount_cents
             FROM sales_orders AS o
             JOIN sales_order_items AS i ON i.sales_order_id = o.id
             JOIN payment_transactions AS p ON p.sales_order_id = o.id
@@ -679,7 +680,8 @@ async def list_customer_checkout_orders(customer_user_id: int, limit: int = 30) 
             LEFT JOIN checkout_refunds AS r ON r.sales_order_id = o.id
             WHERE o.customer_user_id = %s
             GROUP BY o.order_no, o.status, o.total_amount_cents, p.status,
-                     f.status, f.carrier, f.tracking_number, o.created_at, r.id, r.status
+                     f.status, f.carrier, f.tracking_number, o.created_at, r.id, r.status,
+                     r.amount_cents
             ORDER BY o.created_at DESC
             LIMIT %s
             """,
@@ -705,6 +707,7 @@ async def list_customer_checkout_orders(customer_user_id: int, limit: int = 30) 
                 created_at=str(row[9]),
                 refund_id=str(row[10]) if row[10] is not None else None,
                 refund_status=str(row[11]) if row[11] is not None else None,
+                refund_amount_cents=int(row[12]) if row[12] is not None else None,
             )
             for row in rows
         ]

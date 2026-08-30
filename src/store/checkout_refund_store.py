@@ -88,6 +88,41 @@ _REFUND_COLUMNS = """
     r.status, r.amount_cents, r.currency, r.reason, r.requested_at
 """
 
+_REFUND_ELIGIBILITY_QUERY = """
+    SELECT o.id, p.id, p.merchant_payment_no, o.total_amount_cents,
+           p.amount_cents
+    FROM sales_orders AS o
+    JOIN payment_transactions AS p ON p.sales_order_id = o.id
+    JOIN fulfillments AS f ON f.sales_order_id = o.id
+    WHERE o.customer_user_id = %s
+      AND o.order_no = %s
+      AND o.status = 'PAID'
+      AND p.status = 'SUCCEEDED'
+      AND p.currency = 'CNY'
+      AND f.status = 'PENDING_FULFILLMENT'
+      AND p.succeeded_at >= NOW() - INTERVAL '7 days'
+"""
+
+
+def _refund_row_is_eligible(row: tuple[object, ...] | None) -> bool:
+    return row is not None and int(row[3]) == int(row[4]) and int(row[3]) > 0
+
+
+async def get_customer_refund_eligibility(*, customer_user_id: int, order_no: str) -> bool:
+    """读取当前客户订单是否满足首版全额退款前置规则。
+
+    此查询仅用于 Agent 的决策事实。真实写入仍会在同一资格条件下加锁并重新校验。
+    """
+    connection = await get_connection()
+    try:
+        cursor = await connection.execute(
+            _REFUND_ELIGIBILITY_QUERY,
+            (customer_user_id, order_no),
+        )
+        return _refund_row_is_eligible(await cursor.fetchone())
+    finally:
+        await put_connection(connection)
+
 
 async def _select_refund(connection: object, refund_id: UUID) -> CheckoutRefund | None:
     """在状态更新后通过联表查询完整退款摘要。
@@ -288,25 +323,11 @@ async def create_customer_refund_request(
             return _refund_from_row(existing)
 
         cursor = await connection.execute(
-            """
-            SELECT o.id, p.id, p.merchant_payment_no, o.total_amount_cents,
-                   p.amount_cents
-            FROM sales_orders AS o
-            JOIN payment_transactions AS p ON p.sales_order_id = o.id
-            JOIN fulfillments AS f ON f.sales_order_id = o.id
-            WHERE o.customer_user_id = %s
-              AND o.order_no = %s
-              AND o.status = 'PAID'
-              AND p.status = 'SUCCEEDED'
-              AND p.currency = 'CNY'
-              AND f.status = 'PENDING_FULFILLMENT'
-              AND p.succeeded_at >= NOW() - INTERVAL '7 days'
-            FOR UPDATE OF o, p, f
-            """,
+            _REFUND_ELIGIBILITY_QUERY + " FOR UPDATE OF o, p, f",
             (customer_user_id, order_no),
         )
         eligible = await cursor.fetchone()
-        if eligible is None or int(eligible[3]) != int(eligible[4]) or int(eligible[3]) <= 0:
+        if not _refund_row_is_eligible(eligible):
             await connection.rollback()
             return None
         if status == "AUTO":

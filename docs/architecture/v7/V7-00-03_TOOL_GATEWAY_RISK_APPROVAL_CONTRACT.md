@@ -1,7 +1,7 @@
 # V7-00-03：Tool Gateway、风险与审批契约
 
 状态：架构草案，待负责人冻结
-依赖：PLAN_V7.md、V7-00-01_AGENT_PRODUCT_TASK_CATALOG.md、V7-00-02_HARNESS_RUN_STATE_CONTRACT.md
+依赖：[PLAN_V7.md](../../plans/PLAN_V7.md)、[V7-00-01_AGENT_PRODUCT_TASK_CATALOG.md](V7-00-01_AGENT_PRODUCT_TASK_CATALOG.md)、[V7-00-02_HARNESS_RUN_STATE_CONTRACT.md](V7-00-02_HARNESS_RUN_STATE_CONTRACT.md)
 范围：冻结 ToolSpec、统一网关、授权交集、风险、幂等、失败和 MCP 治理；不实现工具、网关或业务服务。
 
 ## 1. 不可违反的边界

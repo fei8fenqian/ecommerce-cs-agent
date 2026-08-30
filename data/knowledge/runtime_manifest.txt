@@ -1,0 +1,21 @@
+# 只有已完成 Source Audit 的文件会被 scripts/ingest/knowledge.py 写入 RAG。
+# 审计记录位于 docs/knowledge/sources/，不参与向量检索。
+refund_request.md
+refund_status.md
+payment_status.md
+agent_boundaries.md
+payment_process.md
+payment_failure.md
+refund_eligibility.md
+refund_limitations.md
+order_lookup.md
+order_status.md
+after_sales_process.md
+return_exchange_boundary.md
+device_safety.md
+device_troubleshooting.md
+warranty_process.md
+phone_buying_guide.md
+laptop_buying_guide.md
+trade_in_boundary.md
+customer_data_boundary.md

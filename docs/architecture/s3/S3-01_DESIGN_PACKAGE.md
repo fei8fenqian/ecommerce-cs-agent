@@ -6,11 +6,11 @@
 
 权威来源：
 
-- `S0_DECISION_RECORD.md` 的 D01–D12；
-- `S0-01_PRD_REFUND_WORKBENCH.md`；
-- `S0-02_ROLE_MATRIX_STATE_MACHINES.md`；
-- `S0-03_API_SLO_DATA_CLASSIFICATION.md`；
-- `PLAN_V6.md` 的 0.4、0.5、2.2 和 S3 任务拆分。
+- [`S0_DECISION_RECORD.md`](../../product/refund/S0_DECISION_RECORD.md) 的 D01–D12；
+- [`S0-01_PRD_REFUND_WORKBENCH.md`](../../product/refund/S0-01_PRD_REFUND_WORKBENCH.md)；
+- [`S0-02_ROLE_MATRIX_STATE_MACHINES.md`](../../product/refund/S0-02_ROLE_MATRIX_STATE_MACHINES.md)；
+- [`S0-03_API_SLO_DATA_CLASSIFICATION.md`](../../product/refund/S0-03_API_SLO_DATA_CLASSIFICATION.md)；
+- [`PLAN_V6.md`](../../plans/PLAN_V6.md) 的 0.4、0.5、2.2 和 S3 任务拆分。
 
 ## 1. 当前订单与支付事实盘点
 

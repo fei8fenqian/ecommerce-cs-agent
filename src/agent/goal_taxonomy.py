@@ -89,14 +89,19 @@ GOAL_DEFINITIONS: tuple[GoalDefinition, ...] = (
     _goal(
         "refund",
         "delivery_after_refund",
-        "退款后商品是否仍配送、是否签收或配送与退款交叉状态",
+        "退款后商品是否仍配送、是否签收或配送与退款交叉状态；不包括普通电话、客服联系或营销通知",
     ),
     _goal("refund", "destination", "退款退回哪个支付渠道或账户", "refund.destination"),
-    _goal("refund", "request", "当前明确要求申请退款", "refund.request"),
+    _goal(
+        "refund",
+        "request",
+        "成功发起退款，包括明确要求发起退款，或反馈退款申请入口不可用、无法发起但仍希望完成申请",
+        "refund.request",
+    ),
     _goal("refund", "cancel", "撤销或取消已申请的退款", "refund.cancel"),
     _goal("refund", "amount", "退款金额、部分退款、少退或金额不一致", "refund.refund_detail"),
     _goal("refund", "eligibility", "当前订单是否符合退款资格", "refund.eligibility"),
-    _goal("refund", "procedure", "如何进入退款流程或申请退款"),
+    _goal("refund", "procedure", "询问如何申请、在哪里申请、操作步骤或一般退款流程"),
     _goal("refund", "clarify", "退款话题存在但当前目标不明确"),
     _goal(
         "return",
@@ -180,9 +185,13 @@ REFUND_GOAL_ROUTING_GUIDANCE = """退款 Goal 必须按以下互斥语义选择�
 - refund.destination：问退款退到哪个支付渠道/账户。
 - refund.amount：问退款金额、部分退款、少退或金额不一致。
 - refund.eligibility：问当前订单能否退款或是否在退款期限内。
-- refund.procedure：问如何申请、退款流程；不等同“现在替我申请”。
-- refund.request：明确要求现在申请退款；refund.cancel：明确撤销已申请退款。
-- refund.delivery_after_refund：问退款后商品是否继续配送、是否还要签收等交叉状态。
+- refund.procedure：问如何申请、在哪里申请、操作步骤或一般退款流程。用户需要的是流程说明，
+  不是要求系统实际发起退款，也不是要求恢复一个当前不可用的申请入口。
+- refund.request：用户当前业务目标是成功发起退款。既可以是 ACTION_REQUEST，例如“帮我申请退款”；
+  也可以是 INFORMATION_QUERY，例如明确反馈退款入口不可用、无法发起申请，但当前仍希望完成退款。
+- refund.cancel：明确撤销已申请退款。
+- refund.delivery_after_refund：问退款后商品是否继续配送、是否还要签收等交叉状态。普通电话、客服联系、
+  营销通知或其他非物流后续交互，不能仅因发生在退款后就归入此 Goal。
 - return.refund_dependency：问退货、拒收、取件、回仓或收货审核之后，退款是否/何时触发或推进。
   只有当前句明确提到该退货节点，或当前句是省略问法且紧邻上下文已明确该节点时才使用；
   不能仅因历史出现过“退货/仓库”就把当前明确的普通退款问题改成该 Goal。

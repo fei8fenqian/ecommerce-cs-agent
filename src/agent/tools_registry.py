@@ -36,6 +36,18 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
+from agent.support_control import extract_decision_context, extract_decision_facts
+
+_SUBJECT_BOUND_TOOL_NAMES = frozenset(
+    {
+        "track_order",
+        "query_refund_status",
+        "check_refund_eligibility",
+        "check_payment_status",
+        "check_after_sales",
+    }
+)
+
 
 # =============================================================================
 # ToolResult —— 工具执行结果
@@ -51,6 +63,10 @@ class ToolResult:
     status: str  # "success" 或 "error"
     data: dict[str, Any] = field(default_factory=dict)  # 成功时放数据
     error: str = ""  # 失败时放错误信息
+    # Registry 在工具边界统一填充；调用方不需要按具体工具名重新解析 data。
+    decision_facts: dict[str, Any] = field(default_factory=dict)
+    # 每组事实保留可信订单 subject 和 current/historical provenance。
+    decision_contexts: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def is_success(self) -> bool:
@@ -85,6 +101,9 @@ class ToolContext:
     allowed_tools: frozenset[str] | None = None
     # 仅由服务端聊天编排注入；模型和客户端不能修改工单初始队列。
     ticket_queue_status: str | None = None
+    # 当前 Support Case 已经确定的订单 subject。只由服务端注入，Registry 会把它绑定到
+    # 订单读取工具，拒绝模型改查另一笔订单。
+    selected_order_id: str | None = None
 
 
 # =============================================================================
@@ -223,13 +242,74 @@ class ToolRegistry:
                 status="error",
                 error="当前流程未授予调用该工具的权限",
             )
+        if (
+            tool_context is not None
+            and tool_context.selected_order_id
+            and name
+            in {
+                "track_order",
+                "query_refund_status",
+                "check_refund_eligibility",
+                "check_payment_status",
+                "check_after_sales",
+            }
+        ):
+            bound_order_id = tool_context.selected_order_id
+            requested_order_id = kwargs.get("order_id")
+            if requested_order_id not in (None, "", bound_order_id):
+                return ToolResult(
+                    name=name,
+                    status="error",
+                    error="当前 Case 已绑定其他订单，不能改查未选择的订单",
+                )
+            kwargs["order_id"] = bound_order_id
         try:
             if tool.requires_tool_context:
                 kwargs["tool_context"] = tool_context
             result = await tool.execute(**kwargs)
             if isinstance(result, ToolResult):
+                if result.is_success:
+                    result.decision_facts = extract_decision_facts(result.name, result.data)
+                    context = extract_decision_context(
+                        result.name,
+                        result.data,
+                        requested_order_id=kwargs.get("order_id"),
+                    )
+                    if (
+                        result.name in _SUBJECT_BOUND_TOOL_NAMES
+                        and isinstance(kwargs.get("order_id"), str)
+                        and kwargs["order_id"].startswith("SO")
+                        and result.decision_facts
+                        and context is None
+                    ):
+                        return ToolResult(
+                            name=result.name,
+                            status="error",
+                            error="工具返回的订单主体无法与当前查询订单核验一致",
+                        )
+                    result.decision_contexts = [context] if context else []
                 return result
-            return ToolResult(name=name, status="success", data={"result": result})
+            wrapped = ToolResult(name=name, status="success", data={"result": result})
+            wrapped.decision_facts = extract_decision_facts(wrapped.name, wrapped.data)
+            context = extract_decision_context(
+                wrapped.name,
+                wrapped.data,
+                requested_order_id=kwargs.get("order_id"),
+            )
+            if (
+                name in _SUBJECT_BOUND_TOOL_NAMES
+                and isinstance(kwargs.get("order_id"), str)
+                and kwargs["order_id"].startswith("SO")
+                and wrapped.decision_facts
+                and context is None
+            ):
+                return ToolResult(
+                    name=name,
+                    status="error",
+                    error="工具返回的订单主体无法与当前查询订单核验一致",
+                )
+            wrapped.decision_contexts = [context] if context else []
+            return wrapped
         except Exception as e:
             return ToolResult(name=name, status="error", error=str(e))
 

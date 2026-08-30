@@ -4,6 +4,7 @@
 直接用 psycopg 连接，避免和测试文件里的连接池 fixture 冲突。
 """
 
+import os
 from pathlib import Path
 
 import psycopg
@@ -11,8 +12,9 @@ import pytest_asyncio
 
 from config import settings
 
-# 默认测试库跟随当前可演示的客服 Agent 生产迁移合并点；Harness 仍是独立、未启用分支。
-EXPECTED_SCHEMA_REVISION = "m8c5d2e9f701"
+# 测试库跟随当前客服 Agent production head；Harness 仍是独立、未启用分支。
+# 该值必须与 ``alembic heads`` 的 production head 一致，不能停留在合并点。
+EXPECTED_SCHEMA_REVISION = "a9e4c7d2f813"
 REQUIRED_TABLES = {
     "component_products",
     "knowledge_chunks",
@@ -49,7 +51,7 @@ async def _validate_schema(conn: psycopg.AsyncConnection) -> None:
         raise RuntimeError(
             "测试数据库缺少 Alembic 创建的表: "
             + ", ".join(sorted(missing_tables))
-            + "; 请先执行 PG_DBNAME=<test_db> alembic upgrade m8c5d2e9f701。"
+            + "; 请先执行 PG_DBNAME=<test_db> alembic upgrade a9e4c7d2f813。"
         )
 
     cur = await conn.execute("SELECT version_num FROM alembic_version")
@@ -164,6 +166,11 @@ async def _seed_test_data(conn: psycopg.AsyncConnection) -> None:
 @pytest_asyncio.fixture(scope="session", autouse=True)
 async def _setup_db():
     """校验迁移后的测试 schema，并插入最小测试数据。"""
+    # S3/V7 的 schema assertions 使用各自的 Alembic 分支和独立数据库，
+    # 不应被客服 Agent 的共享测试库 fixture 改写或校验。
+    if os.getenv("SKIP_SHARED_DB_SETUP") == "1":
+        yield
+        return
     dsn = _build_dsn()
     try:
         conn = await psycopg.AsyncConnection.connect(dsn)

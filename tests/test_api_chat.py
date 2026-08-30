@@ -6,6 +6,7 @@
 import asyncio
 import json
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
@@ -23,11 +24,16 @@ from agent.llm.resolve import resolve_pronouns
 from agent.tools_registry import ToolResult
 from api.chat import (
     ChatRequest,
+    _await_support_case_customer,
     _build_ticket_issue,
     _claim_chat_run,
     _entities_from_retrieval,
     _is_confirmed_human_handoff,
     _is_current_chat_run,
+    _merge_evidence_context,
+    _persist_support_case_progress,
+    _record_support_case_facts,
+    _resume_pending_case,
     _support_case_needs_customer_turn,
     chat_router,
     chat_stream,
@@ -54,7 +60,7 @@ with patch.object(tiktoken, "get_encoding", return_value=object()):
 class _MockIntentRouter:
     """总是返回 agent（走 AgentLoop，不调 hybrid_search）"""
 
-    async def route(self, query: str = "", history=None) -> Intent:
+    async def route(self, query: str = "", history=None, case_context="", knowledge_context="") -> Intent:
         return Intent(
             target="agent",
             table="",
@@ -66,7 +72,7 @@ class _MockIntentRouter:
 class _MockTicketIntentRouter:
     """将测试请求稳定路由到客户售后工单闭环。"""
 
-    async def route(self, query: str = "", history=None) -> Intent:
+    async def route(self, query: str = "", history=None, case_context="", knowledge_context="") -> Intent:
         return Intent(target="ticket", query=query, confidence=1.0)
 
 
@@ -177,6 +183,283 @@ class _MockSupportWorkflow:
         )
 
 
+def _support_case_request(service: SupportCaseService):
+    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(support_case_service=service)))
+
+
+def _support_case_fixture(status: str = "ACTIVE") -> SupportCase:
+    now = datetime.now(UTC)
+    return SupportCase(
+        case_id=uuid4(),
+        session_id=UUID("00000000-0000-0000-0000-000000000003"),
+        customer_user_id=1,
+        status=status,  # type: ignore[arg-type]
+        request_stack=[],
+        selected_subjects={},
+        verified_facts={},
+        pending={},
+        pending_command={},
+        version=1,
+        created_at=now,
+        updated_at=now,
+        completed_at=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_api_persists_normalized_agent_tool_facts_into_case():
+    service = SupportCaseService()
+    case = _support_case_fixture()
+    recorded = SupportCase(**{**case.__dict__, "verified_facts": {"refund_status": "COMPLETED"}})
+    service.record_verified_facts = AsyncMock(return_value=recorded)  # type: ignore[method-assign]
+
+    result = await _record_support_case_facts(
+        _support_case_request(service),
+        case=case,
+        loop_result=LoopResult(
+            verified_facts={"query_refund_status": {"status": "success"}},
+            decision_facts={"refund_status": "COMPLETED"},
+        ),
+    )
+
+    assert result == recorded
+    service.record_verified_facts.assert_awaited_once_with(case, facts={"refund_status": "COMPLETED"})
+
+
+@pytest.mark.asyncio
+async def test_api_uses_workflow_confirmation_boundary_not_llm_risk():
+    service = SupportCaseService()
+    case = _support_case_fixture()
+    service.await_customer = AsyncMock(return_value=case)  # type: ignore[method-assign]
+    intent = Intent(
+        target="agent",
+        requests=[
+            SupportRequest(
+                domain="after_sales",
+                operation="after_sales_transition",
+                risk="read_only",
+            )
+        ],
+    )
+
+    await _await_support_case_customer(
+        _support_case_request(service),
+        case=case,
+        intent=intent,
+        workflow_progress={
+            "goal_status": "awaiting_confirmation",
+            "next_action": "AWAITING_CONFIRMATION",
+        },
+    )
+
+    pending_command = service.await_customer.await_args.kwargs["pending_command"]
+    pending = service.await_customer.await_args.kwargs["pending"]
+    assert pending["kind"] == "customer_confirmation"
+    assert pending_command["status"] == "PROPOSED_NOT_EXECUTED"
+    assert pending_command["requires_explicit_confirmation"] is True
+    assert pending_command["risk"] == "customer_confirmation"
+
+
+@pytest.mark.asyncio
+async def test_api_does_not_propose_command_for_clarification():
+    service = SupportCaseService()
+    case = _support_case_fixture()
+    service.await_customer = AsyncMock(return_value=case)  # type: ignore[method-assign]
+    intent = Intent(
+        target="agent",
+        requests=[SupportRequest(domain="refund", operation="clarify", risk="read_only")],
+    )
+
+    await _await_support_case_customer(
+        _support_case_request(service),
+        case=case,
+        intent=intent,
+        workflow_progress={
+            "goal_status": "awaiting_customer",
+            "next_action": "ASK_CLARIFICATION",
+            "next_actor": "CUSTOMER",
+        },
+    )
+
+    assert service.await_customer.await_args.kwargs["pending"]["kind"] == "customer_clarification"
+    assert service.await_customer.await_args.kwargs["pending_command"] == {}
+
+
+@pytest.mark.asyncio
+async def test_api_persists_displayed_customer_choices_in_pending_frame():
+    service = SupportCaseService()
+    case = _support_case_fixture()
+    service.await_customer = AsyncMock(return_value=case)  # type: ignore[method-assign]
+    intent = Intent(
+        target="agent",
+        requests=[SupportRequest(domain="refund", operation="status")],
+    )
+
+    await _await_support_case_customer(
+        _support_case_request(service),
+        case=case,
+        intent=intent,
+        workflow_progress={
+            "goal_status": "awaiting_customer",
+            "next_action": "ASK_CHOICE",
+            "next_actor": "CUSTOMER",
+            "pending_choices": [
+                {"order_id": "SOREAL_A6", "product_name": "戴尔笔记本", "amount_cents": 920000},
+                {"order_id": "SOREAL_A7", "product_name": "Sony 耳机", "amount_cents": 189900},
+            ],
+        },
+    )
+
+    pending = service.await_customer.await_args.kwargs["pending"]
+    assert pending["kind"] == "customer_choice"
+    assert pending["subject_type"] == "order"
+    assert [item["order_id"] for item in pending["choices"]] == ["SOREAL_A6", "SOREAL_A7"]
+    assert service.await_customer.await_args.kwargs["pending_command"] == {}
+
+
+@pytest.mark.asyncio
+async def test_api_resolves_pending_choice_without_recreating_case():
+    case = _support_case_fixture(status="AWAITING_CUSTOMER")
+    case = SupportCase(
+        **{
+            **case.__dict__,
+            "pending": {
+                "kind": "customer_choice",
+                "subject_type": "order",
+                "choices": [
+                    {"order_id": "SOREAL_A6", "product_name": "戴尔笔记本", "amount_cents": 920000},
+                    {"order_id": "SOREAL_A7", "product_name": "Sony 耳机", "amount_cents": 189900},
+                ],
+            },
+        }
+    )
+    selected = SupportCase(
+        **{
+            **case.__dict__,
+            "status": "ACTIVE",
+            "selected_subjects": {"order_id": "SOREAL_A7"},
+            "pending": {},
+            "version": case.version + 1,
+        }
+    )
+    service = SupportCaseService()
+    service.select_customer_subject = AsyncMock(return_value=selected)  # type: ignore[method-assign]
+
+    resumed = await _resume_pending_case(
+        _support_case_request(service),
+        case=case,
+        raw_query="第二个",
+    )
+
+    assert resumed is selected
+    assert resumed.case_id == case.case_id
+    service.select_customer_subject.assert_awaited_once_with(
+        case,
+        subject={"order_id": "SOREAL_A7", "product_name": "Sony 耳机", "amount_cents": 189900},
+        selection_source="ordinal",
+    )
+
+
+@pytest.mark.asyncio
+async def test_api_keeps_case_awaiting_when_pending_choice_is_ambiguous():
+    case = _support_case_fixture(status="AWAITING_CUSTOMER")
+    case = SupportCase(
+        **{
+            **case.__dict__,
+            "pending": {
+                "kind": "customer_choice",
+                "choices": [
+                    {"order_id": "SOREAL_A6", "product_name": "戴尔笔记本", "amount_cents": 920000},
+                    {"order_id": "SOREAL_A7", "product_name": "联想笔记本", "amount_cents": 189900},
+                ],
+            },
+        }
+    )
+    service = SupportCaseService()
+    service.select_customer_subject = AsyncMock()  # type: ignore[method-assign]
+    service.resume_customer_response = AsyncMock()  # type: ignore[method-assign]
+
+    resumed = await _resume_pending_case(
+        _support_case_request(service),
+        case=case,
+        raw_query="笔记本那个",
+    )
+
+    assert resumed is case
+    service.select_customer_subject.assert_not_awaited()
+    service.resume_customer_response.assert_not_awaited()
+
+
+def test_api_does_not_treat_staff_block_as_customer_turn():
+    assert (
+        _support_case_needs_customer_turn(
+            Intent(target="agent", requests=[SupportRequest(domain="refund", operation="expected_arrival")]),
+            workflow_progress={"goal_status": "blocked", "next_actor": "STAFF"},
+        )
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_api_persists_capability_gap_for_staff_not_customer():
+    service = SupportCaseService()
+    case = _support_case_fixture()
+    service.mark_awaiting_staff = AsyncMock(return_value=case)  # type: ignore[method-assign]
+
+    await _persist_support_case_progress(
+        _support_case_request(service),
+        case=case,
+        intent=Intent(
+            target="agent",
+            requests=[SupportRequest(domain="refund", operation="expected_arrival")],
+        ),
+        loop_result=LoopResult(
+            answer="当前无法提供可信到账时间。",
+            workflow_progress={
+                "goal": "expected_arrival",
+                "goal_status": "blocked",
+                "next_action": "ESCALATE_OR_EXPLAIN",
+                "next_actor": "STAFF",
+                "reason": "capability_unavailable",
+                "unavailable_capabilities": ["query_refund_expected_arrival"],
+            },
+        ),
+    )
+
+    service.mark_awaiting_staff.assert_awaited_once()
+    assert service.mark_awaiting_staff.await_args.kwargs["reason"] == "capability_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_api_records_refund_self_service_handoff_as_completed_case_not_refund_success():
+    service = SupportCaseService()
+    case = _support_case_fixture()
+    service.record_verified_facts = AsyncMock(return_value=case)  # type: ignore[method-assign]
+    service.complete = AsyncMock(return_value=case)  # type: ignore[method-assign]
+
+    await _persist_support_case_progress(
+        _support_case_request(service),
+        case=case,
+        intent=Intent(target="agent", requests=[SupportRequest(domain="refund", operation="request")]),
+        loop_result=LoopResult(
+            answer="请在订单页提交退款申请。",
+            decision_facts={"refund_entry": "?page=orders&refund_order=SO-1"},
+            workflow_progress={
+                "goal": "request",
+                "goal_status": "resolved",
+                "next_action": "SELF_SERVICE_HANDOFF",
+                "next_actor": "NONE",
+                "resolution_type": "SELF_SERVICE_HANDOFF",
+            },
+        ),
+    )
+
+    service.complete.assert_awaited_once()
+    outcome = service.complete.await_args.kwargs["outcome"]
+    assert outcome["completion"] == "SELF_SERVICE_HANDOFF"
+    assert outcome["resolution_type"] == "SELF_SERVICE_HANDOFF"
+
+
 def test_product_retrieval_records_current_product_for_next_turn():
     assert _entities_from_retrieval(
         "laptop_products",
@@ -199,33 +482,18 @@ def test_ticket_issue_keeps_recent_customer_context():
     assert "客户售后诉求" in issue
 
 
-def test_detail_page_chat_reads_selected_product_context(client):
-    """从详情页进入客服时，模型必须拿到该商品的真实公开规格。"""
-    product = {
-        "id": "memory-1",
-        "product_name": "Pallas II DDR5 6000 32G",
-        "brand": "宏碁",
-        "price": 669.0,
-        "description": "DDR5 内存套装",
-        "product_type": "内存",
-        "specifications": [{"name": "XMP", "value": "支持 XMP 3.0"}],
-    }
-    with (
-        patch("api.chat.get_product_detail", new=AsyncMock(return_value=product)),
-        patch("api.chat.hybrid_search", new=AsyncMock(return_value=[])),
-    ):
-        response = client.post(
-            "/api/v1/chat",
-            json={
-                "query": "介绍这款商品",
-                "product_category": "components",
-                "product_id": "memory-1",
-            },
-        )
+def test_selected_product_context_is_evidence_not_route_override():
+    """详情页商品补充公开事实，但不能覆盖已识别的售后 Goal。"""
+    intent = Intent(target="agent", domain="refund", operation="status")
+    context = _merge_evidence_context(
+        "当前商品详情（优先依据）：\n名称：Pallas II DDR5 6000 32G\n支持 XMP 3.0",
+        "[知识来源: refund.md / 退款] 退款状态说明",
+    )
 
-    assert response.status_code == 200
-    assert "Pallas II DDR5 6000 32G" in client.app.state.agent.last_context
-    assert "支持 XMP 3.0" in client.app.state.agent.last_context
+    assert intent.target == "agent"
+    assert intent.domain == "refund"
+    assert "Pallas II DDR5 6000 32G" in context
+    assert "知识来源" in context
 
 
 class _MockSessionManager:
@@ -300,7 +568,9 @@ class _MockSessionManager:
 # TestClient fixture
 # =============================================================================
 @pytest.fixture
-def client():
+def client(monkeypatch):
+    # HTTP 编排测试不加载 embedding 模型或访问知识库；检索行为由独立 RAG 单测覆盖。
+    monkeypatch.setattr("api.chat._pre_route_knowledge_context", AsyncMock(return_value=""))
     app = FastAPI()
     app.add_exception_handler(StarletteHTTPException, handle_http_exceptions)
     app.add_exception_handler(RequestValidationError, handle_validation_error)
@@ -339,6 +609,25 @@ class TestChatEndpoint:
         assert data["session_id"] == "mock-session-id"
         assert data["total_steps"] == 1
         assert data["total_tokens"] == 50
+
+    @pytest.mark.asyncio
+    async def test_plain_chat_replaces_unbound_refund_transaction_claim(self, client):
+        """退款语境下没有可信订单事实时，普通出口不能透传模型交易结论。"""
+        client.app.state.agent = _MockAgentLoop(answer="我查询到您名下有两笔退款记录，一笔处理中，另一笔已完成。")
+
+        transport = httpx.ASGITransport(app=client.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+            response = await http_client.post(
+                "/api/v1/chat",
+                json={"query": "戴尔笔记本和 Sony 耳机这两件都有退款"},
+            )
+
+        assert response.status_code == 200
+        answer = response.json()["answer"]
+        assert "请提供或确认具体订单号" in answer
+        assert "处理中" not in answer
+        assert "已完成" not in answer
+        assert "两笔退款记录" not in answer
 
     @pytest.mark.asyncio
     async def test_llm_failure_returns_503_and_does_not_save_fake_answer(self, client):
@@ -466,6 +755,7 @@ class TestChatEndpoint:
         route.assert_awaited_once_with(
             "查询 微星魔影15 的实时库存",
             history=session._sessions["follow-up-session"].history,
+            knowledge_context="",
         )
 
     @pytest.mark.asyncio
@@ -528,6 +818,7 @@ class TestChatEndpoint:
         )
         service = SupportCaseService()
         service.get_active = AsyncMock(return_value=active_case)  # type: ignore[method-assign]
+        service.get_latest = AsyncMock(return_value=active_case)  # type: ignore[method-assign]
         resumed_case = SupportCase(**{**active_case.__dict__, "status": "ACTIVE", "version": 3})
         service.resume_customer_response = AsyncMock(return_value=resumed_case)  # type: ignore[method-assign]
         service.await_customer = AsyncMock(return_value=resumed_case)  # type: ignore[method-assign]
@@ -543,7 +834,7 @@ class TestChatEndpoint:
         assert route.await_args.kwargs["case_context"]
         service.resume_customer_response.assert_awaited_once_with(active_case)
         workflow_call = client.app.state.support_workflow_agent.calls[0]
-        assert workflow_call["support_requests"][0]["operation"] == "refund_request"
+        assert workflow_call["support_requests"][0]["operation"] == "request"
         assert workflow_call["support_requests"][0]["required_tools"] == ["track_order"]
 
     @pytest.mark.asyncio
@@ -675,6 +966,97 @@ class TestChatEndpoint:
 # POST /chat/stream
 # =============================================================================
 class TestChatStreamEndpoint:
+    @pytest.mark.asyncio
+    async def test_stream_refund_follow_up_never_emits_unverified_facts(self, client):
+        """跨轮退款上下文必须在任何 customer-visible token 发出前经过同一事实边界。"""
+        session = client.app.state.session
+        session._sessions["stream-refund-follow-up"] = SessionContext(
+            session_id="stream-refund-follow-up",
+            messages=[
+                {
+                    "role": "assistant",
+                    "content": "这笔退款目前还在处理中。",
+                    "_decision_facts": {"refund_status": "PROCESSING", "refund_amount": 899900},
+                    "_decision_contexts": [
+                        {
+                            "subject_type": "order",
+                            "subject_id": "SO-STREAM-A3",
+                            "provenance": "current",
+                            "source": "query_refund_status",
+                            "facts": {"refund_status": "PROCESSING", "refund_amount": 899900},
+                        }
+                    ],
+                }
+            ],
+        )
+        client.app.state.agent = _MockAgentLoop(
+            answer="退款申请已提交，目前处于平台审核处理阶段，一般需要 1-7 个工作日。"
+        )
+
+        transport = httpx.ASGITransport(app=client.app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+            response = await http_client.post(
+                "/api/v1/chat/stream",
+                json={"query": "页面上显示还在处理中", "session_id": "stream-refund-follow-up"},
+            )
+
+        assert response.status_code == 200
+        events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
+        visible_tokens = "".join(str(event.get("content") or "") for event in events if event.get("event") == "token")
+        assert "1-7 个工作日" not in visible_tokens
+        assert "平台审核" not in visible_tokens
+        assert "根据上一轮系统查询" in visible_tokens
+
+    @pytest.mark.asyncio
+    async def test_stream_subjectless_legacy_refund_facts_do_not_support_transaction_claims(self, client):
+        """SSE 不能把旧 flat metadata 当作退款事实来源。"""
+        session = client.app.state.session
+        session._sessions["stream-subjectless-legacy"] = SessionContext(
+            session_id="stream-subjectless-legacy",
+            messages=[
+                {
+                    "role": "assistant",
+                    "content": "上一轮查询结果。",
+                    "_decision_facts": {"refund_status": "PROCESSING", "refund_amount": 899900},
+                }
+            ],
+        )
+        client.app.state.agent = _MockAgentLoop(answer="根据上一轮查询，这笔退款目前还在处理中，退款金额为 ¥8999.00。")
+
+        transport = httpx.ASGITransport(app=client.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+            response = await http_client.post(
+                "/api/v1/chat/stream",
+                json={"query": "页面上显示还在处理中", "session_id": "stream-subjectless-legacy"},
+            )
+
+        assert response.status_code == 200
+        events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
+        visible_tokens = "".join(str(event.get("content") or "") for event in events if event.get("event") == "token")
+        assert "处理中" not in visible_tokens
+        assert "8999" not in visible_tokens
+        assert "请提供或确认具体订单号" in visible_tokens
+
+    @pytest.mark.asyncio
+    async def test_stream_unbound_refund_transaction_claim_is_never_emitted(self, client):
+        """首轮无 subject 的多笔退款结论不能在 SSE token 中泄露。"""
+        client.app.state.agent = _MockAgentLoop(answer="我查询到您名下有两笔退款记录，一笔处理中，另一笔已完成。")
+
+        transport = httpx.ASGITransport(app=client.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+            response = await http_client.post(
+                "/api/v1/chat/stream",
+                json={"query": "戴尔笔记本和 Sony 耳机这两件都有退款"},
+            )
+
+        assert response.status_code == 200
+        events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
+        visible_tokens = "".join(str(event.get("content") or "") for event in events if event.get("event") == "token")
+        assert "请提供或确认具体订单号" in visible_tokens
+        assert "处理中" not in visible_tokens
+        assert "已完成" not in visible_tokens
+        assert "两笔退款记录" not in visible_tokens
+
     @pytest.mark.asyncio
     async def test_refund_request_offers_self_service_before_creating_ticket(self, client):
         """普通退款申请先进入本人订单页，不应直接制造人工工单。"""

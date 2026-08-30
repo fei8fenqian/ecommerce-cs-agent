@@ -1,0 +1,3864 @@
+{
+  "evaluation_kind": "jddc_refund_intent_router_ab",
+  "model": "deepseek-chat",
+  "temperature": 0.0,
+  "pre_rag_enabled": false,
+  "pre_rag_similarity_threshold": 0.55,
+  "agent_execution": false,
+  "tool_execution": false,
+  "write_actions_executed": false,
+  "summary": {
+    "total": 100,
+    "evaluated": 100,
+    "errors": 0,
+    "retrieval_errors": 0,
+    "speech_act_accuracy": 0.77,
+    "primary_goal_accuracy": 0.30952380952380953,
+    "workflow_route_accuracy": 0.3382352941176471,
+    "clarification_accuracy": 0.94,
+    "speech_act_recall": {
+      "INFORMATION_QUERY": {
+        "correct": 59,
+        "total": 69,
+        "recall": 0.855072463768116
+      },
+      "ACTION_REQUEST": {
+        "correct": 5,
+        "total": 15,
+        "recall": 0.3333333333333333
+      },
+      "STATEMENT": {
+        "correct": 10,
+        "total": 10,
+        "recall": 1.0
+      },
+      "CLARIFICATION_NEEDED": {
+        "correct": 2,
+        "total": 2,
+        "recall": 1.0
+      },
+      "FUTURE_INTENTION": {
+        "correct": 1,
+        "total": 2,
+        "recall": 0.5
+      },
+      "ACKNOWLEDGEMENT": {
+        "correct": 0,
+        "total": 2,
+        "recall": 0.0
+      }
+    },
+    "no_business_request_accuracy": 0.9375,
+    "no_business_request_cases": 16,
+    "goal_scored_cases": 84,
+    "workflow_scored_cases": 68,
+    "request_sequence_accuracy": 0.30952380952380953,
+    "request_free_accuracy": 0.9375,
+    "route_source_distribution": {
+      "llm": 29,
+      "deterministic_hint": 66,
+      "fallback": 5
+    }
+  },
+  "results": [
+    {
+      "case_id": "jddc-refund-001-64de9927071ccfc12a7f6b727b0edead-2",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "status"
+          }
+        ],
+        "primary_goal": "refund.status",
+        "expected_workflow": "refund.refund_status",
+        "needs_clarification": false,
+        "notes": "询问退款资金/进度如何查看，归退款状态查询。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "after_sales",
+            "operation": "refund_status"
+          }
+        ],
+        "primary_goal": "after_sales.refund_status",
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "llm",
+        "confidence": 0.95,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "llm",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-002-2097a4b044633a3569f3f32287a65724-26",
+      "gold": {
+        "speech_act": "ACTION_REQUEST",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "request"
+          }
+        ],
+        "primary_goal": "refund.request",
+        "expected_workflow": "refund.request",
+        "needs_clarification": false,
+        "notes": "当前已决定申请退款，不是条件性的未来意向。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "refund",
+            "operation": "eligibility"
+          }
+        ],
+        "primary_goal": "refund.eligibility",
+        "resolved_workflow": "refund.eligibility",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": false,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-003-acfed3c9716d5dc6c205deaa6e63eaf8-23",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "procedure"
+          }
+        ],
+        "primary_goal": "refund.procedure",
+        "expected_workflow": null,
+        "needs_clarification": false,
+        "notes": "已有取消/退款处理背景，当前询问是否还需要手动点击申请。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "after_sales",
+            "operation": "execute"
+          }
+        ],
+        "primary_goal": "after_sales.execute",
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "llm",
+        "confidence": 0.9,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "llm",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-004-a5aa25e524dd51737d3c45e2c50c5864-1",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "delivery_after_refund"
+          }
+        ],
+        "primary_goal": "refund.delivery_after_refund",
+        "expected_workflow": null,
+        "needs_clarification": false,
+        "notes": "询问已退款后为何仍有后续联系，属于退款后的交互问题。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "refund",
+            "operation": "status"
+          }
+        ],
+        "primary_goal": "refund.status",
+        "resolved_workflow": "refund.refund_status",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-005-c3a0897d50800375d17ea41edb709d4e-15",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "return",
+            "operation": "refund_dependency"
+          }
+        ],
+        "primary_goal": "return.refund_dependency",
+        "expected_workflow": "return.refund_dependency",
+        "needs_clarification": false,
+        "notes": "询问拒收后是否会触发退款，属于退货/拒收与退款依赖。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "return",
+            "operation": "refund_dependency"
+          }
+        ],
+        "primary_goal": "return.refund_dependency",
+        "resolved_workflow": "return.refund_dependency",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": true,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-006-0060d47039b78c133431ce13a449aa4a-3",
+      "gold": {
+        "speech_act": "STATEMENT",
+        "expected_requests": [],
+        "primary_goal": null,
+        "expected_workflow": null,
+        "needs_clarification": false,
+        "notes": "只陈述昨天已经申请退款，没有新的查询或动作要求。"
+      },
+      "prediction": {
+        "speech_act": "STATEMENT",
+        "requests": [],
+        "primary_goal": null,
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "llm",
+        "confidence": 0.9,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "llm",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-007-d9ee36790bbafc9c62c89e2009418fc8-4",
+      "gold": {
+        "speech_act": "CLARIFICATION_NEEDED",
+        "expected_requests": [],
+        "primary_goal": null,
+        "expected_workflow": null,
+        "needs_clarification": true,
+        "notes": "只说误申请退款，无法判断是想取消、查状态还是仅陈述。"
+      },
+      "prediction": {
+        "speech_act": "CLARIFICATION_NEEDED",
+        "requests": [],
+        "primary_goal": null,
+        "resolved_workflow": null,
+        "needs_clarification": true,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-008-9685bef4c1b1eccb69d658c27e7cdc4f-10",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "eligibility"
+          }
+        ],
+        "primary_goal": "refund.eligibility",
+        "expected_workflow": "refund.eligibility",
+        "needs_clarification": false,
+        "notes": "询问当前是否可以申请退款后再购买其他商品。"
+      },
+      "prediction": {
+        "speech_act": "CLARIFICATION_NEEDED",
+        "requests": [],
+        "primary_goal": null,
+        "resolved_workflow": null,
+        "needs_clarification": true,
+        "route_source": "fallback",
+        "confidence": 0.0,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "fallback",
+      "retrieved_chunks": [],
+      "speech_act_match": false,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": false,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-009-6a483eb18144f029bf7fe2629eac6a89-14",
+      "gold": {
+        "speech_act": "ACTION_REQUEST",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "request"
+          }
+        ],
+        "primary_goal": "refund.request",
+        "expected_workflow": "refund.request",
+        "needs_clarification": false,
+        "notes": "已申请后要求客服确认/推进退款，当前 taxonomy 归并为退款申请动作。"
+      },
+      "prediction": {
+        "speech_act": "STATEMENT",
+        "requests": [],
+        "primary_goal": null,
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": false,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-010-77ae4c189382ad679e25bd4487cca298-11",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "eligibility"
+          }
+        ],
+        "primary_goal": "refund.eligibility",
+        "expected_workflow": "refund.eligibility",
+        "needs_clarification": false,
+        "notes": "询问当前订单是否还能申请退款。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "refund",
+            "operation": "eligibility"
+          }
+        ],
+        "primary_goal": "refund.eligibility",
+        "resolved_workflow": "refund.eligibility",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": true,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-011-40d96fb7e90336e1495ac4e6eaa2d135-21",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "anomaly"
+          }
+        ],
+        "primary_goal": "refund.anomaly",
+        "expected_workflow": "refund.anomaly",
+        "needs_clarification": false,
+        "notes": "取消成功后退款流程又出现重复/异常，询问异常原因。"
+      },
+      "prediction": {
+        "speech_act": "CLARIFICATION_NEEDED",
+        "requests": [],
+        "primary_goal": null,
+        "resolved_workflow": null,
+        "needs_clarification": true,
+        "route_source": "fallback",
+        "confidence": 0.0,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "fallback",
+      "retrieved_chunks": [],
+      "speech_act_match": false,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": false,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-012-d8965006d4fbc8a5304fd0fa631a0c3e-12",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "destination"
+          }
+        ],
+        "primary_goal": "refund.destination",
+        "expected_workflow": "refund.destination",
+        "needs_clarification": false,
+        "notes": "询问退款是否退回原微信支付渠道，属于退款去向。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [],
+        "primary_goal": null,
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "llm",
+        "confidence": 0.95,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "llm",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-013-44677444e48cff9d944472b7d0a55008-13",
+      "gold": {
+        "speech_act": "FUTURE_INTENTION",
+        "expected_requests": [],
+        "primary_goal": null,
+        "expected_workflow": null,
+        "needs_clarification": false,
+        "notes": "表示等不及才会申请退款，当前没有要求执行退款。"
+      },
+      "prediction": {
+        "speech_act": "STATEMENT",
+        "requests": [],
+        "primary_goal": null,
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": false,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-014-6b31c44380b0dc795e1e0fb26b221128-2",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "return",
+            "operation": "refund_dependency"
+          }
+        ],
+        "primary_goal": "return.refund_dependency",
+        "expected_workflow": "return.refund_dependency",
+        "needs_clarification": false,
+        "notes": "明确询问拒收后何时退款。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "return",
+            "operation": "refund_dependency"
+          }
+        ],
+        "primary_goal": "return.refund_dependency",
+        "resolved_workflow": "return.refund_dependency",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": true,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-015-82eb536529ff68e37041488fe67bf0bf-9",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "anomaly"
+          },
+          {
+            "domain": "delivery",
+            "operation": "track_order"
+          }
+        ],
+        "primary_goal": "refund.anomaly",
+        "expected_workflow": "refund.anomaly",
+        "needs_clarification": false,
+        "notes": "同时反映退款失败和长期不发货两个当前问题，主目标为退款异常。"
+      },
+      "prediction": {
+        "speech_act": "CLARIFICATION_NEEDED",
+        "requests": [],
+        "primary_goal": null,
+        "resolved_workflow": null,
+        "needs_clarification": true,
+        "route_source": "fallback",
+        "confidence": 0.0,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "fallback",
+      "retrieved_chunks": [],
+      "speech_act_match": false,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": false,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-016-4fdccf79dcaf66b42d8ccdc501f3b7c3-0",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "eligibility"
+          }
+        ],
+        "primary_goal": "refund.eligibility",
+        "expected_workflow": "refund.eligibility",
+        "needs_clarification": false,
+        "notes": "询问是否可以退款后重新购买。"
+      },
+      "prediction": {
+        "speech_act": "CLARIFICATION_NEEDED",
+        "requests": [],
+        "primary_goal": null,
+        "resolved_workflow": null,
+        "needs_clarification": true,
+        "route_source": "llm",
+        "confidence": 0.5,
+        "goal_modifier": "",
+        "ambiguities": [
+          "退款对象不明确",
+          "从拍么你含义不明确"
+        ]
+      },
+      "route_source": "llm",
+      "retrieved_chunks": [],
+      "speech_act_match": false,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": false,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-017-21d8f4c0633b929f545fd0f9545ff478-8",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "expected_arrival"
+          }
+        ],
+        "primary_goal": "refund.expected_arrival",
+        "expected_workflow": "refund.expected_arrival",
+        "needs_clarification": false,
+        "notes": "询问退款资金多久退回。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "return",
+            "operation": "refund_dependency"
+          }
+        ],
+        "primary_goal": "return.refund_dependency",
+        "resolved_workflow": "return.refund_dependency",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-018-184dfc73dea31ab9b5d6b0cb5df1014e-13",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "request"
+          }
+        ],
+        "primary_goal": "refund.request",
+        "expected_workflow": "refund.request",
+        "needs_clarification": false,
+        "notes": "结合上下文是在反馈退款入口不可用，继续询问如何进入退款申请。"
+      },
+      "prediction": {
+        "speech_act": "ACTION_REQUEST",
+        "requests": [
+          {
+            "domain": "refund",
+            "operation": "request"
+          }
+        ],
+        "primary_goal": "refund.request",
+        "resolved_workflow": "refund.request",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "unavailable",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": false,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": true,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-019-ed9970cacc8962dfa46e6b54806c2622-5",
+      "gold": {
+        "speech_act": "STATEMENT",
+        "expected_requests": [],
+        "primary_goal": null,
+        "expected_workflow": null,
+        "needs_clarification": false,
+        "notes": "只解释因地址写错而已经申请退款，没有新的请求。"
+      },
+      "prediction": {
+        "speech_act": "STATEMENT",
+        "requests": [],
+        "primary_goal": null,
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "llm",
+        "confidence": 0.85,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "llm",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-020-90358b0a4c6085c2caa0c4fcea4aed2b-21",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "return",
+            "operation": "refund_dependency"
+          }
+        ],
+        "primary_goal": "return.refund_dependency",
+        "expected_workflow": "return.refund_dependency",
+        "needs_clarification": false,
+        "notes": "询问拒收后是否自动退款。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "return",
+            "operation": "refund_dependency"
+          }
+        ],
+        "primary_goal": "return.refund_dependency",
+        "resolved_workflow": "return.refund_dependency",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": true,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-021-0242c46f210bfffc495b2997347a9006-14",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "eligibility"
+          }
+        ],
+        "primary_goal": "refund.eligibility",
+        "expected_workflow": "refund.eligibility",
+        "needs_clarification": false,
+        "notes": "询问该订单为什么不能申请退款，核心是退款资格。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "refund",
+            "operation": "eligibility"
+          }
+        ],
+        "primary_goal": "refund.eligibility",
+        "resolved_workflow": "refund.eligibility",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": true,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-022-022699b2ae1b620de219463736340e01-3",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "expected_arrival"
+          }
+        ],
+        "primary_goal": "refund.expected_arrival",
+        "expected_workflow": "refund.expected_arrival",
+        "needs_clarification": false,
+        "notes": "询问已取消订单的退款何时到账。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "refund",
+            "operation": "expected_arrival"
+          }
+        ],
+        "primary_goal": "refund.expected_arrival",
+        "resolved_workflow": "refund.expected_arrival",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": true,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-023-07ca8a5890bb54a2ed19497e34bcf604-0",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "anomaly"
+          },
+          {
+            "domain": "refund",
+            "operation": "delivery_after_refund"
+          }
+        ],
+        "primary_goal": "refund.anomaly",
+        "expected_workflow": "refund.anomaly",
+        "needs_clarification": false,
+        "notes": "同时担心退款长时间无进展及旧订单仍继续配送，主目标为退款异常。"
+      },
+      "prediction": {
+        "speech_act": "CLARIFICATION_NEEDED",
+        "requests": [],
+        "primary_goal": null,
+        "resolved_workflow": null,
+        "needs_clarification": true,
+        "route_source": "fallback",
+        "confidence": 0.0,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "fallback",
+      "retrieved_chunks": [],
+      "speech_act_match": false,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": false,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-024-91b6ac4e4dc87aebf8de51ccb6d4d069-5",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "delivery_after_refund"
+          }
+        ],
+        "primary_goal": "refund.delivery_after_refund",
+        "expected_workflow": null,
+        "needs_clarification": false,
+        "notes": "已申请退款但订单又发货，询问退款与配送交叉状态如何处理。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "refund",
+            "operation": "procedure"
+          }
+        ],
+        "primary_goal": "refund.procedure",
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-025-a90af000233f400fa909f866b0bd0679-0",
+      "gold": {
+        "speech_act": "CLARIFICATION_NEEDED",
+        "expected_requests": [],
+        "primary_goal": null,
+        "expected_workflow": null,
+        "needs_clarification": true,
+        "notes": "只有“退款”一个词，无法确定是申请、状态、到账还是其他目标。"
+      },
+      "prediction": {
+        "speech_act": "CLARIFICATION_NEEDED",
+        "requests": [],
+        "primary_goal": null,
+        "resolved_workflow": null,
+        "needs_clarification": true,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-026-0282d9d37b431314f36721a39f9eb26d-22",
+      "gold": {
+        "speech_act": "ACTION_REQUEST",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "cancel"
+          }
+        ],
+        "primary_goal": "refund.cancel",
+        "expected_workflow": "refund.cancel",
+        "needs_clarification": false,
+        "notes": "明确要求系统记录已正常签收、不再退款，归为取消退款意图。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "refund",
+            "operation": "delivery_after_refund"
+          }
+        ],
+        "primary_goal": "refund.delivery_after_refund",
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": false,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-027-1df8178e2bfb22e34ddc4e403bac8660-6",
+      "gold": {
+        "speech_act": "FUTURE_INTENTION",
+        "expected_requests": [],
+        "primary_goal": null,
+        "expected_workflow": null,
+        "needs_clarification": false,
+        "notes": "退款以超过日期为条件，当前只是未来意向。"
+      },
+      "prediction": {
+        "speech_act": "FUTURE_INTENTION",
+        "requests": [],
+        "primary_goal": null,
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "llm",
+        "confidence": 0.7,
+        "goal_modifier": "",
+        "ambiguities": [
+          "delivery_deadline_unconfirmed",
+          "refund_condition_unconfirmed"
+        ]
+      },
+      "route_source": "llm",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-028-3ccb012291a7cbc9b687b506e7c22046-0",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "return",
+            "operation": "refund_dependency"
+          }
+        ],
+        "primary_goal": "return.refund_dependency",
+        "expected_workflow": "return.refund_dependency",
+        "needs_clarification": false,
+        "notes": "明确拒收退货后询问何时退款。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "return",
+            "operation": "refund_dependency"
+          }
+        ],
+        "primary_goal": "return.refund_dependency",
+        "resolved_workflow": "return.refund_dependency",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": true,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-029-a44ad8ef4bd448390901c13790174957-0",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "procedure"
+          }
+        ],
+        "primary_goal": "refund.procedure",
+        "expected_workflow": null,
+        "needs_clarification": false,
+        "notes": "商品已拒收并到商家，当前问如何申请退款。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "refund",
+            "operation": "procedure"
+          }
+        ],
+        "primary_goal": "refund.procedure",
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-030-f2d070017199a568323d7bffcd11f5c5-10",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "price_protection",
+            "operation": "refund_status"
+          }
+        ],
+        "primary_goal": "price_protection.refund_status",
+        "expected_workflow": "price_protection.refund_status",
+        "needs_clarification": false,
+        "notes": "上下文是价保返款，询问该金额是否为价保退款。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "after_sales",
+            "operation": "refund_status"
+          }
+        ],
+        "primary_goal": "after_sales.refund_status",
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "llm",
+        "confidence": 0.92,
+        "goal_modifier": "",
+        "ambiguities": [
+          "退款金额是否与[金额x]一致"
+        ]
+      },
+      "route_source": "llm",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-031-9d6bf21e6110c4cc10e25a6c5d7b8673-2",
+      "gold": {
+        "speech_act": "ACTION_REQUEST",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "cancel"
+          }
+        ],
+        "primary_goal": "refund.cancel",
+        "expected_workflow": "refund.cancel",
+        "needs_clarification": false,
+        "notes": "明确要求取消误点的退款申请。"
+      },
+      "prediction": {
+        "speech_act": "ACTION_REQUEST",
+        "requests": [
+          {
+            "domain": "refund",
+            "operation": "cancel"
+          }
+        ],
+        "primary_goal": "refund.cancel",
+        "resolved_workflow": "refund.cancel",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": true,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-032-61d7ca64ee912beebcceaa2854e14ec1-6",
+      "gold": {
+        "speech_act": "ACTION_REQUEST",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "request"
+          }
+        ],
+        "primary_goal": "refund.request",
+        "expected_workflow": "refund.request",
+        "needs_clarification": false,
+        "notes": "明确想退货退款，当前核心动作是发起退款。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "return",
+            "operation": "refund_dependency"
+          }
+        ],
+        "primary_goal": "return.refund_dependency",
+        "resolved_workflow": "return.refund_dependency",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": false,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-033-57b8d1eaf6ba12a713bfae1428259cb1-21",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "destination"
+          }
+        ],
+        "primary_goal": "refund.destination",
+        "expected_workflow": "refund.destination",
+        "needs_clarification": false,
+        "notes": "询问白条退款去向。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "refund",
+            "operation": "destination"
+          }
+        ],
+        "primary_goal": "refund.destination",
+        "resolved_workflow": "refund.destination",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": true,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-034-528e3ea32afe221f5ab98de00c38b54b-8",
+      "gold": {
+        "speech_act": "ACTION_REQUEST",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "request"
+          }
+        ],
+        "primary_goal": "refund.request",
+        "expected_workflow": "refund.request",
+        "needs_clarification": false,
+        "notes": "明确表示现在想申请退款。"
+      },
+      "prediction": {
+        "speech_act": "STATEMENT",
+        "requests": [],
+        "primary_goal": null,
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": false,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-035-8b20a26632acf30176beaad86dfabcb7-23",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "general",
+            "operation": "answer"
+          }
+        ],
+        "primary_goal": "general.answer",
+        "expected_workflow": null,
+        "needs_clarification": false,
+        "notes": "核心问题是退款后优惠券能否再次使用，当前 taxonomy 无专门退款子操作，归一般规则问答。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "order",
+            "operation": "track_order"
+          }
+        ],
+        "primary_goal": "order.track_order",
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-036-9ff211391bd6ea8baf90704038dea5d2-14",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "destination"
+          }
+        ],
+        "primary_goal": "refund.destination",
+        "expected_workflow": "refund.destination",
+        "needs_clarification": false,
+        "notes": "询问分期/白条退款如何抵充，核心是退款去向。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "after_sales",
+            "operation": "refund_status"
+          }
+        ],
+        "primary_goal": "after_sales.refund_status",
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "llm",
+        "confidence": 0.85,
+        "goal_modifier": "",
+        "ambiguities": [
+          "x月具体月份不明确",
+          "分期抵充的具体含义不明确"
+        ]
+      },
+      "route_source": "llm",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-037-e39502010e3e9e7ac5bb39f641ebaa16-15",
+      "gold": {
+        "speech_act": "ACTION_REQUEST",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "cancel"
+          }
+        ],
+        "primary_goal": "refund.cancel",
+        "expected_workflow": "refund.cancel",
+        "needs_clarification": false,
+        "notes": "上下文正准备取消订单退款，用户明确表示不退款。"
+      },
+      "prediction": {
+        "speech_act": "STATEMENT",
+        "requests": [],
+        "primary_goal": null,
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "llm",
+        "confidence": 0.9,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "llm",
+      "retrieved_chunks": [],
+      "speech_act_match": false,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-038-4b3298b1e0e6896eae75a1f3b81675f6-2",
+      "gold": {
+        "speech_act": "STATEMENT",
+        "expected_requests": [],
+        "primary_goal": null,
+        "expected_workflow": null,
+        "needs_clarification": false,
+        "notes": "只陈述这个包已经申请退款，没有新的查询或动作要求。"
+      },
+      "prediction": {
+        "speech_act": "STATEMENT",
+        "requests": [],
+        "primary_goal": null,
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-039-fdada1b79e97b69b447c5d156a2d8975-15",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "product",
+            "operation": "answer"
+          }
+        ],
+        "primary_goal": "product.answer",
+        "expected_workflow": null,
+        "needs_clarification": false,
+        "notes": "“软件返钱”是商品/活动性质问题，不是订单退款状态。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [],
+        "primary_goal": null,
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "llm",
+        "confidence": 0.9,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "llm",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-040-f77876d0c14d486d017c3b43cde7fd1c-17",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "procedure"
+          }
+        ],
+        "primary_goal": "refund.procedure",
+        "expected_workflow": null,
+        "needs_clarification": false,
+        "notes": "询问在哪里进行退款申请。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [],
+        "primary_goal": null,
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "llm",
+        "confidence": 0.9,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "llm",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-041-dad569c5b41f1cff1dd0c27f3e4223a9-5",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "procedure"
+          }
+        ],
+        "primary_goal": "refund.procedure",
+        "expected_workflow": null,
+        "needs_clarification": false,
+        "notes": "因订单颜色无法修改，询问是否只能退款后重拍。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "refund",
+            "operation": "eligibility"
+          }
+        ],
+        "primary_goal": "refund.eligibility",
+        "resolved_workflow": "refund.eligibility",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-042-1313a59fd1595cf9bee0a10212c33018-15",
+      "gold": {
+        "speech_act": "ACTION_REQUEST",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "request"
+          }
+        ],
+        "primary_goal": "refund.request",
+        "expected_workflow": "refund.request",
+        "needs_clarification": false,
+        "notes": "明确要求客服代为发起退款，再重新下单。"
+      },
+      "prediction": {
+        "speech_act": "STATEMENT",
+        "requests": [],
+        "primary_goal": null,
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": false,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-043-98d15e46236e4dc81d90185f13dcbc07-2",
+      "gold": {
+        "speech_act": "STATEMENT",
+        "expected_requests": [],
+        "primary_goal": null,
+        "expected_workflow": null,
+        "needs_clarification": false,
+        "notes": "只说刚才有一个退款，没有说明要查什么或做什么。"
+      },
+      "prediction": {
+        "speech_act": "STATEMENT",
+        "requests": [],
+        "primary_goal": null,
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "llm",
+        "confidence": 0.6,
+        "goal_modifier": "",
+        "ambiguities": [
+          "退款对象不明确",
+          "退款状态不明确"
+        ]
+      },
+      "route_source": "llm",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-044-3eee073a5d3eb06d1c991ff1579c48e3-13",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "amount"
+          }
+        ],
+        "primary_goal": "refund.amount",
+        "expected_workflow": "refund.refund_detail",
+        "needs_clarification": false,
+        "notes": "询问退货退款具体哪些金额可以返还。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "return",
+            "operation": "refund_dependency"
+          }
+        ],
+        "primary_goal": "return.refund_dependency",
+        "resolved_workflow": "return.refund_dependency",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-045-5c16e2f699210882c0de424b9314cb60-1",
+      "gold": {
+        "speech_act": "STATEMENT",
+        "expected_requests": [],
+        "primary_goal": null,
+        "expected_workflow": null,
+        "needs_clarification": false,
+        "notes": "对两笔退款到账速度作陈述，没有提出新的问题或动作。"
+      },
+      "prediction": {
+        "speech_act": "STATEMENT",
+        "requests": [],
+        "primary_goal": null,
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "llm",
+        "confidence": 0.85,
+        "goal_modifier": "",
+        "ambiguities": [
+          "未指明是哪一笔退款未入账"
+        ]
+      },
+      "route_source": "llm",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-046-9b900aecadfe0d638b54de134d7be565-3",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "request"
+          }
+        ],
+        "primary_goal": "refund.request",
+        "expected_workflow": "refund.request",
+        "needs_clarification": false,
+        "notes": "反馈某订单无法进入退款申请，隐含当前需要处理退款入口问题。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "refund",
+            "operation": "eligibility"
+          }
+        ],
+        "primary_goal": "refund.eligibility",
+        "resolved_workflow": "refund.eligibility",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-047-d593969f8657d93b0f92c25b5e7f6a32-5",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "procedure"
+          }
+        ],
+        "primary_goal": "refund.procedure",
+        "expected_workflow": null,
+        "needs_clarification": false,
+        "notes": "明确询问退款如何操作。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "refund",
+            "operation": "procedure"
+          }
+        ],
+        "primary_goal": "refund.procedure",
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-048-e764eec590adff38291a6a6dd0780513-7",
+      "gold": {
+        "speech_act": "ACTION_REQUEST",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "request"
+          }
+        ],
+        "primary_goal": "refund.request",
+        "expected_workflow": "refund.request",
+        "needs_clarification": false,
+        "notes": "在缺货背景下明确决定退款。"
+      },
+      "prediction": {
+        "speech_act": "ACTION_REQUEST",
+        "requests": [
+          {
+            "domain": "after_sales",
+            "operation": "refund_request"
+          }
+        ],
+        "primary_goal": "after_sales.refund_request",
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "llm",
+        "confidence": 0.95,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "llm",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-049-469dfd25ac0b23115e55da863e932f7b-2",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "return",
+            "operation": "refund_dependency"
+          }
+        ],
+        "primary_goal": "return.refund_dependency",
+        "expected_workflow": "return.refund_dependency",
+        "needs_clarification": false,
+        "notes": "订单已退回，当前问何时退款，属于回仓与退款依赖。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "refund",
+            "operation": "expected_arrival"
+          }
+        ],
+        "primary_goal": "refund.expected_arrival",
+        "resolved_workflow": "refund.expected_arrival",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-050-a48bfadb049be451f3b755ec082cac43-13",
+      "gold": {
+        "speech_act": "STATEMENT",
+        "expected_requests": [],
+        "primary_goal": null,
+        "expected_workflow": null,
+        "needs_clarification": false,
+        "notes": "补充说明此前退款曾被第三方商家关闭，当前没有新的明确问题或动作。"
+      },
+      "prediction": {
+        "speech_act": "STATEMENT",
+        "requests": [],
+        "primary_goal": null,
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-051-333fdd391180fb45a71ef18d395b8b79-2",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "processing_time"
+          }
+        ],
+        "primary_goal": "refund.processing_time",
+        "expected_workflow": "refund.processing_time",
+        "needs_clarification": false,
+        "notes": "询问退款审核为何仍未完成，核心是审核处理时长。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "order",
+            "operation": "track_order"
+          }
+        ],
+        "primary_goal": "order.track_order",
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-052-b398a259e88f960b46b89897c2662599-3",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "after_sales",
+            "operation": "return_logistics"
+          }
+        ],
+        "primary_goal": "after_sales.return_logistics",
+        "expected_workflow": "after_sales.return_logistics",
+        "needs_clarification": false,
+        "notes": "已提交退货退款，当前询问寄回方式为何从自行发货变为上门取件。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "return",
+            "operation": "refund_dependency"
+          }
+        ],
+        "primary_goal": "return.refund_dependency",
+        "resolved_workflow": "return.refund_dependency",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-053-d4e149a321e8c02e9d06e5c0bc08ef19-2",
+      "gold": {
+        "speech_act": "ACTION_REQUEST",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "cancel"
+          }
+        ],
+        "primary_goal": "refund.cancel",
+        "expected_workflow": "refund.cancel",
+        "needs_clarification": false,
+        "notes": "明确表示不退货并询问如何取消退款，核心是取消退款。"
+      },
+      "prediction": {
+        "speech_act": "ACTION_REQUEST",
+        "requests": [
+          {
+            "domain": "refund",
+            "operation": "cancel"
+          }
+        ],
+        "primary_goal": "refund.cancel",
+        "resolved_workflow": "refund.cancel",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": true,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-054-95cd7699eeb7c6e351066e7003835669-18",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "destination"
+          }
+        ],
+        "primary_goal": "refund.destination",
+        "expected_workflow": "refund.destination",
+        "needs_clarification": false,
+        "notes": "结合上下文是在问退款资金去了哪里、如何取回，核心为退款去向。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "after_sales",
+            "operation": "execute"
+          }
+        ],
+        "primary_goal": "after_sales.execute",
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "llm",
+        "confidence": 0.85,
+        "goal_modifier": "",
+        "ambiguities": [
+          "退款是否已到账",
+          "退款原路退回的支付渠道"
+        ]
+      },
+      "route_source": "llm",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-055-9a812f11653df2c13a4812051e1b22b9-11",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "eligibility"
+          }
+        ],
+        "primary_goal": "refund.eligibility",
+        "expected_workflow": "refund.eligibility",
+        "needs_clarification": false,
+        "notes": "因到货来不及，询问是否可以申请退款。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "refund",
+            "operation": "eligibility"
+          }
+        ],
+        "primary_goal": "refund.eligibility",
+        "resolved_workflow": "refund.eligibility",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": true,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-056-ae90b61c67c258895b12fbbc6980aa6a-6",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "expected_arrival"
+          }
+        ],
+        "primary_goal": "refund.expected_arrival",
+        "expected_workflow": "refund.expected_arrival",
+        "needs_clarification": false,
+        "notes": "已确认取消订单后询问退款何时到。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "refund",
+            "operation": "expected_arrival"
+          }
+        ],
+        "primary_goal": "refund.expected_arrival",
+        "resolved_workflow": "refund.expected_arrival",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": true,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-057-29702ea2430f9420d19ceb0c350ce847-11",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "eligibility"
+          }
+        ],
+        "primary_goal": "refund.eligibility",
+        "expected_workflow": "refund.eligibility",
+        "needs_clarification": false,
+        "notes": "询问补货前是否始终具备退款资格。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "refund",
+            "operation": "eligibility"
+          }
+        ],
+        "primary_goal": "refund.eligibility",
+        "resolved_workflow": "refund.eligibility",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "window",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": true,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-058-efe0d86158c3ff72a3b3c39210179306-7",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "return",
+            "operation": "refund_dependency"
+          }
+        ],
+        "primary_goal": "return.refund_dependency",
+        "expected_workflow": "return.refund_dependency",
+        "needs_clarification": false,
+        "notes": "询问拒收后退款何时收到。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "return",
+            "operation": "refund_dependency"
+          }
+        ],
+        "primary_goal": "return.refund_dependency",
+        "resolved_workflow": "return.refund_dependency",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": true,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-059-2d88e1a1317094f8521f9683e16c6d7c-14",
+      "gold": {
+        "speech_act": "ACTION_REQUEST",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "request"
+          }
+        ],
+        "primary_goal": "refund.request",
+        "expected_workflow": "refund.request",
+        "needs_clarification": false,
+        "notes": "明确表示不要商品并要求退款。"
+      },
+      "prediction": {
+        "speech_act": "ACTION_REQUEST",
+        "requests": [
+          {
+            "domain": "after_sales",
+            "operation": "refund_request"
+          }
+        ],
+        "primary_goal": "after_sales.refund_request",
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "llm",
+        "confidence": 0.95,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "llm",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-060-9883cc7a32d058063303776678131f1d-27",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "eligibility"
+          }
+        ],
+        "primary_goal": "refund.eligibility",
+        "expected_workflow": "refund.eligibility",
+        "needs_clarification": false,
+        "notes": "结合上下文是在确认安装服务是否支持单独退款。"
+      },
+      "prediction": {
+        "speech_act": "STATEMENT",
+        "requests": [],
+        "primary_goal": null,
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "llm",
+        "confidence": 0.85,
+        "goal_modifier": "",
+        "ambiguities": [
+          "不支持单独退款的具体对象（安装服务/套装）",
+          "信息来源（客服/页面提示）"
+        ]
+      },
+      "route_source": "llm",
+      "retrieved_chunks": [],
+      "speech_act_match": false,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-061-9aa3fbe1c058a1903bacad2dc4b3654b-7",
+      "gold": {
+        "speech_act": "ACTION_REQUEST",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "request"
+          }
+        ],
+        "primary_goal": "refund.request",
+        "expected_workflow": "refund.request",
+        "needs_clarification": false,
+        "notes": "指定订单并明确要求客服申请退款。"
+      },
+      "prediction": {
+        "speech_act": "STATEMENT",
+        "requests": [],
+        "primary_goal": null,
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": false,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-062-a15225ca6dd89239c236c6520a05c5dd-3",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "request"
+          }
+        ],
+        "primary_goal": "refund.request",
+        "expected_workflow": "refund.request",
+        "needs_clarification": false,
+        "notes": "拒收后找不到退款入口，当前需要处理退款申请入口不可用。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "return",
+            "operation": "refund_dependency"
+          }
+        ],
+        "primary_goal": "return.refund_dependency",
+        "resolved_workflow": "return.refund_dependency",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-063-56df27a2cca5e28639e4f58517a7b6a7-8",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "anomaly"
+          }
+        ],
+        "primary_goal": "refund.anomaly",
+        "expected_workflow": "refund.anomaly",
+        "needs_clarification": false,
+        "notes": "明确描述商家未按约定发货且不退款，属于退款异常投诉。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "delivery",
+            "operation": "track_order"
+          }
+        ],
+        "primary_goal": "delivery.track_order",
+        "resolved_workflow": "delivery.track_order",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-064-ba0433dd15bb463d0ff8e589ab52d1b5-15",
+      "gold": {
+        "speech_act": "STATEMENT",
+        "expected_requests": [],
+        "primary_goal": null,
+        "expected_workflow": null,
+        "needs_clarification": false,
+        "notes": "只告知返款已经收到，没有新的退款请求。"
+      },
+      "prediction": {
+        "speech_act": "STATEMENT",
+        "requests": [],
+        "primary_goal": null,
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "llm",
+        "confidence": 0.9,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "llm",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-065-0567e0f18ef16426781adcc94c624be2-9",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "expected_arrival"
+          }
+        ],
+        "primary_goal": "refund.expected_arrival",
+        "expected_workflow": "refund.expected_arrival",
+        "needs_clarification": false,
+        "notes": "询问退款是否需要约一周，属于到账时效。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "after_sales",
+            "operation": "refund_status"
+          }
+        ],
+        "primary_goal": "after_sales.refund_status",
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "llm",
+        "confidence": 0.85,
+        "goal_modifier": "",
+        "ambiguities": [
+          "退款对象是哪个订单/售后单不明确"
+        ]
+      },
+      "route_source": "llm",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-066-01997d9223b62f4d60fc378cd7d36241-10",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "eligibility"
+          }
+        ],
+        "primary_goal": "refund.eligibility",
+        "expected_workflow": "refund.eligibility",
+        "needs_clarification": false,
+        "notes": "询问当前是否可以退款。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "after_sales",
+            "operation": "execute"
+          }
+        ],
+        "primary_goal": "after_sales.execute",
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "llm",
+        "confidence": 0.9,
+        "goal_modifier": "",
+        "ambiguities": [
+          "退款对象是当前订单还是售后申请"
+        ]
+      },
+      "route_source": "llm",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-067-1255635799fa6e6cdd0a0ac9de78de38-3",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "anomaly"
+          },
+          {
+            "domain": "delivery",
+            "operation": "track_order"
+          }
+        ],
+        "primary_goal": "refund.anomaly",
+        "expected_workflow": "refund.anomaly",
+        "needs_clarification": false,
+        "notes": "同时报告退款失败和长期未收到货两个异常，主目标为退款异常。"
+      },
+      "prediction": {
+        "speech_act": "STATEMENT",
+        "requests": [],
+        "primary_goal": null,
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": false,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-068-2f6e6637c067040602bd444046721088-8",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "procedure"
+          }
+        ],
+        "primary_goal": "refund.procedure",
+        "expected_workflow": null,
+        "needs_clarification": false,
+        "notes": "拒收退款背景下询问是否还需要手动点击退款申请。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [],
+        "primary_goal": null,
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "llm",
+        "confidence": 0.9,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "llm",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-069-c8f9236b2094566caafd9df2fa064c12-8",
+      "gold": {
+        "speech_act": "STATEMENT",
+        "expected_requests": [],
+        "primary_goal": null,
+        "expected_workflow": null,
+        "needs_clarification": false,
+        "notes": "当前只是补充说明申请的是退款，属于对上下文的事实补充。"
+      },
+      "prediction": {
+        "speech_act": "STATEMENT",
+        "requests": [],
+        "primary_goal": null,
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "llm",
+        "confidence": 0.7,
+        "goal_modifier": "",
+        "ambiguities": [
+          "未提供订单号或售后单号"
+        ]
+      },
+      "route_source": "llm",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-070-25a4c24e5055836d5b1daf7c0d4d2187-7",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "procedure"
+          }
+        ],
+        "primary_goal": "refund.procedure",
+        "expected_workflow": null,
+        "needs_clarification": false,
+        "notes": "询问点击申请退款是否就是取消订单的操作路径。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "order",
+            "operation": "track_order"
+          }
+        ],
+        "primary_goal": "order.track_order",
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-071-94ea2621ac105d796587ec118cb5775e-6",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "eligibility"
+          }
+        ],
+        "primary_goal": "refund.eligibility",
+        "expected_workflow": "refund.eligibility",
+        "needs_clarification": false,
+        "notes": "询问某服务不需要时是否可以申请退款。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "refund",
+            "operation": "eligibility"
+          }
+        ],
+        "primary_goal": "refund.eligibility",
+        "resolved_workflow": "refund.eligibility",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": true,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-072-c238f2fc9966024078b1362e67b72644-2",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "eligibility"
+          }
+        ],
+        "primary_goal": "refund.eligibility",
+        "expected_workflow": "refund.eligibility",
+        "needs_clarification": false,
+        "notes": "询问收到拆封相机后是否可以退货退款，核心是退款资格。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "return",
+            "operation": "refund_dependency"
+          }
+        ],
+        "primary_goal": "return.refund_dependency",
+        "resolved_workflow": "return.refund_dependency",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-073-b8f370f4a97d5bd0f01b79f5ad528c41-20",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "procedure"
+          }
+        ],
+        "primary_goal": "refund.procedure",
+        "expected_workflow": null,
+        "needs_clarification": false,
+        "notes": "已有退回安排，当前询问是否还需要点击申请退款。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "after_sales",
+            "operation": "refund_request"
+          }
+        ],
+        "primary_goal": "after_sales.refund_request",
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "llm",
+        "confidence": 0.9,
+        "goal_modifier": "",
+        "ambiguities": [
+          "退款申请入口未知"
+        ]
+      },
+      "route_source": "llm",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-074-69fcf15afda36cf88b73b190f246e9a1-2",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "return",
+            "operation": "refund_dependency"
+          }
+        ],
+        "primary_goal": "return.refund_dependency",
+        "expected_workflow": "return.refund_dependency",
+        "needs_clarification": false,
+        "notes": "退货后询问多久退款，属于退货与退款依赖。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "return",
+            "operation": "refund_dependency"
+          }
+        ],
+        "primary_goal": "return.refund_dependency",
+        "resolved_workflow": "return.refund_dependency",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": true,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-075-55d7749d334d7771307687d56707e6e2-15",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "destination"
+          }
+        ],
+        "primary_goal": "refund.destination",
+        "expected_workflow": "refund.destination",
+        "needs_clarification": false,
+        "notes": "结合上下文是在确认退款可退钱包还是银行卡，属于退款去向。"
+      },
+      "prediction": {
+        "speech_act": "STATEMENT",
+        "requests": [],
+        "primary_goal": null,
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "llm",
+        "confidence": 0.85,
+        "goal_modifier": "",
+        "ambiguities": [
+          "wallet_or_card_preference"
+        ]
+      },
+      "route_source": "llm",
+      "retrieved_chunks": [],
+      "speech_act_match": false,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-076-46828e6565b6f70590c6b1fc22dda619-3",
+      "gold": {
+        "speech_act": "STATEMENT",
+        "expected_requests": [],
+        "primary_goal": null,
+        "expected_workflow": null,
+        "needs_clarification": false,
+        "notes": "只陈述不想要商品且已经申请退款，没有新的请求。"
+      },
+      "prediction": {
+        "speech_act": "STATEMENT",
+        "requests": [],
+        "primary_goal": null,
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-077-1d3175cdda8789938c5bb07bdb824f2e-4",
+      "gold": {
+        "speech_act": "ACTION_REQUEST",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "request"
+          }
+        ],
+        "primary_goal": "refund.request",
+        "expected_workflow": "refund.request",
+        "needs_clarification": false,
+        "notes": "明确要求客服帮助发起退款申请。"
+      },
+      "prediction": {
+        "speech_act": "STATEMENT",
+        "requests": [],
+        "primary_goal": null,
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": false,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-078-ae6ce44d5b74e000c96df0bb946238c6-19",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "status"
+          }
+        ],
+        "primary_goal": "refund.status",
+        "expected_workflow": "refund.refund_status",
+        "needs_clarification": false,
+        "notes": "询问是否所有商品都已经提交退款，属于退款申请状态确认。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "refund",
+            "operation": "status"
+          }
+        ],
+        "primary_goal": "refund.status",
+        "resolved_workflow": "refund.refund_status",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": true,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-079-ce0e8834420c04a011f582f6f58c3c86-20",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "expected_arrival"
+          }
+        ],
+        "primary_goal": "refund.expected_arrival",
+        "expected_workflow": "refund.expected_arrival",
+        "needs_clarification": false,
+        "notes": "明确询问退款到账时间。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "refund",
+            "operation": "expected_arrival"
+          }
+        ],
+        "primary_goal": "refund.expected_arrival",
+        "resolved_workflow": "refund.expected_arrival",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": true,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-080-2551e53a056cbd4622f037fd30356fe8-1",
+      "gold": {
+        "speech_act": "ACTION_REQUEST",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "request"
+          }
+        ],
+        "primary_goal": "refund.request",
+        "expected_workflow": "refund.request",
+        "needs_clarification": false,
+        "notes": "明确要求取消当前订单并申请退款，核心为发起退款。"
+      },
+      "prediction": {
+        "speech_act": "CLARIFICATION_NEEDED",
+        "requests": [],
+        "primary_goal": null,
+        "resolved_workflow": null,
+        "needs_clarification": true,
+        "route_source": "fallback",
+        "confidence": 0.0,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "fallback",
+      "retrieved_chunks": [],
+      "speech_act_match": false,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": false,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-081-1a93282cb8670c550fe9b9cd15c3fe4d-10",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "procedure"
+          }
+        ],
+        "primary_goal": "refund.procedure",
+        "expected_workflow": null,
+        "needs_clarification": false,
+        "notes": "询问是否必须接听电话才能完成退款，属于退款流程条件。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [],
+        "primary_goal": null,
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "llm",
+        "confidence": 0.85,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "llm",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-082-eb21e6a6757a54f22cf4db5da65d01ea-15",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "return",
+            "operation": "refund_dependency"
+          }
+        ],
+        "primary_goal": "return.refund_dependency",
+        "expected_workflow": "return.refund_dependency",
+        "needs_clarification": false,
+        "notes": "退回商品已送达背景下询问何时退款。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "refund",
+            "operation": "expected_arrival"
+          }
+        ],
+        "primary_goal": "refund.expected_arrival",
+        "resolved_workflow": "refund.expected_arrival",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-083-8daa6b2e361fad6bf27137255dfdb875-10",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "amount"
+          }
+        ],
+        "primary_goal": "refund.amount",
+        "expected_workflow": "refund.refund_detail",
+        "needs_clarification": false,
+        "notes": "明确询问退款金额如何计算。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [],
+        "primary_goal": null,
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "llm",
+        "confidence": 0.9,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "llm",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-084-c619e121b1216a36e330c53dd9075f60-13",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "expected_arrival"
+          }
+        ],
+        "primary_goal": "refund.expected_arrival",
+        "expected_workflow": "refund.expected_arrival",
+        "needs_clarification": false,
+        "notes": "同时提到银行卡渠道和到账时间，按规则优先标到账时间。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "refund",
+            "operation": "expected_arrival"
+          }
+        ],
+        "primary_goal": "refund.expected_arrival",
+        "resolved_workflow": "refund.expected_arrival",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": true,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-085-a7ad2738575029509614d48e76cee235-4",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "anomaly"
+          }
+        ],
+        "primary_goal": "refund.anomaly",
+        "expected_workflow": "refund.anomaly",
+        "needs_clarification": false,
+        "notes": "订单未经本人取消却突然显示退款，询问异常原因。"
+      },
+      "prediction": {
+        "speech_act": "STATEMENT",
+        "requests": [],
+        "primary_goal": null,
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": false,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-086-82d4c9e4fbef0d755ac824e832ccf3ee-9",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "return",
+            "operation": "refund_dependency"
+          }
+        ],
+        "primary_goal": "return.refund_dependency",
+        "expected_workflow": "return.refund_dependency",
+        "needs_clarification": false,
+        "notes": "询问自提超期退库后是否会自动退款。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "refund",
+            "operation": "delivery_after_refund"
+          }
+        ],
+        "primary_goal": "refund.delivery_after_refund",
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "self_pickup",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-087-7641ac381c288f1a8a98c7223b2802bb-1",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "anomaly"
+          }
+        ],
+        "primary_goal": "refund.anomaly",
+        "expected_workflow": "refund.anomaly",
+        "needs_clarification": false,
+        "notes": "取消订单后退款失败，属于退款异常。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "order",
+            "operation": "track_order"
+          }
+        ],
+        "primary_goal": "order.track_order",
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-088-20aa0611f5cae6fb5065e56418f8ba07-5",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "return",
+            "operation": "refund_dependency"
+          }
+        ],
+        "primary_goal": "return.refund_dependency",
+        "expected_workflow": "return.refund_dependency",
+        "needs_clarification": false,
+        "notes": "退货申请审核通过后询问何时退款。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "refund",
+            "operation": "expected_arrival"
+          }
+        ],
+        "primary_goal": "refund.expected_arrival",
+        "resolved_workflow": "refund.expected_arrival",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-089-e58d7c8499d01ad89dff489f446b16f1-20",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "product",
+            "operation": "answer"
+          }
+        ],
+        "primary_goal": "product.answer",
+        "expected_workflow": null,
+        "needs_clarification": false,
+        "notes": "核心是退款后重新购买是否还能享受双十一价格，不是退款状态本身。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [],
+        "primary_goal": null,
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "llm",
+        "confidence": 0.95,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "llm",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-090-4f18d07ebe462bc120d092ce116d7feb-14",
+      "gold": {
+        "speech_act": "ACKNOWLEDGEMENT",
+        "expected_requests": [],
+        "primary_goal": null,
+        "expected_workflow": null,
+        "needs_clarification": false,
+        "notes": "结合上下文是对退款时长说明的接受/确认，没有新的请求。"
+      },
+      "prediction": {
+        "speech_act": "STATEMENT",
+        "requests": [],
+        "primary_goal": null,
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "llm",
+        "confidence": 0.85,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "llm",
+      "retrieved_chunks": [],
+      "speech_act_match": false,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-091-e83d6d20aa1dec0dbb35affc206a729e-11",
+      "gold": {
+        "speech_act": "STATEMENT",
+        "expected_requests": [],
+        "primary_goal": null,
+        "expected_workflow": null,
+        "needs_clarification": false,
+        "notes": "只说明因价格差较大而已经申请退款，没有新的问题。"
+      },
+      "prediction": {
+        "speech_act": "STATEMENT",
+        "requests": [],
+        "primary_goal": null,
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-092-03c9008a1ec1af08c5d633ff66e04fd6-3",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "processing_time"
+          }
+        ],
+        "primary_goal": "refund.processing_time",
+        "expected_workflow": "refund.processing_time",
+        "needs_clarification": false,
+        "notes": "询问退款流程多久能完成，偏受理/处理时长而非具体到账。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "refund",
+            "operation": "expected_arrival"
+          }
+        ],
+        "primary_goal": "refund.expected_arrival",
+        "resolved_workflow": "refund.expected_arrival",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-093-7b6582a733fa721de140a5fefa88990e-10",
+      "gold": {
+        "speech_act": "ACKNOWLEDGEMENT",
+        "expected_requests": [],
+        "primary_goal": null,
+        "expected_workflow": null,
+        "needs_clarification": false,
+        "notes": "复述客服刚说明的“到仓后处理退款”条件，未提出新的请求。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "return",
+            "operation": "refund_dependency"
+          }
+        ],
+        "primary_goal": "return.refund_dependency",
+        "resolved_workflow": "return.refund_dependency",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": false,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-094-6eb8eda1b4cccdeb0e673e0fce40d25a-11",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "destination"
+          }
+        ],
+        "primary_goal": "refund.destination",
+        "expected_workflow": "refund.destination",
+        "needs_clarification": false,
+        "notes": "结合取消订单上下文，当前是在确认是否直接退回白条。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "refund",
+            "operation": "destination"
+          }
+        ],
+        "primary_goal": "refund.destination",
+        "resolved_workflow": "refund.destination",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": true,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-095-7c4322039dc742f944a65060817c757f-12",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "return",
+            "operation": "refund_dependency"
+          }
+        ],
+        "primary_goal": "return.refund_dependency",
+        "expected_workflow": "return.refund_dependency",
+        "needs_clarification": false,
+        "notes": "拒收/退回库房后询问退款何时到账。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "refund",
+            "operation": "expected_arrival"
+          }
+        ],
+        "primary_goal": "refund.expected_arrival",
+        "resolved_workflow": "refund.expected_arrival",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-096-2e44f5d76b8fb0f13a28c67d9474bad0-2",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "procedure"
+          }
+        ],
+        "primary_goal": "refund.procedure",
+        "expected_workflow": null,
+        "needs_clarification": false,
+        "notes": "因未按期送达，询问如何申请退款。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "refund",
+            "operation": "procedure"
+          }
+        ],
+        "primary_goal": "refund.procedure",
+        "resolved_workflow": null,
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-097-0b35f1227a23e8cc45861ebb6fd917d5-3",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "delivery_after_refund"
+          }
+        ],
+        "primary_goal": "refund.delivery_after_refund",
+        "expected_workflow": null,
+        "needs_clarification": false,
+        "notes": "同时存在继续派送与退款两种可能，核心是退款后的配送交叉状态。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "delivery",
+            "operation": "track_order"
+          }
+        ],
+        "primary_goal": "delivery.track_order",
+        "resolved_workflow": "delivery.track_order",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-098-eb0792b63af3b2688cd002fe4e58cd3c-8",
+      "gold": {
+        "speech_act": "ACTION_REQUEST",
+        "expected_requests": [
+          {
+            "domain": "after_sales",
+            "operation": "after_sales_transition"
+          }
+        ],
+        "primary_goal": "after_sales.after_sales_transition",
+        "expected_workflow": "after_sales.after_sales_transition",
+        "needs_clarification": false,
+        "notes": "明确想换新而不是退款，属于售后目标从退款转为换新。"
+      },
+      "prediction": {
+        "speech_act": "ACTION_REQUEST",
+        "requests": [
+          {
+            "domain": "refund",
+            "operation": "cancel"
+          }
+        ],
+        "primary_goal": "refund.cancel",
+        "resolved_workflow": "refund.cancel",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": false,
+      "goal_sequence_match": false,
+      "workflow_route_match": false,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-099-19d4ac8c06218cdff82d1b73dcd65bde-6",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "eligibility"
+          }
+        ],
+        "primary_goal": "refund.eligibility",
+        "expected_workflow": "refund.eligibility",
+        "needs_clarification": false,
+        "notes": "因等待时间过长询问当前是否可以申请退款。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "refund",
+            "operation": "eligibility"
+          }
+        ],
+        "primary_goal": "refund.eligibility",
+        "resolved_workflow": "refund.eligibility",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": true,
+      "clarification_match": true,
+      "error": ""
+    },
+    {
+      "case_id": "jddc-refund-100-d5861c858abca483747d46d8483ec97a-2",
+      "gold": {
+        "speech_act": "INFORMATION_QUERY",
+        "expected_requests": [
+          {
+            "domain": "refund",
+            "operation": "expected_arrival"
+          }
+        ],
+        "primary_goal": "refund.expected_arrival",
+        "expected_workflow": "refund.expected_arrival",
+        "needs_clarification": false,
+        "notes": "明确询问退款时间。"
+      },
+      "prediction": {
+        "speech_act": "INFORMATION_QUERY",
+        "requests": [
+          {
+            "domain": "refund",
+            "operation": "expected_arrival"
+          }
+        ],
+        "primary_goal": "refund.expected_arrival",
+        "resolved_workflow": "refund.expected_arrival",
+        "needs_clarification": false,
+        "route_source": "deterministic_hint",
+        "confidence": 0.98,
+        "goal_modifier": "",
+        "ambiguities": []
+      },
+      "route_source": "deterministic_hint",
+      "retrieved_chunks": [],
+      "speech_act_match": true,
+      "goal_match": true,
+      "goal_sequence_match": true,
+      "workflow_route_match": true,
+      "clarification_match": true,
+      "error": ""
+    }
+  ],
+  "gold_path": "data/benchmarks/jddc/refund-gold-100.jsonl",
+  "gold_sha256": "a7dfcd90898058834d491aadaa47d53f7cc929504ba2d53900a5e84930695929",
+  "git_commit": "4df9aab8b411a5e457f6990a3be6551af763ad53",
+  "working_tree_dirty": true,
+  "runtime_knowledge_sources": [
+    "after_sales_process.md",
+    "agent_boundaries.md",
+    "customer_data_boundary.md",
+    "device_safety.md",
+    "device_troubleshooting.md",
+    "laptop_buying_guide.md",
+    "order_lookup.md",
+    "order_status.md",
+    "payment_failure.md",
+    "payment_process.md",
+    "payment_status.md",
+    "phone_buying_guide.md",
+    "refund_eligibility.md",
+    "refund_limitations.md",
+    "refund_request.md",
+    "refund_status.md",
+    "return_exchange_boundary.md",
+    "trade_in_boundary.md",
+    "warranty_process.md"
+  ]
+}

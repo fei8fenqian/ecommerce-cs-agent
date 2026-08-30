@@ -32,8 +32,23 @@ format:
 # -------------------------------------------------------------------
 # 运行测试
 # -------------------------------------------------------------------
+TEST_DB ?= ecommerce_agent_full_test
+REFUND_TEST_DB ?= ecommerce_agent_refund_test
+S3_TEST_DB ?= ecommerce_agent_s3_02_test
+V7_TEST_DB ?= ecommerce_agent_v7_test
+
 test:
-	pytest -v
+		PG_DBNAME=$(TEST_DB) pytest -v
+
+# 独立 Alembic 分支的验证必须使用独立数据库，不能和客服 Agent 共享库混跑。
+test-refund-integration:
+		SKIP_SHARED_DB_SETUP=1 PG_DBNAME=$(REFUND_TEST_DB) pytest -v tests/test_checkout_refund_integration.py
+
+test-s3-integration:
+		SKIP_SHARED_DB_SETUP=1 PG_DBNAME=$(S3_TEST_DB) pytest -v tests/test_s3_01_schema.py tests/test_s3_02_store_integration.py
+
+test-v7-schema:
+		SKIP_SHARED_DB_SETUP=1 PG_DBNAME=$(V7_TEST_DB) pytest -v tests/test_v7_01a_schema.py
 
 # -------------------------------------------------------------------
 # 跑评估（Phase 2 后面用）

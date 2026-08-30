@@ -39,7 +39,7 @@ def _make_index(docs_data: list[tuple[str, str]]) -> BM25Index:
     idf: dict[str, float] = {}
     for word, word_docs in inverted.items():
         counts = len(word_docs)
-        idf[word] = math.log((doc_count - counts + 0.5) / (counts + 0.5))
+        idf[word] = math.log(1 + (doc_count - counts + 0.5) / (counts + 0.5))
 
     return BM25Index(docs, idf, avglen)
 
@@ -104,13 +104,11 @@ class TestBM25Search:
         # IDF 可为负（词出现在所有文档中），但排序不变
         assert len(results) == 2
 
-    def test_no_match_returns_score_zero(self):
-        """完全不匹配的文档 score 为 0，但仍在结果中"""
+    def test_no_match_returns_no_result(self):
+        """完全不匹配的文档不应作为 BM25 候选返回"""
         idx = _make_index([("a", "联想拯救者")])
         results = idx.search("苹果手机")
-        # 没有匹配词，score 为 0，但文档仍在结果中
-        assert len(results) == 1
-        assert results[0][1] == 0.0
+        assert results == []
 
     def test_top_k_limit(self):
         """top_k 限制返回数量"""
@@ -119,13 +117,11 @@ class TestBM25Search:
         results = idx.search("文档", top_k=3)
         assert len(results) == 3
 
-    def test_empty_query_returns_all_zero_score(self):
-        """空查询 → 所有文档 score=0"""
+    def test_empty_query_returns_no_result(self):
+        """空查询没有 lexical hit，不应返回候选"""
         idx = _make_index([("a", "hello"), ("b", "world")])
         results = idx.search("")
-        assert len(results) == 2
-        for _, score in results:
-            assert score == 0.0
+        assert results == []
 
     def test_results_sorted_descending(self):
         """结果应按分数降序排列"""

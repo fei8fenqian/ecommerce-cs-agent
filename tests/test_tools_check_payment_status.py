@@ -36,6 +36,33 @@ async def test_customer_payment_check_refreshes_only_own_order() -> None:
     assert result.is_success
     assert result.data["payment_result"] == "支付成功"
     refresh.assert_awaited_once_with(customer_user_id=42, order_no="SO202608250001")
+    assert orders.await_count == 2
+    assert orders.await_args_list == [
+        ((42,), {"order_id": "SO202608250001"}),
+        ((42,), {"order_id": "SO202608250001"}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_payment_check_uses_existing_paid_fact_without_refreshing_gateway() -> None:
+    """已支付订单没有 pending payment 时也必须返回已支付，而不是误报未支付。"""
+    tool = CheckPaymentStatus()
+    paid_order = {**_pending_order(), "status": "PAID", "payment_status": "SUCCEEDED"}
+    orders = AsyncMock(return_value=[paid_order])
+    refresh = AsyncMock(return_value=False)
+
+    with (
+        patch("agent.tools.check_payment_status.find_orders", new=orders),
+        patch("agent.tools.check_payment_status.refresh_customer_payment_status", new=refresh),
+    ):
+        result = await tool.execute(
+            order_id="SO202608250001",
+            tool_context=ToolContext(user_id=42, role="customer"),
+        )
+
+    assert result.is_success
+    assert result.data["payment_result"] == "支付成功"
+    refresh.assert_not_awaited()
     orders.assert_awaited_once_with(42, order_id="SO202608250001")
 
 
@@ -85,7 +112,10 @@ async def test_payment_check_returns_safe_gateway_errors(exception: Exception, e
     tool = CheckPaymentStatus()
     refresh = AsyncMock(side_effect=exception)
 
-    with patch("agent.tools.check_payment_status.refresh_customer_payment_status", new=refresh):
+    with (
+        patch("agent.tools.check_payment_status.find_orders", new=AsyncMock(return_value=[_pending_order()])),
+        patch("agent.tools.check_payment_status.refresh_customer_payment_status", new=refresh),
+    ):
         result = await tool.execute(order_id="SO202608250001", tool_context=ToolContext(user_id=42, role="customer"))
 
     assert not result.is_success

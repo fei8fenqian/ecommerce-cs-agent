@@ -2,6 +2,8 @@
 
 一个完整的 AI 客服 Agent 系统，专为"极客数码"3C 电商场景设计。支持 RAG 检索问答、ReAct Agent 工具调用、Plan-and-Execute 复杂任务规划三种模式，通过意图路由器自动分发。
 
+项目计划、产品规则和架构决策见 [docs/README.md](docs/README.md)。
+
 ## 功能
 
 - **意图路由** — 轻量 LLM 调用自动分类用户问题，分发到 RAG / Agent / Plan-Execute / 工单

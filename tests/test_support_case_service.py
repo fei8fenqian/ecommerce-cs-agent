@@ -117,6 +117,42 @@ async def test_resume_customer_response_keeps_pending_and_records_event(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_select_customer_subject_persists_choice_and_clears_pending(monkeypatch):
+    captured: dict = {}
+
+    async def replace(case, **kwargs):
+        captured.update(kwargs)
+        return case
+
+    monkeypatch.setattr("service.support_case_service.replace_case", replace)
+    case = SupportCase(
+        **{
+            **_case(status="AWAITING_CUSTOMER").__dict__,
+            "pending": {
+                "kind": "customer_choice",
+                "choices": [{"order_id": "SO-2", "product_name": "测试手机"}],
+            },
+        }
+    )
+
+    result = await SupportCaseService().select_customer_subject(
+        case,
+        subject={"order_id": "SO-2", "product_name": "测试手机"},
+        selection_source="product",
+    )
+
+    assert result == case
+    assert captured["status"] == "ACTIVE"
+    assert captured["selected_subjects"]["order_id"] == "SO-2"
+    assert captured["pending"] == {}
+    assert captured["pending_command"] == {}
+    assert captured["event_type"] == "CUSTOMER_RESPONSE"
+    assert captured["event_payload"]["selection_source"] == "product"
+    assert captured["event_payload"]["pending_kind"] == "customer_choice"
+    assert captured["event_payload"]["selection_event"] == "subject_selected"
+
+
+@pytest.mark.asyncio
 async def test_complete_for_ticket_closes_linked_staff_case(monkeypatch):
     case = _case(status="AWAITING_STAFF", version=4)
     case = SupportCase(**{**case.__dict__, "pending": {"summary": {"ticket_id": "TK-1"}}})
@@ -150,3 +186,55 @@ def test_prompt_context_exposes_case_state_but_not_internal_audit_fields():
     assert '"delivery_status":"SHIPPED"' in context
     assert "case_id" not in context
     assert "customer_user_id" not in context
+
+
+@pytest.mark.asyncio
+async def test_record_verified_facts_preserves_subject_and_provenance_boundaries(monkeypatch):
+    captured: dict = {}
+
+    async def replace(case, **kwargs):
+        captured.update(kwargs)
+        return case
+
+    monkeypatch.setattr("service.support_case_service.replace_case", replace)
+    case = SupportCase(
+        **{
+            **_case().__dict__,
+            "verified_facts": {
+                "_decision_contexts": [
+                    {
+                        "subject_type": "order",
+                        "subject_id": "SO-A",
+                        "provenance": "current",
+                        "source": "query_refund_status",
+                        "facts": {"refund_status": "PROCESSING", "refund_amount": 899900},
+                    }
+                ],
+                "customer_note": "保留的非交易备注",
+            },
+        }
+    )
+
+    await SupportCaseService().record_verified_facts(
+        case,
+        facts={"refund_status": "COMPLETED", "refund_amount": 220000},
+        decision_contexts=[
+            {
+                "subject_type": "order",
+                "subject_id": "SO-B",
+                "provenance": "current",
+                "source": "query_refund_status",
+                "facts": {"refund_status": "COMPLETED", "refund_amount": 220000},
+            }
+        ],
+    )
+
+    saved = captured["verified_facts"]
+    assert saved["customer_note"] == "保留的非交易备注"
+    assert "refund_status" not in saved
+    assert "refund_amount" not in saved
+    contexts = saved["_decision_contexts"]
+    assert {(item["subject_id"], item["provenance"]) for item in contexts} == {
+        ("SO-A", "historical"),
+        ("SO-B", "current"),
+    }

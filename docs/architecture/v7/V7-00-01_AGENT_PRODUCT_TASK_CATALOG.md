@@ -1,7 +1,7 @@
 # V7-00-01：Agent 产品与任务目录
 
 状态：架构草案，待负责人冻结
-依赖：PLAN_V7.md、S0_DECISION_RECORD.md、S0-03_API_SLO_DATA_CLASSIFICATION.md
+依赖：[PLAN_V7.md](../../plans/PLAN_V7.md)、[S0_DECISION_RECORD.md](../../product/refund/S0_DECISION_RECORD.md)、[S0-03_API_SLO_DATA_CLASSIFICATION.md](../../product/refund/S0-03_API_SLO_DATA_CLASSIFICATION.md)
 范围：定义首版 Harness 的内部任务契约；不实现 Agent、工具、数据库、报表、支付或物流。
 
 ## 1. 目标与非目标

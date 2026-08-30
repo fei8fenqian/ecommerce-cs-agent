@@ -809,6 +809,76 @@ def extract_decision_facts(capability: str, data: dict[str, Any]) -> dict[str, A
     return {}
 
 
+def extract_decision_context(
+    capability: str,
+    data: dict[str, Any],
+    *,
+    requested_order_id: Any = None,
+    provenance: str = "current",
+) -> dict[str, Any] | None:
+    """把一次受控工具结果封装成带 subject 的事实组。
+
+    ``requested_order_id`` 只能来自服务端绑定或工具调用参数；没有唯一、可信订单
+    subject 时，即使 flat fact 可以提取，也不创建 context，避免多订单事实串线。
+    """
+    facts = extract_decision_facts(capability, data)
+    if not facts or provenance not in {"current", "historical"}:
+        return None
+
+    requested_subject_id = requested_order_id if isinstance(requested_order_id, str) else ""
+    subject_id = requested_subject_id
+    if not subject_id.startswith("SO"):
+        subject_id = ""
+
+    def bind_candidate(candidate: Any) -> bool:
+        """Bind a returned subject, rejecting a tool response for another order."""
+        nonlocal subject_id
+        if not isinstance(candidate, str) or not candidate.startswith("SO"):
+            return True
+        if requested_subject_id.startswith("SO") and candidate != requested_subject_id:
+            return False
+        subject_id = candidate
+        return True
+
+    if capability == "track_order":
+        if data.get("selection_required"):
+            return None
+        candidate = data.get("order_id") or data.get("order_no")
+        if not isinstance(candidate, str) and data.get("count") == 1:
+            orders = data.get("orders")
+            if isinstance(orders, list) and len(orders) == 1 and isinstance(orders[0], dict):
+                candidate = orders[0].get("order_id") or orders[0].get("order_no")
+        if not bind_candidate(candidate):
+            return None
+    elif capability == "query_refund_status":
+        if data.get("selection_required"):
+            return None
+        refunds = data.get("refunds")
+        if isinstance(refunds, list) and len(refunds) == 1 and isinstance(refunds[0], dict):
+            candidate = refunds[0].get("order_id") or refunds[0].get("order_no")
+            if not bind_candidate(candidate):
+                return None
+    elif capability in {"check_refund_eligibility", "generate_refund_entry"}:
+        candidate = data.get("order_id")
+        if not bind_candidate(candidate):
+            return None
+    elif capability == "check_payment_status":
+        order = data.get("order")
+        candidate = (order.get("order_id") or order.get("order_no")) if isinstance(order, dict) else None
+        if not bind_candidate(candidate):
+            return None
+
+    if not subject_id.startswith("SO"):
+        return None
+    return {
+        "subject_type": "order",
+        "subject_id": subject_id,
+        "provenance": provenance,
+        "source": capability,
+        "facts": dict(facts),
+    }
+
+
 def _canonical_refund_status(value: Any) -> str:
     normalized = customer_visible_refund_status(value)
     if normalized == "IN_PROGRESS":

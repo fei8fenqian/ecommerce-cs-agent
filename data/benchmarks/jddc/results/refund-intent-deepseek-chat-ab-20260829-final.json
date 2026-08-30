@@ -1,0 +1,23 @@
+{
+  "evaluation_kind": "jddc_refund_intent_router_ab_comparison",
+  "model": "deepseek-chat",
+  "gold_sha256": "a7dfcd90898058834d491aadaa47d53f7cc929504ba2d53900a5e84930695929",
+  "pre_rag_threshold": 0.55,
+  "all_cases": {
+    "comparable_cases": 100,
+    "help": 0,
+    "harm": 0,
+    "help_case_ids": [],
+    "harm_case_ids": []
+  },
+  "llm_route_common_cases": {
+    "comparable_cases": 3,
+    "help": 0,
+    "harm": 0,
+    "help_case_ids": [],
+    "harm_case_ids": []
+  },
+  "off_llm_route_cases": 4,
+  "on_llm_route_cases": 5,
+  "definition": "Help/Harm 比较 goal_match；Gold expected_requests=[] 时，goal_match 表示没有错误生成业务请求。"
+}

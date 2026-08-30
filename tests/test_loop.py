@@ -57,6 +57,30 @@ class _EchoTool(BaseTool):
         return ToolResult(name=self.name, status="success", data={"echo": kwargs.get("text", "")})
 
 
+class _RefundStatusTool(BaseTool):
+    @property
+    def name(self) -> str:
+        return "query_refund_status"
+
+    @property
+    def description(self) -> str:
+        return "查询本人退款状态"
+
+    @property
+    def parameters(self) -> dict:
+        return {"type": "object", "properties": {"order_id": {"type": "string"}}, "required": []}
+
+    async def execute(self, **kwargs):
+        return ToolResult(
+            name=self.name,
+            status="success",
+            data={
+                "refund_lookup": "found",
+                "refunds": [{"refund_id": "RF-1", "status": "SUCCEEDED", "amount_cents": 799900}],
+            },
+        )
+
+
 class _FailingTool(BaseTool):
     """总是失败的工具 — 用于测试死循环检测"""
 
@@ -513,6 +537,24 @@ class TestAgentLoopRunStream:
         tool_result_event = events[2]
         assert tool_result_event["name"] == "echo"
         assert tool_result_event["status"] == "success"
+
+    @pytest.mark.asyncio
+    async def test_stream_done_exposes_decision_facts_from_tools(self):
+        llm = _StreamMockLLM(
+            [
+                [{"type": "tool_calls", "tool_calls": [_tool_call("query_refund_status")]}],
+                [{"type": "content", "content": "退款已经到账支付宝。"}],
+            ]
+        )
+        loop = AgentLoop(llm=llm, registry=_make_registry(_RefundStatusTool()))
+
+        events = [event async for event in loop.run_stream("退款现在什么状态")]
+
+        assert events[-1]["event"] == "done"
+        assert events[-1]["decision_facts"] == {
+            "refund_status": "COMPLETED",
+            "refund_amount": 799900,
+        }
 
     @pytest.mark.asyncio
     async def test_context_injection_stream(self):

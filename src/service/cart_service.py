@@ -8,13 +8,14 @@ from infra.alipay_sandbox import AlipaySandboxClient
 from service.checkout_service import CheckoutSession, build_alipay_checkout_session
 from store.cart_store import find_cart_item, list_cart_items, put_cart_item, remove_cart_item
 from store.checkout_store import (
+    CURRENT_PAYMENT_NO_PREFIX,
     CartCheckoutLine,
     CheckoutCategory,
     CheckoutLine,
     CheckoutProduct,
     create_checkout_order_from_lines,
+    find_reusable_pending_cart_checkout,
     get_checkout_product,
-    get_customer_latest_pending_checkout,
 )
 
 
@@ -97,22 +98,12 @@ async def delete_cart_item(customer_user_id: int, item_id: int) -> bool:
 
 
 async def create_cart_checkout_session(customer_user_id: int, return_origin: str | None) -> CheckoutSession:
-    """将当前购物车创建为一笔待支付订单，并返回支付宝沙箱跳转地址。
+    """将当前购物车创建为一笔待支付订单，并返回支付宝电脑网站支付表单。
 
-    同一客户已有待支付订单时优先复用，避免双击或跳转失败反复生成废单。
+    只有当前购物车与旧订单快照完全一致时才复用，避免把旧金额带到新购物车。
+    ``return_origin`` 用于支付宝付款完成后的受控浏览器回跳。
     """
     alipay_client = AlipaySandboxClient.from_settings()
-    existing = await get_customer_latest_pending_checkout(customer_user_id)
-    if existing is not None:
-        return await build_alipay_checkout_session(
-            alipay_client,
-            order_no=existing.order_no,
-            merchant_payment_no=existing.merchant_payment_no,
-            amount_cents=existing.amount_cents,
-            subject=existing.subject,
-            return_origin=return_origin,
-        )
-
     stored_items = await list_cart_items(customer_user_id)
     if not stored_items:
         raise CartUnavailableError("cart empty")
@@ -126,10 +117,38 @@ async def create_cart_checkout_session(customer_user_id: int, return_origin: str
     now = datetime.now(UTC)
     suffix = uuid4().hex[:12].upper()
     order_no = f"SO{now:%Y%m%d%H%M%S}{suffix}"
-    merchant_payment_no = f"PM{now:%Y%m%d%H%M%S}{suffix}"
+    merchant_payment_no = f"{CURRENT_PAYMENT_NO_PREFIX}{now:%Y%m%d%H%M%S}{suffix}"
     total_amount_cents = sum(line.product.unit_amount_cents * line.quantity for line in lines)
     total_quantity = sum(line.quantity for line in lines)
     subject = f"Geex Digital 商品订单（{total_quantity} 件）"
+    cart_lines = [
+        CartCheckoutLine(
+            category=item.category,
+            product_id=item.product_id,
+            quantity=item.quantity,
+            unit_amount_cents=next(
+                line.product.unit_amount_cents
+                for line in lines
+                if line.product.category == item.category and line.product.product_id == item.product_id
+            ),
+        )
+        for item in stored_items
+    ]
+    existing = await find_reusable_pending_cart_checkout(
+        customer_user_id,
+        cart_lines,
+        total_amount_cents,
+    )
+    if existing is not None:
+        return await build_alipay_checkout_session(
+            alipay_client,
+            order_no=existing.order_no,
+            merchant_payment_no=existing.merchant_payment_no,
+            amount_cents=existing.amount_cents,
+            subject=existing.subject,
+            return_origin=return_origin,
+        )
+
     await create_checkout_order_from_lines(
         sales_order_id=uuid4(),
         order_no=order_no,
@@ -137,14 +156,7 @@ async def create_cart_checkout_session(customer_user_id: int, return_origin: str
         merchant_payment_no=merchant_payment_no,
         customer_user_id=customer_user_id,
         lines=lines,
-        cart_lines=[
-            CartCheckoutLine(
-                category=item.category,
-                product_id=item.product_id,
-                quantity=item.quantity,
-            )
-            for item in stored_items
-        ],
+        cart_lines=cart_lines,
     )
     return await build_alipay_checkout_session(
         alipay_client,

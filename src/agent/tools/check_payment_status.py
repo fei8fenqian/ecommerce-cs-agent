@@ -68,6 +68,7 @@ class CheckPaymentStatus(BaseTool):
 
         try:
             selected_order_id = order_id.strip()
+            current_order: dict[str, Any] | None = None
             if not selected_order_id:
                 recent = await find_orders(tool_context.user_id)
                 pending = next(
@@ -79,9 +80,29 @@ class CheckPaymentStatus(BaseTool):
                     None,
                 )
                 selected_order_id = str(pending.get("order_id", "")) if pending else ""
+                current_order = pending
 
             if not selected_order_id.startswith("SO"):
                 return ToolResult(name=self.name, status="error", error="当前没有可查询的待支付商城订单")
+
+            # 已有本地成功支付事实时，不要因为没有 pending payment 可刷新而把
+            # 已支付订单误报成未支付。刷新服务的 bool 只表示“本次是否从网关刷新
+            # 成功”，不是订单当前支付状态。
+            if current_order is None:
+                current_orders = await find_orders(tool_context.user_id, order_id=selected_order_id)
+                if not current_orders:
+                    return ToolResult(name=self.name, status="error", error="订单不存在或无法核验")
+                current_order = current_orders[0]
+            if str(current_order.get("payment_status", "")).upper() == "SUCCEEDED":
+                return ToolResult(
+                    name=self.name,
+                    status="success",
+                    data={
+                        "payment_checked": True,
+                        "payment_result": "支付成功",
+                        "order": current_order,
+                    },
+                )
 
             paid = await refresh_customer_payment_status(
                 customer_user_id=tool_context.user_id,

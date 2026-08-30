@@ -4,7 +4,7 @@
 
 适用范围：AI 售后与退款运营工作台第一条闭环——仅覆盖已支付订单的全额退款。
 
-本记录是 D01–D12 的唯一冻结来源。`S0-01_PRD_REFUND_WORKBENCH.md`、`S0-02_ROLE_MATRIX_STATE_MACHINES.md`、`S0-03_API_SLO_DATA_CLASSIFICATION.md` 与 `PLAN_V6.md` 的相关表述必须与本记录一致；实现、测试和后续接口契约不得自行放宽或替换这些规则。
+本记录是 D01–D12 的唯一冻结来源。`S0-01_PRD_REFUND_WORKBENCH.md`、`S0-02_ROLE_MATRIX_STATE_MACHINES.md`、`S0-03_API_SLO_DATA_CLASSIFICATION.md` 与 [`PLAN_V6.md`](../../plans/PLAN_V6.md) 的相关表述必须与本记录一致；实现、测试和后续接口契约不得自行放宽或替换这些规则。
 
 ## D01：首版订单资格与申请时限
 

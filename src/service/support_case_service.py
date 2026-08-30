@@ -7,11 +7,17 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
+from agent.decision_context import (
+    SUBJECT_BOUND_FACTS,
+    historicalize_decision_contexts,
+    merge_decision_contexts,
+)
 from store.support_case_store import (
     OPEN_CASE_STATUSES,
     SupportCase,
     SupportCaseStatus,
     create_open_case,
+    get_latest_case,
     get_open_case,
     get_open_case_by_ticket_id,
     replace_case,
@@ -64,6 +70,18 @@ class SupportCaseService:
             customer_user_id=customer_user_id,
         )
 
+    async def get_latest(
+        self,
+        *,
+        session_id: str,
+        customer_user_id: int,
+    ) -> SupportCase | None:
+        """读取最近 Case 供事实安全边界使用，不恢复或修改其状态。"""
+        return await get_latest_case(
+            session_id=self._session_uuid(session_id),
+            customer_user_id=customer_user_id,
+        )
+
     async def resume_customer_response(self, case: SupportCase) -> SupportCase | None:
         """记录客户已回答 pending 问题，但不把原问题或选择丢失。
 
@@ -75,6 +93,38 @@ class SupportCaseService:
             status="ACTIVE",
             event_type="CUSTOMER_RESPONSE",
             event_payload={"pending_kind": str(case.pending.get("kind") or "question")},
+        )
+
+    async def select_customer_subject(
+        self,
+        case: SupportCase,
+        *,
+        subject: dict[str, Any],
+        selection_source: str,
+    ) -> SupportCase | None:
+        """确定性保存客户选择并清除选择 pending，保持同一 Case 可继续执行。"""
+        safe_subject = self._json_object(subject)
+        order_id = safe_subject.get("order_id")
+        if not isinstance(order_id, str) or not order_id.startswith("SO"):
+            raise ValueError("customer subject requires a valid checkout order")
+        selected_subjects = {**case.selected_subjects, "order_id": order_id}
+        return await self._replace(
+            case,
+            status="ACTIVE",
+            selected_subjects=selected_subjects,
+            pending={},
+            pending_command={},
+            # Reuse the schema-approved customer-response event.  The
+            # selection details remain in the payload so no migration is
+            # needed just to audit a resumable choice.
+            event_type="CUSTOMER_RESPONSE",
+            event_payload={
+                "subject_type": "order",
+                "selection_source": selection_source[:80],
+                "selected_order_id": order_id,
+                "pending_kind": "customer_choice",
+                "selection_event": "subject_selected",
+            },
         )
 
     async def record_requests(
@@ -125,9 +175,26 @@ class SupportCaseService:
         *,
         facts: dict[str, Any],
         selected_subjects: dict[str, Any] | None = None,
+        decision_contexts: list[dict[str, Any]] | None = None,
     ) -> SupportCase | None:
         """追加服务端已核验事实；客户自述不得写入该字段。"""
-        merged_facts = {**case.verified_facts, **self._json_object(facts)}
+        existing_contexts = case.verified_facts.get("_decision_contexts", [])
+        merged_contexts = merge_decision_contexts(
+            historicalize_decision_contexts(existing_contexts if isinstance(existing_contexts, list) else []),
+            decision_contexts or [],
+        )
+        merged_facts = {
+            key: value
+            for key, value in case.verified_facts.items()
+            if key != "_decision_contexts" and key not in SUBJECT_BOUND_FACTS
+        }
+        merged_facts.update(
+            key_value
+            for key_value in self._json_object(facts).items()
+            if key_value[0] != "_decision_contexts" and key_value[0] not in SUBJECT_BOUND_FACTS
+        )
+        if merged_contexts:
+            merged_facts["_decision_contexts"] = merged_contexts
         return await self._replace(
             case,
             status=case.status,
@@ -192,11 +259,16 @@ class SupportCaseService:
     @staticmethod
     def to_prompt_context(case: SupportCase) -> str:
         """构造受控 Case 摘要供 Workflow 使用，不携带内部审计或其他用户数据。"""
+        prompt_facts = {
+            key: value
+            for key, value in case.verified_facts.items()
+            if key != "_decision_contexts" and key not in SUBJECT_BOUND_FACTS
+        }
         payload = {
             "case_status": case.status,
             "request_stack": case.request_stack[:3],
             "selected_subjects": case.selected_subjects,
-            "verified_facts": case.verified_facts,
+            "verified_facts": prompt_facts,
             "pending": case.pending,
             "pending_command": case.pending_command,
         }

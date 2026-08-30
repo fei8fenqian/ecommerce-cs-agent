@@ -16,6 +16,11 @@ import pytest
 from config import settings
 
 EXPECTED_REVISION = "a7d1e8f4c902"
+TARGET_DATABASE = "ecommerce_agent_s3_02_test"
+pytestmark = pytest.mark.skipif(
+    settings.pg_dbname != TARGET_DATABASE,
+    reason=f"S3-01 schema tests require {TARGET_DATABASE}",
+)
 EXPECTED_TABLES = {
     "after_sale_requests",
     "refunds",

@@ -1,4 +1,3 @@
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import FlagEmbedding
@@ -27,6 +26,7 @@ with (
     patch.object(sentence_transformers, "SentenceTransformer", return_value=MagicMock()),
     patch.object(FlagEmbedding, "FlagReranker", return_value=MagicMock()),
 ):
+    from agent.llm.intent_router import Intent
     from agent.llm.session import SessionContext
     from api.chat import chat_router
     from api.session import session_router
@@ -112,7 +112,8 @@ def make_app() -> tuple[FastAPI, MagicMock, MagicMock]:
     agent.run_stream = AsyncMock()
 
     intent_router = MagicMock()
-    intent_router.route = AsyncMock(return_value=SimpleNamespace(target="agent"))
+    # 使用完整的路由结果最小契约：该测试要覆盖普通 Agent 流，不进入 Workflow。
+    intent_router.route = AsyncMock(return_value=Intent(target="agent"))
 
     app.state.session = session
     app.state.agent = agent

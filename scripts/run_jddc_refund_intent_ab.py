@@ -239,6 +239,8 @@ async def _run(
     speech_rows = evaluated
     goal_rows = [row for row in evaluated if row["gold"]["expected_requests"]]
     no_request_rows = [row for row in evaluated if not row["gold"]["expected_requests"]]
+    predicted_business_rows = [row for row in evaluated if row["prediction"] and row["prediction"]["requests"]]
+    detected_business_rows = [row for row in goal_rows if row["prediction"] and row["prediction"]["requests"]]
     workflow_rows = [row for row in evaluated if row["gold"]["expected_workflow"] is not None]
     speech_act_recall = {}
     for speech_act in _SPEECH_ACTS:
@@ -269,6 +271,27 @@ async def _run(
             sum(row["goal_match"] for row in no_request_rows) / len(no_request_rows) if no_request_rows else None
         ),
         "no_business_request_cases": len(no_request_rows),
+        "business_request_detection": {
+            "precision": (
+                len(detected_business_rows) / len(predicted_business_rows) if predicted_business_rows else None
+            ),
+            "recall": len(detected_business_rows) / len(goal_rows) if goal_rows else None,
+            "false_business_activation": sum(
+                bool(row["prediction"] and row["prediction"]["requests"]) for row in no_request_rows
+            ),
+            "missed_business_request": len(goal_rows) - len(detected_business_rows),
+        },
+        "action_request": {
+            "precision": (
+                sum(
+                    row["speech_act_match"] and row["prediction"]["speech_act"] == "ACTION_REQUEST" for row in evaluated
+                )
+                / sum(row["prediction"]["speech_act"] == "ACTION_REQUEST" for row in evaluated)
+                if any(row["prediction"]["speech_act"] == "ACTION_REQUEST" for row in evaluated)
+                else None
+            ),
+            "recall": speech_act_recall["ACTION_REQUEST"]["recall"],
+        },
         "goal_scored_cases": len(goal_rows),
         "workflow_scored_cases": len(workflow_rows),
         "request_sequence_accuracy": (
@@ -278,7 +301,16 @@ async def _run(
             sum(row["goal_match"] for row in no_request_rows) / len(no_request_rows) if no_request_rows else None
         ),
         "route_source_distribution": dict(Counter(row["route_source"] for row in rows)),
+        "conditional_goal_accuracy_by_route_source": {
+            source: {
+                "correct": sum(row["goal_match"] for row in detected_business_rows if row["route_source"] == source),
+                "total": sum(row["route_source"] == source for row in detected_business_rows),
+            }
+            for source in sorted({row["route_source"] for row in detected_business_rows})
+        },
     }
+    for values in summary["conditional_goal_accuracy_by_route_source"].values():
+        values["accuracy"] = values["correct"] / values["total"] if values["total"] else None
     return {
         "evaluation_kind": "jddc_refund_intent_router_ab",
         "model": model,
@@ -341,7 +373,7 @@ async def _main(args: argparse.Namespace) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--gold", type=Path, required=True)
+    parser.add_argument("--gold", "--gold-path", dest="gold", type=Path, required=True)
     parser.add_argument("--pre-rag", choices=("off", "on"), required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--model", default="deepseek-chat")

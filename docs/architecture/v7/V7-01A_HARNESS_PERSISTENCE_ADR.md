@@ -8,7 +8,7 @@
 
 权威来源：
 
-- `PLAN_V7.md` 的 V7-01 与阶段门禁；
+- [`PLAN_V7.md`](../../plans/PLAN_V7.md) 的 V7-01 与阶段门禁；
 - `V7-00-01_AGENT_PRODUCT_TASK_CATALOG.md`；
 - `V7-00-02_HARNESS_RUN_STATE_CONTRACT.md`；
 - `V7-00-03_TOOL_GATEWAY_RISK_APPROVAL_CONTRACT.md`；

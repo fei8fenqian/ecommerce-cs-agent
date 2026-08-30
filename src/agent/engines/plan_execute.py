@@ -246,7 +246,7 @@ class PlanAndExecuteAgent:
         query: str = state["query"]
         scenario: str = state.get("scenario", "build_pc")
         # 把工具列表转成 JSON 字符串，让 LLM 知道有哪些工具可用
-        tool_schema: str = json.dumps(self.registry.to_openai_schemas(), ensure_ascii=False)
+        tool_schema: str = json.dumps(self.registry.to_openai_schemas(state.get("tool_context")), ensure_ascii=False)
 
         # 根据场景选 prompt
         if scenario == "build_pc":
@@ -470,7 +470,7 @@ class PlanAndExecuteAgent:
                 found_lines.append(f"  step {sid} ({step.get('component', '?')}): 无结果")
 
         found_summary = "\n".join(found_lines) if found_lines else "（无）"
-        tool_schema: str = json.dumps(self.registry.to_openai_schemas(), ensure_ascii=False)
+        tool_schema: str = json.dumps(self.registry.to_openai_schemas(state.get("tool_context")), ensure_ascii=False)
         scenario: str = state.get("scenario", "build_pc")
 
         if scenario == "build_pc":

@@ -34,7 +34,9 @@ class SentimentResult:
 COMPLAINT_KEYWORDS: list[str] = [
     "投诉",
     "举报",
-    "退款",
+    "维权",
+    "曝光",
+    "起诉",
     "12315",
     "消协",
     "工商",

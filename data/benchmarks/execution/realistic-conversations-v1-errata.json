@@ -1,0 +1,14 @@
+{
+  "version": "v1",
+  "business_gold_changed": false,
+  "items": [
+    {
+      "case_id": "realistic-refund-020",
+      "field": "decisive_turn_index",
+      "frozen_value": 1,
+      "adjudicated_value": 2,
+      "issue": "frozen metadata points to an earlier order-context turn instead of the decisive explicit order/status turn",
+      "action": "keep frozen conversation and business Gold unchanged; report an adjudicated metadata view separately"
+    }
+  ]
+}

@@ -122,6 +122,7 @@ def _checkout_order_to_tool_order(order: object) -> dict[str, Any]:
         "tracking": {"company": tracking_company, "number": tracking_number},
         "total_amount": amount_cents / 100,
         "paid_amount": paid_amount,
+        "payment_status": payment_status,
         "payment_method": "支付宝沙箱",
         "order_date": str(getattr(order, "created_at")),
         "delivered_at": None,
@@ -139,7 +140,11 @@ def _checkout_order_to_tool_order(order: object) -> dict[str, Any]:
         return result
 
     refund_status_text = str(refund_status)
-    result["refund"] = {"status": refund_status_text}
+    refund_amount_cents = getattr(order, "refund_amount_cents", None)
+    refund = {"status": refund_status_text}
+    if refund_amount_cents is not None:
+        refund["amount_cents"] = int(refund_amount_cents)
+    result["refund"] = refund
     if refund_status_text == "SUCCEEDED":
         result.update(
             {

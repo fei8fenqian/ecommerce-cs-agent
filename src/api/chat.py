@@ -11,11 +11,21 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from agent.customer_response import compose_customer_response
+from agent.decision_context import (
+    context_facts_for_subject,
+    historicalize_decision_contexts,
+    merge_decision_contexts,
+)
 from agent.engines.loop import LoopResult
+from agent.evidence import resolve_evidence
 from agent.llm.intent_router import Intent, IntentRouter, build_route_instruction
 from agent.llm.resolve import resolve_stock_follow_up
 from agent.llm.sentiment import build_escalation_prompt, detect_sentiment
-from agent.rag.retrieve import hybrid_search
+from agent.rag.knowledge_context import format_knowledge_context
+from agent.rag.retrieve import hybrid_search, pre_retrieve_knowledge
+from agent.support_control import confirmation_required
+from agent.support_subjects import looks_like_pending_subject_choice, resolve_pending_subject_choice
 from agent.tools_registry import ToolContext
 from config import settings
 from exceptions import DependencyUnavailableError, LLMError
@@ -60,9 +70,12 @@ _CHAT_RUN_TTL_SECONDS = 300
 _CUSTOMER_CHAT_READ_TOOLS = frozenset(
     {
         "search_product",
+        "search_knowledge",
         "check_stock",
         "track_order",
         "check_payment_status",
+        "query_refund_status",
+        "check_refund_eligibility",
         "check_after_sales",
         "compare_products",
         "search_component",
@@ -78,6 +91,269 @@ def _compose_prompt_extras(*parts: str) -> str:
 def _support_case_payloads(intent: Intent) -> list[dict]:
     """把路由器的受控多请求结构转换为可持久化 Case payload。"""
     return [support_request.to_case_payload() for support_request in intent.support_requests]
+
+
+def _session_decision_facts(messages: list[dict[str, object]] | None) -> dict[str, object]:
+    """读取最近一轮由服务端保存的只读事实元数据，不把它暴露给模型。"""
+    for message in reversed(messages or []):
+        facts = message.get("_decision_facts") if isinstance(message, dict) else None
+        if isinstance(facts, dict):
+            return dict(facts)
+    return {}
+
+
+def _session_decision_contexts(messages: list[dict[str, object]] | None) -> list[dict[str, object]]:
+    """读取服务端保存的 subject-bound facts，并标记为 historical。"""
+    contexts: list[dict[str, object]] = []
+    # 按消息时间正序合并；同一订单后一次工具读取应覆盖更早的历史读取。
+    # ``_session_decision_facts`` 仍单独从末尾读取 flat 兼容 metadata。
+    for message in messages or []:
+        raw = message.get("_decision_contexts") if isinstance(message, dict) else None
+        if not isinstance(raw, list):
+            continue
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            context = dict(item)
+            context["provenance"] = "historical"
+            contexts.append(context)
+    return merge_decision_contexts(contexts, default_provenance="historical")
+
+
+def _case_refund_requests(case: SupportCase | None) -> list[dict[str, object]]:
+    if case is None:
+        return []
+    return [item for item in case.request_stack if isinstance(item, dict) and str(item.get("domain") or "") == "refund"]
+
+
+def _case_refund_facts(case: SupportCase | None) -> dict[str, object]:
+    if case is None:
+        return {}
+    return {
+        str(key): value
+        for key, value in case.verified_facts.items()
+        if str(key).startswith("refund_") or str(key) in {"order_identified", "shipping_status", "order_status"}
+    }
+
+
+def _case_decision_contexts(case: SupportCase | None) -> list[dict[str, object]]:
+    """读取 Case 内按订单隔离的事实组，不把它们展平成客户可见事实。"""
+    if case is None:
+        return []
+    raw = case.verified_facts.get("_decision_contexts")
+    if not isinstance(raw, list):
+        return []
+    contexts = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        contexts.append(item)
+    return historicalize_decision_contexts(contexts)
+
+
+def _merged_refund_facts(
+    result: LoopResult,
+    *,
+    recent_case: SupportCase | None = None,
+    session_facts: dict[str, object] | None = None,
+    session_contexts: list[dict[str, object]] | None = None,
+) -> tuple[dict[str, object], bool]:
+    """按 subject 合并兼容事实，并返回是否全部来自 historical。"""
+    current_contexts = merge_decision_contexts(result.decision_contexts)
+    historical_contexts = merge_decision_contexts(
+        session_contexts or [],
+        _case_decision_contexts(recent_case),
+        default_provenance="historical",
+    )
+    all_contexts = merge_decision_contexts(current_contexts, historical_contexts)
+    selected_id = None
+    if recent_case is not None:
+        selected = recent_case.selected_subjects.get("order_id")
+        if isinstance(selected, str) and selected.startswith("SO"):
+            selected_id = selected
+    subject_ids = {str(item.get("subject_id")) for item in all_contexts if item.get("subject_id")}
+    if selected_id is None and len(subject_ids) == 1:
+        selected_id = next(iter(subject_ids))
+    if selected_id is not None:
+        current_facts, _ = context_facts_for_subject(current_contexts, selected_id, provenance="current")
+        historical_facts, _ = context_facts_for_subject(historical_contexts, selected_id, provenance="historical")
+        merged = dict(historical_facts)
+        merged.update(current_facts)
+        return merged, bool(merged) and not bool(current_facts)
+    if len(subject_ids) > 1:
+        return {}, False
+
+    # 只给完全没有 subject context 的旧会话/旧测试保留 flat 兼容路径。只要新格式
+    # context 存在，就绝不能用 flat facts 绕过 subject 隔离；这也是迁移期间避免
+    # 新旧 metadata 交叉污染的边界。
+    merged = dict(session_facts or {})
+    progress_facts = result.workflow_progress.get("decision_facts")
+    current_sources = (progress_facts, result.verified_facts, result.decision_facts)
+    for source in current_sources:
+        if isinstance(source, dict):
+            merged.update(source)
+    has_current_facts = any(isinstance(source, dict) and source for source in current_sources)
+    return merged, bool(merged) and not has_current_facts
+
+
+def _refund_boundary_requests(
+    intent: Intent,
+    result: LoopResult,
+    *,
+    recent_case: SupportCase | None = None,
+    session_facts: dict[str, object] | None = None,
+    session_contexts: list[dict[str, object]] | None = None,
+) -> list[dict[str, object]]:
+    """为普通 AgentLoop 结果恢复最小退款事实边界输入。
+
+    正常 SupportWorkflow 会把请求保存在 Case/Workflow state；兼容的普通 AgentLoop
+    路径可能只有 intent 字段或工具事实，因此这里只根据受控请求/事实选择已实现的
+    status、eligibility 渲染，不从客户文本猜业务结论。
+    """
+    requests = _support_case_payloads(intent)
+    refund_requests = [request for request in requests if str(request.get("domain") or "") == "refund"]
+    if refund_requests:
+        return refund_requests
+    recent_requests = _case_refund_requests(recent_case)
+    facts, _ = _merged_refund_facts(
+        result,
+        recent_case=recent_case,
+        session_facts=session_facts,
+        session_contexts=session_contexts,
+    )
+    # 非退款路由也可能在本轮读到了退款资格事实（例如订单售后流程）。优先渲染
+    # 资格结论，避免模型把 true 扩写成“全额退款资格”。
+    if isinstance(facts.get("refund_eligibility"), bool) and (
+        intent.domain != "refund" or intent.operation not in {"status", "eligibility"}
+    ):
+        return [{"domain": "refund", "operation": "eligibility"}]
+    if recent_requests:
+        return recent_requests[:1]
+    if intent.domain == "refund" and intent.operation:
+        # 旧兼容字段可能仍把退款状态查询写成泛化 operation（例如 ``refund``）。
+        # 只要工具已经返回退款状态，就必须回到 status renderer，不能让这个
+        # 未知 operation 绕过事实边界把模型原文直接交给客户。
+        if intent.operation in {
+            "status",
+            "expected_arrival",
+            "processing_time",
+            "anomaly",
+            "delivery_after_refund",
+            "destination",
+            "request",
+            "cancel",
+            "amount",
+            "eligibility",
+            "procedure",
+        }:
+            return [{"domain": "refund", "operation": intent.operation}]
+        if "refund_status" in facts:
+            return [{"domain": "refund", "operation": "status"}]
+        if isinstance(facts.get("refund_eligibility"), bool):
+            return [{"domain": "refund", "operation": "eligibility"}]
+    if "refund_status" in facts:
+        return [{"domain": "refund", "operation": "status"}]
+    if isinstance(facts.get("refund_eligibility"), bool):
+        return [{"domain": "refund", "operation": "eligibility"}]
+    return []
+
+
+def _apply_customer_refund_fact_boundary(
+    intent: Intent,
+    result: LoopResult,
+    *,
+    query: str = "",
+    recent_case: SupportCase | None = None,
+    session_facts: dict[str, object] | None = None,
+    session_contexts: list[dict[str, object]] | None = None,
+) -> None:
+    """普通/流式出口统一委托共享 customer-response composer。"""
+    requests = _refund_boundary_requests(
+        intent,
+        result,
+        recent_case=recent_case,
+        session_facts=session_facts,
+        session_contexts=session_contexts,
+    )
+    historical_contexts = merge_decision_contexts(
+        session_contexts or [],
+        _case_decision_contexts(recent_case),
+        default_provenance="historical",
+    )
+    compose_customer_response(
+        result,
+        requests,
+        current_contexts=result.decision_contexts,
+        historical_contexts=historical_contexts,
+        legacy_current_facts=result.decision_facts,
+        legacy_historical_facts=session_facts,
+        case=recent_case,
+        enforce_refund_boundary=_refund_response_context(
+            intent,
+            query,
+            active_case=recent_case,
+            recent_case=recent_case,
+            session_facts=session_facts,
+            session_contexts=session_contexts,
+        ),
+    )
+
+
+def _case_has_refund_context(case: SupportCase | None) -> bool:
+    if case is None:
+        return False
+    if _case_refund_requests(case) or _case_refund_facts(case) or _case_decision_contexts(case):
+        return True
+    return any(
+        str(item.get("operation") or "") in {"after_sales_transition", "return_logistics"}
+        for item in case.request_stack
+        if isinstance(item, dict)
+    )
+
+
+def _refund_response_context(
+    intent: Intent,
+    query: str,
+    *,
+    active_case: SupportCase | None = None,
+    recent_case: SupportCase | None = None,
+    session_facts: dict[str, object] | None = None,
+    session_contexts: list[dict[str, object]] | None = None,
+) -> bool:
+    """在生成客户答案前判断是否必须经过退款事实边界。"""
+    if intent.domain == "refund" or any(
+        str(item.get("domain") or "") == "refund" for item in _support_case_payloads(intent)
+    ):
+        return True
+    if active_case is not None and _case_has_refund_context(active_case):
+        return True
+    normalized = re.sub(r"\s+", "", query).lower()
+    follow_up_markers = ("退款", "退钱", "返款", "到账", "处理中", "处理", "这笔", "页面", "钱")
+    # 当前句直接提到退款/到账时，即使 Router 没有形成 support request，也要在
+    # 首个 customer-visible token 发出前进入共享 response boundary。R018 就属于
+    # 这种“模型给出多笔交易结论、但本轮没有可信 subject/fact”的情况。
+    if any(marker in normalized for marker in follow_up_markers):
+        return True
+    if recent_case is not None and _case_has_refund_context(recent_case):
+        return True
+    if session_facts and any(key in session_facts for key in ("refund_status", "refund_eligibility", "refund_amount")):
+        return True
+    if session_contexts:
+        return True
+    return False
+
+
+async def _get_latest_support_case(
+    request: Request,
+    *,
+    session_id: str,
+    customer_user_id: int,
+) -> SupportCase | None:
+    """只读读取最近 Case，供跨轮 customer-output boundary 使用。"""
+    service = getattr(request.app.state, "support_case_service", None)
+    if not isinstance(service, SupportCaseService):
+        return None
+    return await service.get_latest(session_id=session_id, customer_user_id=customer_user_id)
 
 
 async def _open_support_case(
@@ -122,6 +398,14 @@ def _is_pending_case_reply(case: SupportCase | None, intent: Intent, raw_query: 
     """只把明确的短确认绑定回 pending，避免吞掉客户的新问题。"""
     if case is None or case.status != "AWAITING_CUSTOMER":
         return False
+    if case.pending.get("kind") == "customer_choice":
+        choices = case.pending.get("choices", [])
+        # 已展示的候选拥有优先级：可唯一解析的选择，以及明显在回答选择的
+        # 未解析表达，都应回到原 Case，而不是被孤立路由成新业务请求。
+        if resolve_pending_subject_choice(raw_query, choices) is not None:
+            return True
+        if looks_like_pending_subject_choice(raw_query, choices):
+            return True
     if intent.case_update == "continue":
         return True
     if intent.case_update == "new_request":
@@ -186,12 +470,33 @@ async def _resume_pending_case(
     request: Request,
     *,
     case: SupportCase | None,
+    raw_query: str,
 ) -> SupportCase | None:
     if case is None:
         return None
     service = getattr(request.app.state, "support_case_service", None)
     if not isinstance(service, SupportCaseService):
         return case
+    if case.pending.get("kind") == "customer_choice":
+        choices = case.pending.get("choices", [])
+        if not isinstance(choices, list) or not choices:
+            # 兼容在 choice frame 上线前创建的旧 Case。它没有可供服务端解析的
+            # 展示快照，不能声称完成了确定性选单；仍按旧恢复路径承接上下文。
+            return await service.resume_customer_response(case)
+        selected = resolve_pending_subject_choice(raw_query, choices)
+        if selected is None:
+            # 选择不唯一时保持 AWAITING_CUSTOMER；后续 Workflow 会再次使用同一
+            # 候选帧提问，不能依赖模型猜测或重新按数据库顺序选单。
+            return case
+        choice = selected.get("choice")
+        if not isinstance(choice, dict):
+            return case
+        updated = await service.select_customer_subject(
+            case,
+            subject=choice,
+            selection_source=str(selected.get("selection_source") or "choice"),
+        )
+        return updated or case
     return await service.resume_customer_response(case)
 
 
@@ -247,44 +552,58 @@ async def _await_support_case_customer(
     case: SupportCase | None,
     intent: Intent,
     workflow_progress: dict[str, object] | None = None,
-) -> None:
+) -> SupportCase | None:
     """将复杂请求的下一轮语义显式保存，避免短回复退化为新问题。"""
     if case is None or case.status == "AWAITING_STAFF":
-        return
+        return case
     service = getattr(request.app.state, "support_case_service", None)
     if not isinstance(service, SupportCaseService):
-        return
+        return case
     requests = intent.support_requests
     if not requests:
-        return
+        return case
     primary = requests[0]
     execution_status = str((workflow_progress or {}).get("goal_status") or "")
+    next_action = str((workflow_progress or {}).get("next_action") or "")
+    request_payloads = _support_case_payloads(intent)
+    requires_confirmation = confirmation_required(request_payloads)
     pending = {
         "kind": (
             "execution_blocked"
             if execution_status in {"blocked", "unresolved"}
+            else "customer_clarification"
+            if next_action == "ASK_CLARIFICATION"
             else "customer_confirmation"
-            if primary.risk != "read_only"
+            if requires_confirmation
             else "customer_choice"
         ),
         "operation": primary.operation,
-        "next_step": primary.next_step,
-        "missing_facts": primary.missing_facts,
+        "next_step": next_action,
+        "missing_facts": list((workflow_progress or {}).get("missing_facts") or []),
         "options_limit": 3,
     }
     if workflow_progress:
         pending["execution"] = workflow_progress
-    pending_command = {
-        "status": "PROPOSED_NOT_EXECUTED",
-        "operation": primary.operation,
-        "risk": primary.risk,
-        "requires_explicit_confirmation": primary.risk != "read_only",
-    }
-    await service.await_customer(
+    if pending["kind"] == "customer_choice":
+        choices = workflow_progress.get("pending_choices") if workflow_progress else None
+        if isinstance(choices, list) and choices:
+            # 这个顺序就是 SupportWorkflow 实际展示给客户的顺序，后续序号解析
+            # 只能读取这一帧，不能重新查询或排序。
+            pending["subject_type"] = "order"
+            pending["choices"] = choices[:3]
+    pending_command: dict[str, object] = {}
+    if requires_confirmation and execution_status == "awaiting_confirmation":
+        pending_command = {
+            "status": "PROPOSED_NOT_EXECUTED",
+            "operation": primary.operation,
+            "risk": "customer_confirmation",
+            "requires_explicit_confirmation": True,
+        }
+    return await service.await_customer(
         case,
         pending=pending,
         pending_command=pending_command,
-        request_stack=_support_case_payloads(intent),
+        request_stack=request_payloads,
     )
 
 
@@ -295,14 +614,18 @@ async def _record_support_case_facts(
     loop_result: LoopResult,
 ) -> SupportCase | None:
     """把 Workflow 的受控只读结果持久化为下一轮可复用的事实。"""
-    if case is None or not loop_result.verified_facts:
+    facts = loop_result.decision_facts or loop_result.verified_facts
+    if case is None or (not facts and not loop_result.decision_contexts):
         return case
     service = getattr(request.app.state, "support_case_service", None)
     if not isinstance(service, SupportCaseService):
         return case
     # 乐观锁竞争时不使用旧 Case 覆盖另一标签页的新选择；本轮仍可完成回答，下一轮
     # 会重新读取最新状态。
-    return await service.record_verified_facts(case, facts=loop_result.verified_facts)
+    kwargs: dict[str, object] = {"facts": facts}
+    if loop_result.decision_contexts:
+        kwargs["decision_contexts"] = loop_result.decision_contexts
+    return await service.record_verified_facts(case, **kwargs)
 
 
 def _support_case_needs_customer_turn(
@@ -311,13 +634,18 @@ def _support_case_needs_customer_turn(
     workflow_progress: dict[str, object] | None = None,
 ) -> bool:
     """判断 Workflow 是否确实还需要客户选择/补充/确认。"""
+    next_actor = str((workflow_progress or {}).get("next_actor") or "")
+    if next_actor:
+        return next_actor == "CUSTOMER"
     progress_status = str((workflow_progress or {}).get("goal_status") or "")
     # 客户恢复 pending 后，Case 仍会暂存旧问题供本轮模型理解；旧 pending 本身
     # 不能覆盖当前执行评估，否则即使事实已核验完成，Case 也会永远停在等待客户。
     if progress_status == "resolved":
         return False
-    if progress_status in {"blocked", "unresolved", "awaiting_customer"}:
+    if progress_status in {"blocked", "unresolved", "awaiting_customer", "awaiting_confirmation"}:
         return True
+    if progress_status == "resolved_with_explanation":
+        return False
     if case is not None and case.pending:
         # 现有 pending 是案件状态，不会因用户提出另一件事而被覆盖或提前完成。
         return True
@@ -354,24 +682,45 @@ async def _persist_support_case_progress(
     case = await _record_support_case_facts(request, case=case, loop_result=loop_result)
     if case is None:
         return None
+    workflow_progress = loop_result.workflow_progress
+    next_actor = str(workflow_progress.get("next_actor") or "")
+    if next_actor in {"STAFF", "SYSTEM"}:
+        service = getattr(request.app.state, "support_case_service", None)
+        if isinstance(service, SupportCaseService):
+            updated = await service.mark_awaiting_staff(
+                case,
+                reason=str(workflow_progress.get("reason") or "CONTROL_PLANE_BLOCKED"),
+                handoff_summary={
+                    "goal": str(workflow_progress.get("goal") or "customer_support"),
+                    "next_actor": next_actor,
+                    "next_action": str(workflow_progress.get("next_action") or ""),
+                    "unsupported_workflows": list(workflow_progress.get("unsupported_workflows") or []),
+                    "unavailable_capabilities": list(workflow_progress.get("unavailable_capabilities") or []),
+                },
+            )
+            return updated or case
+        return case
     if _support_case_needs_customer_turn(intent, case, loop_result.workflow_progress):
-        await _await_support_case_customer(
+        updated = await _await_support_case_customer(
             request,
             case=case,
             intent=intent,
             workflow_progress=loop_result.workflow_progress,
         )
-        return case
+        return updated or case
     service = getattr(request.app.state, "support_case_service", None)
     if isinstance(service, SupportCaseService):
-        await service.complete(
+        resolution_type = str(loop_result.workflow_progress.get("resolution_type") or "")
+        updated = await service.complete(
             case,
             outcome={
-                "completion": "read_only_answer_returned",
+                "completion": resolution_type or "read_only_answer_returned",
+                "resolution_type": resolution_type or None,
                 "request_count": len(intent.support_requests),
                 "execution": loop_result.workflow_progress,
             },
         )
+        return updated or case
     return case
 
 
@@ -541,13 +890,48 @@ def _build_context(docs: list[dict], *, customer_view: bool) -> str:
     return "\n-----\n".join(lines)
 
 
-def _customer_action_suffix(intent_target: str, table: str, query: str, product_name: str = "") -> str:
+async def _pre_route_knowledge_context(query: str) -> str:
+    """轻量 Pre-RAG：只辅助 Router 理解术语，不作为最终回答依据。"""
+    try:
+        docs = await pre_retrieve_knowledge(query, top_k=3)
+    except Exception as exc:  # 知识不可用时 fail closed：不给 Router 任何未审计来源。
+        _chat_logger.warning("pre-rag unavailable error_type=%s", type(exc).__name__)
+        return ""
+    return format_knowledge_context(docs, max_docs=3)
+
+
+async def _deep_knowledge_context(query: str, *, required: bool) -> str:
+    """按 EvidencePlan 获取供解答使用的知识证据。"""
+    if not required:
+        return ""
+    try:
+        docs = await hybrid_search(query, table="knowledge_chunks", top_k=5, use_rerank=True)
+    except Exception as exc:
+        _chat_logger.warning("deep-rag unavailable error_type=%s", type(exc).__name__)
+        return ""
+    return format_knowledge_context(docs, max_docs=5)
+
+
+def _merge_evidence_context(*contexts: str) -> str:
+    """保留来源边界地合并产品上下文和知识上下文。"""
+    return "\n\n".join(context.strip() for context in contexts if context and context.strip())
+
+
+def _customer_action_suffix(
+    intent_target: str,
+    table: str,
+    query: str,
+    product_name: str = "",
+    trusted_refund_entry: str = "",
+) -> str:
     """为客户的下一步操作附加确定性站内链接，而不是让模型临时编造 URL。"""
     normalized = "".join(query.split()).lower()
     if intent_target == "ticket":
         return "\n\n[查看售后进度](?page=tickets)"
-    if any(marker in normalized for marker in ("退款", "退货", "退钱", "想退", "不想要")):
-        return "\n\n[前往我的订单申请退款](?page=orders)"
+    # 退款入口只能由 SupportWorkflow 在资格核验后通过可信后端生成。不能再根据
+    # 原始 query 中的“退款”一词拼通用链接，否则 STATEMENT/状态查询也会被误导。
+    if trusted_refund_entry.startswith("?page=orders&refund_order=SO"):
+        return f"\n\n[前往我的订单申请退款]({trusted_refund_entry})"
     if any(marker in normalized for marker in ("订单", "物流", "发货", "签收")):
         return "\n\n[查看我的订单](?page=orders)"
     if table in {"laptop_products", "phone_products"} or any(
@@ -660,28 +1044,54 @@ async def chat(chat_req: ChatRequest, request: Request):
             session_id=ctx.session_id,
             customer_user_id=user_id,
         )
+        recent_support_case = await _get_latest_support_case(
+            request,
+            session_id=ctx.session_id,
+            customer_user_id=user_id,
+        )
+        session_facts = _session_decision_facts(ctx.messages)
+        session_contexts = _session_decision_contexts(ctx.messages)
         active_case_context = (
             SupportCaseService.to_prompt_context(active_support_case) if active_support_case is not None else ""
         )
-        # 单次轻量调用同时完成上下文 query 重写和意图路由，不增加额外模型往返。
+        # Pre-RAG 只给 Router 解释项目术语；业务事实和最终回答证据仍由后续层获取。
+        pre_knowledge_context = await _pre_route_knowledge_context(resolved_query)
         if active_case_context:
             intent = await intent_router.route(
                 resolved_query,
                 history=ctx.history,
                 case_context=active_case_context,
+                knowledge_context=pre_knowledge_context,
             )
         else:
-            intent = await intent_router.route(resolved_query, history=ctx.history)
+            intent = await intent_router.route(
+                resolved_query,
+                history=ctx.history,
+                knowledge_context=pre_knowledge_context,
+            )
         confirmed_human_handoff = _is_confirmed_human_handoff(active_support_case, chat_req.query)
         resuming_support_case = _is_pending_case_reply(active_support_case, intent, chat_req.query)
         if resuming_support_case and active_support_case is not None:
             intent = _intent_for_case_reply(active_support_case, intent)
-            active_support_case = await _resume_pending_case(request, case=active_support_case)
-        if selected_product_context and intent.target != "ticket":
-            intent.target = "rag"
-            intent.table = selected_product_table
-            intent.scenario = ""
+            active_support_case = await _resume_pending_case(
+                request,
+                case=active_support_case,
+                raw_query=chat_req.query,
+            )
         effective_query = intent.query or resolved_query
+        evidence_plan = resolve_evidence(
+            domain=intent.domain,
+            operation=intent.operation,
+            target=intent.target,
+            table=intent.table,
+        )
+        # `rag/knowledge_chunks` 兼容路径会在下方复用原有检索；其他路径可同时携带
+        # 受控知识和实时 Workflow/Tool 事实，而不再二选一。
+        knowledge_context = await _deep_knowledge_context(
+            effective_query,
+            required=evidence_plan.needs_deep_knowledge
+            and not (intent.target == "rag" and intent.table == "knowledge_chunks"),
+        )
         sentiment = detect_sentiment(effective_query, history=ctx.history)
         sentiment_ctx = build_escalation_prompt(sentiment)
         route_ctx = build_route_instruction(intent)
@@ -758,6 +1168,7 @@ async def chat(chat_req: ChatRequest, request: Request):
                 total_tokens=0,
             )
 
+        response_case = recent_support_case
         if intent.target == "plan_execute":
             plan_agent = request.app.state.plan_execute_agent
             plan_state = await plan_agent.run(
@@ -785,19 +1196,24 @@ async def chat(chat_req: ChatRequest, request: Request):
             )
             support_case = await _merge_new_support_request(request, case=support_case, intent=intent)
             case_context = SupportCaseService.to_prompt_context(support_case) if support_case is not None else ""
+            workflow_kwargs: dict[str, object] = {}
+            if support_case is not None and support_case.selected_subjects:
+                workflow_kwargs["selected_subjects"] = support_case.selected_subjects
             try:
                 loop_result = await support_workflow.run(
                     effective_query,
+                    context=_merge_evidence_context(selected_product_context, knowledge_context),
                     history=ctx.history,
                     system_prompt_extra=agent_prompt_extra,
                     case_context=case_context,
                     support_requests=_support_case_payloads(intent),
                     tool_context=tool_context,
+                    **workflow_kwargs,
                 )
             except Exception as exc:
                 await _fail_support_case(request, case=support_case, error=exc)
                 raise
-            await _persist_support_case_progress(
+            response_case = await _persist_support_case_progress(
                 request,
                 case=support_case,
                 intent=intent,
@@ -809,9 +1225,11 @@ async def chat(chat_req: ChatRequest, request: Request):
                 table=intent.table,
                 use_rerank=_should_rerank(effective_query, intent.table),
             )
-            context = _build_context(docs, customer_view=tool_context.role == "customer")
-            if selected_product_context:
-                context = f"{selected_product_context}\n\n相关资料：\n{context}"
+            context = _merge_evidence_context(
+                selected_product_context,
+                _build_context(docs, customer_view=tool_context.role == "customer"),
+                knowledge_context,
+            )
             retrieved_entities = _entities_from_retrieval(intent.table, docs)
             if selected_product_name:
                 retrieved_entities["product"] = selected_product_name
@@ -826,12 +1244,26 @@ async def chat(chat_req: ChatRequest, request: Request):
         else:
             loop_result = await agent.run(
                 effective_query,
+                context=_merge_evidence_context(selected_product_context, knowledge_context),
                 history=ctx.history,
                 system_prompt_extra=agent_prompt_extra,
                 tool_context=tool_context,
             )
 
         if tool_context.role == "customer":
+            _apply_customer_refund_fact_boundary(
+                intent,
+                loop_result,
+                query=chat_req.query,
+                recent_case=response_case,
+                session_facts=session_facts,
+                session_contexts=session_contexts,
+            )
+
+        if (
+            tool_context.role == "customer"
+            and loop_result.workflow_progress.get("resolution_type") != "SELF_SERVICE_HANDOFF"
+        ):
             loop_result.answer = _append_customer_action_suffix(
                 loop_result.answer,
                 intent.target,
@@ -909,38 +1341,68 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
             session_id=session_id,
             customer_user_id=user_id,
         )
+        recent_support_case = await _get_latest_support_case(
+            request,
+            session_id=session_id,
+            customer_user_id=user_id,
+        )
+        session_facts = _session_decision_facts(session_ctx.messages)
+        session_contexts = _session_decision_contexts(session_ctx.messages)
         active_case_context = (
             SupportCaseService.to_prompt_context(active_support_case) if active_support_case is not None else ""
         )
+        pre_knowledge_context = await _pre_route_knowledge_context(resolve_query)
         if active_case_context:
-            intent = await intent_router.route(resolve_query, history=history, case_context=active_case_context)
+            intent = await intent_router.route(
+                resolve_query,
+                history=history,
+                case_context=active_case_context,
+                knowledge_context=pre_knowledge_context,
+            )
         else:
-            intent = await intent_router.route(resolve_query, history=history)
+            intent = await intent_router.route(
+                resolve_query,
+                history=history,
+                knowledge_context=pre_knowledge_context,
+            )
         confirmed_human_handoff = _is_confirmed_human_handoff(active_support_case, chat_req.query)
         resuming_support_case = _is_pending_case_reply(active_support_case, intent, chat_req.query)
         if resuming_support_case and active_support_case is not None:
             intent = _intent_for_case_reply(active_support_case, intent)
-            active_support_case = await _resume_pending_case(request, case=active_support_case)
-        if selected_product_context and intent.target != "ticket":
-            intent.target = "rag"
-            intent.table = selected_product_table
-            intent.scenario = ""
+            active_support_case = await _resume_pending_case(
+                request,
+                case=active_support_case,
+                raw_query=chat_req.query,
+            )
         effective_query = intent.query or resolve_query
+        evidence_plan = resolve_evidence(
+            domain=intent.domain,
+            operation=intent.operation,
+            target=intent.target,
+            table=intent.table,
+        )
+        knowledge_context = await _deep_knowledge_context(
+            effective_query,
+            required=evidence_plan.needs_deep_knowledge
+            and not (intent.target == "rag" and intent.table == "knowledge_chunks"),
+        )
         sentiment = detect_sentiment(effective_query, history=history)
         extra_prompt = _compose_prompt_extras(
             build_escalation_prompt(sentiment),
             build_route_instruction(intent),
         )
-        context = ""
+        context = _merge_evidence_context(selected_product_context, knowledge_context)
         if intent.target == "rag":
             docs = await hybrid_search(
                 effective_query,
                 table=intent.table,
                 use_rerank=_should_rerank(effective_query, intent.table),
             )
-            context = _build_context(docs, customer_view=tool_context.role == "customer")
-            if selected_product_context:
-                context = f"{selected_product_context}\n\n相关资料：\n{context}"
+            context = _merge_evidence_context(
+                selected_product_context,
+                _build_context(docs, customer_view=tool_context.role == "customer"),
+                knowledge_context,
+            )
             last_entities = _entities_from_retrieval(intent.table, docs)
             if selected_product_name:
                 last_entities["product"] = selected_product_name
@@ -949,7 +1411,13 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
     except LLMError as exc:
         raise DependencyUnavailableError("智能服务暂时不可用") from exc
 
-    stream_res = {"answer": "", "total_steps": 0, "total_tokens": 0}
+    stream_res = {
+        "answer": "",
+        "total_steps": 0,
+        "total_tokens": 0,
+        "decision_facts": {},
+        "decision_contexts": [],
+    }
     start_t = time.perf_counter()
     support_decision = decide_customer_support_action(
         intent_target=intent.target,
@@ -975,6 +1443,15 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
         stream_completed = False
         phase = "start"
         pending_done_event: dict[str, object] | None = None
+        buffered_response_tokens: list[str] = []
+        response_fact_sensitive = tool_context.role == "customer" and _refund_response_context(
+            intent,
+            chat_req.query,
+            active_case=active_support_case,
+            recent_case=recent_support_case,
+            session_facts=session_facts,
+            session_contexts=session_contexts,
+        )
         nonlocal last_entities
         try:
             # 先推一个 start 事件给前端，带 session_id
@@ -1063,20 +1540,50 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                 )
                 support_case = await _merge_new_support_request(request, case=support_case, intent=intent)
                 case_context = SupportCaseService.to_prompt_context(support_case) if support_case is not None else ""
+                workflow_kwargs: dict[str, object] = {}
+                if support_case is not None and support_case.selected_subjects:
+                    workflow_kwargs["selected_subjects"] = support_case.selected_subjects
                 try:
                     workflow_result = await support_workflow.run(
                         effective_query,
+                        context=context,
                         history=history,
                         system_prompt_extra=extra_prompt,
                         case_context=case_context,
                         support_requests=_support_case_payloads(intent),
                         tool_context=tool_context,
+                        **workflow_kwargs,
                     )
                 except Exception as exc:
                     await _fail_support_case(request, case=support_case, error=exc)
                     raise
+                # Persist the control outcome before composing the customer answer.  The
+                # updated Case carries the exact pending choice frame (or staff handoff),
+                # so the same shared composer sees the same state as the normal endpoint.
+                phase = "persist"
+                response_case = await _persist_support_case_progress(
+                    request,
+                    case=support_case,
+                    intent=intent,
+                    loop_result=workflow_result,
+                )
                 answer = workflow_result.answer
                 if tool_context.role == "customer":
+                    _apply_customer_refund_fact_boundary(
+                        intent,
+                        workflow_result,
+                        query=chat_req.query,
+                        recent_case=response_case or support_case,
+                        session_facts=session_facts,
+                        session_contexts=session_contexts,
+                    )
+                    answer = workflow_result.answer
+                if (
+                    tool_context.role == "customer"
+                    and workflow_result.workflow_progress.get("resolution_type") != "SELF_SERVICE_HANDOFF"
+                    and "generate_refund_entry"
+                    not in workflow_result.workflow_progress.get("unavailable_capabilities", [])
+                ):
                     answer = _append_customer_action_suffix(
                         answer,
                         intent.target,
@@ -1096,13 +1603,8 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                 stream_res["answer"] = answer
                 stream_res["total_steps"] = workflow_result.total_steps
                 stream_res["total_tokens"] = workflow_result.total_tokens
-                phase = "persist"
-                await _persist_support_case_progress(
-                    request,
-                    case=support_case,
-                    intent=intent,
-                    loop_result=workflow_result,
-                )
+                stream_res["decision_facts"] = workflow_result.decision_facts
+                stream_res["decision_contexts"] = workflow_result.decision_contexts
                 await session.add_turn(
                     session_id,
                     user_id,
@@ -1114,6 +1616,10 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                         total_tokens=workflow_result.total_tokens,
                         total_latency_ms=(time.perf_counter() - start_t) * 1000,
                         last_entities=workflow_result.last_entities,
+                        decision_facts=workflow_result.decision_facts,
+                        decision_contexts=workflow_result.decision_contexts,
+                        workflow_progress=workflow_result.workflow_progress,
+                        response_control=workflow_result.response_control,
                     ),
                 )
                 done_event = {
@@ -1193,6 +1699,29 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
 
                 if event.get("event") == "done":
                     answer = str(event.get("answer", ""))
+                    decision_facts = event.get("decision_facts", {})
+                    if not isinstance(decision_facts, dict):
+                        decision_facts = {}
+                    decision_contexts = event.get("decision_contexts", [])
+                    if not isinstance(decision_contexts, list):
+                        decision_contexts = []
+                    if response_fact_sensitive:
+                        guarded_result = LoopResult(
+                            answer=answer or "".join(buffered_response_tokens),
+                            decision_facts=decision_facts,
+                            decision_contexts=decision_contexts,
+                        )
+                        _apply_customer_refund_fact_boundary(
+                            intent,
+                            guarded_result,
+                            query=chat_req.query,
+                            recent_case=recent_support_case,
+                            session_facts=session_facts,
+                            session_contexts=session_contexts,
+                        )
+                        answer = guarded_result.answer
+                        if answer:
+                            yield f"data: {json.dumps({'event': 'token', 'content': answer}, ensure_ascii=False)}\n\n"
                     suffix = ""
                     if tool_context.role == "customer":
                         suffix = _customer_action_suffix(
@@ -1209,8 +1738,14 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                     event = {**event, "answer": answer}
                     stream_res["answer"] = answer
                     stream_res["total_steps"] = event.get("total_steps", 0)
+                    stream_res["decision_facts"] = decision_facts
+                    stream_res["decision_contexts"] = decision_contexts
                     stream_completed = True
                     pending_done_event = event
+                    continue
+
+                if event.get("event") == "token" and response_fact_sensitive:
+                    buffered_response_tokens.append(str(event.get("content") or ""))
                     continue
 
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
@@ -1229,6 +1764,8 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                         total_steps=stream_res["total_steps"],
                         total_latency_ms=(time.perf_counter() - start_t) * 1000,
                         last_entities=last_entities,
+                        decision_facts=stream_res["decision_facts"],
+                        decision_contexts=stream_res["decision_contexts"],
                     ),
                 )
                 if pending_done_event is not None:

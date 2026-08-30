@@ -1,7 +1,7 @@
 # S0-02：角色矩阵、状态机与退款时序图
 
 状态：负责人已冻结
-依赖：`S0-01_PRD_REFUND_WORKBENCH.md`、PLAN_V6 0.4/0.5
+依赖：`S0-01_PRD_REFUND_WORKBENCH.md`、[`PLAN_V6`](../../plans/PLAN_V6.md) 0.4/0.5
 范围：只冻结业务契约，不实现 API、数据库、支付或退款接口
 
 冻结依据：`S0_DECISION_RECORD.md`

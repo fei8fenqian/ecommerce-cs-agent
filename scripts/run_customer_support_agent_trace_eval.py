@@ -15,8 +15,20 @@
       --quiet --summary-only \\
       --json-out /tmp/customer-support-agent-trace.json
 
-输入中的 ``history`` 只用于说明和输出元数据；公开聊天 API 不接受客户端伪造历史，默认不会重放它。
-所以这是一轮“真实入口单轮轨迹评测”，不是多轮会话准确率证明。
+默认情况下，输入中的 ``history`` 只用于说明和输出元数据；公开聊天 API 不接受客户端伪造历史。
+要做真实多轮 replay，必须显式指定测试账号和临时服务端 session：
+
+    EVAL_AUTH_TOKEN='开发环境 JWT' \\
+    PYTHONPATH=src .venv/bin/python scripts/run_customer_support_agent_trace_eval.py \\
+      --source /tmp/jddc-3c-independent-selection.jsonl \\
+      --base-url http://127.0.0.1:8000 \\
+      --allow-side-effects --replay-history --owner-user-id 73 \\
+      --limit 30 --quiet --summary-only \\
+      --json-out /tmp/customer-support-agent-trace-replayed.json
+
+replay 模式由评测进程把 ``history`` 写入临时服务端 session，然后请求只发送 ``session_id`` 和最后一句
+``query``；每条样本完成后删除该临时 session。因此 replay 结果才是多轮入口轨迹评测，未指定 replay
+时仍是单轮对照组。
 """
 
 from __future__ import annotations
@@ -24,6 +36,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 import sys
 import time
@@ -35,6 +48,8 @@ import httpx
 
 from service.customer_support_policy import CustomerSupportAction
 
+_logger = logging.getLogger(__name__)
+
 _GUIDANCE_MARKERS: tuple[tuple[str, CustomerSupportAction], ...] = (
     ("[前往我的订单申请退款]", CustomerSupportAction.OFFER_REFUND_SELF_SERVICE),
     ("[我的订单查看退款进度]", CustomerSupportAction.SHOW_REFUND_PROGRESS),
@@ -42,6 +57,7 @@ _GUIDANCE_MARKERS: tuple[tuple[str, CustomerSupportAction], ...] = (
     ("为了避免误建售后工单", CustomerSupportAction.ASK_FOR_CLARIFICATION),
 )
 _VALID_ACTIONS = {action.value for action in CustomerSupportAction}
+_REPLAY_ROLES = {"user", "assistant"}
 
 
 def _load_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -60,6 +76,75 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
                 raise ValueError(f"{path}:{line_number} 缺少 query")
             records.append(record)
     return records
+
+
+def _history_messages_for_replay(record: dict[str, Any]) -> list[dict[str, str]]:
+    """Validate and normalize the prefix history before writing a test session.
+
+    JDDC records contain only the conversation prefix.  The target user turn is
+    deliberately not part of this list; the HTTP request appends it as the next
+    user message.  ``system`` and ``tool`` messages are not accepted because
+    they are not source turns in this replay format and could change the agent's
+    trusted instruction/tool boundary.
+    """
+
+    raw_history = record.get("history")
+    if raw_history in (None, []):
+        return []
+    if not isinstance(raw_history, list):
+        raise ValueError(f"id={record.get('id')} 的 history 必须是数组")
+
+    history: list[dict[str, str]] = []
+    for turn_index, raw_turn in enumerate(raw_history):
+        if not isinstance(raw_turn, dict):
+            raise ValueError(f"id={record.get('id')} 的 history[{turn_index}] 必须是对象")
+        role = str(raw_turn.get("role") or "").strip()
+        content = raw_turn.get("content")
+        if role not in _REPLAY_ROLES:
+            raise ValueError(f"id={record.get('id')} 的 history[{turn_index}] role={role!r} 不在 user/assistant 范围内")
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError(f"id={record.get('id')} 的 history[{turn_index}] 缺少 content")
+        history.append({"role": role, "content": content})
+    return history
+
+
+async def _create_replay_session(record: dict[str, Any], owner_user_id: int) -> str:
+    """Create a temporary server-side session containing only the JDDC prefix."""
+
+    from store.session_store import append_messages, create_session
+
+    history = _history_messages_for_replay(record)
+    session = await create_session(owner_user_id, title="JDDC eval replay")
+    session_id = str(session["id"])
+    try:
+        if history:
+            await append_messages(
+                session_id,
+                owner_user_id,
+                history,
+                title="JDDC eval replay",
+            )
+    except Exception:
+        from store.session_store import delete_session
+
+        await delete_session(session_id, owner_user_id)
+        raise
+    return session_id
+
+
+async def _delete_replay_session(session_id: str, owner_user_id: int) -> None:
+    """Delete only a session created by this evaluator; cleanup is best effort."""
+
+    from store.session_store import delete_session
+
+    try:
+        deleted = await delete_session(session_id, owner_user_id)
+        if not deleted:
+            _logger.warning("replay session cleanup returned false")
+    except Exception:
+        # A cleanup failure must not rewrite an otherwise valid model trace, but
+        # it is visible in stderr so the test database can be inspected.
+        _logger.warning("replay session cleanup failed", exc_info=True)
 
 
 def _load_expected_labels(path: Path, field: str) -> dict[str, str]:
@@ -118,6 +203,17 @@ def _safe_tool_names(events: list[dict[str, Any]]) -> list[str]:
     )
 
 
+def _validate_replay_database() -> None:
+    """Keep temporary replay sessions out of development and production DBs."""
+
+    from config import settings
+
+    if settings.env == "prod":
+        raise ValueError("history replay 禁止在 prod 环境运行")
+    if not settings.pg_dbname.endswith("_test"):
+        raise ValueError(f"history replay 只允许写入 *_test 数据库，当前 PG_DBNAME={settings.pg_dbname!r}")
+
+
 async def _run_case(
     client: httpx.AsyncClient,
     record: dict[str, Any],
@@ -125,6 +221,9 @@ async def _run_case(
     expected_field: str | None,
     expected_labels: dict[str, str] | None,
     index: int,
+    replay_history: bool = False,
+    owner_user_id: int | None = None,
+    include_answer: bool = False,
 ) -> dict[str, Any]:
     case_id = str(record["id"])
     started = time.perf_counter()
@@ -133,12 +232,24 @@ async def _run_case(
     safe_events: list[dict[str, Any]] = []
     error: str | None = None
     status_code: int | None = None
+    replay_session_id: str | None = None
+    server_session_id: str | None = None
     try:
+        if replay_history:
+            if owner_user_id is None:
+                raise ValueError("history replay requires owner_user_id")
+            replay_session_id = await _create_replay_session(record, owner_user_id)
+
+        payload: dict[str, str] = {"query": str(record["query"])}
+        if replay_session_id is not None:
+            payload["session_id"] = replay_session_id
         async with client.stream(
             "POST",
             "/api/v1/chat/stream",
-            # 不传 session_id：每个独立样本由服务端创建新的标准 UUID 会话。
-            json={"query": str(record["query"])},
+            # Replay mode sends only a server-created session id.  The API
+            # still loads history from PostgreSQL and never accepts raw client
+            # history.
+            json=payload,
         ) as response:
             status_code = response.status_code
             if status_code != 200:
@@ -154,6 +265,8 @@ async def _run_case(
                 async for line in response.aiter_lines():
                     event = _parse_sse_line(line)
                     if event is not None:
+                        if event.get("event") == "start" and event.get("session_id"):
+                            server_session_id = str(event["session_id"])
                         # 只保留评测需要的结构化事件，避免把客户原文/模型全文写入评测产物。
                         safe_event: dict[str, Any] = {"event": str(event.get("event") or "")}
                         if event.get("name"):
@@ -172,8 +285,18 @@ async def _run_case(
                         safe_events.append(safe_event)
     except (httpx.HTTPError, TimeoutError):
         error = "HTTP_CLIENT_ERROR"
+    finally:
+        cleanup_session_id = replay_session_id or server_session_id
+        if cleanup_session_id is not None and owner_user_id is not None:
+            await _delete_replay_session(cleanup_session_id, owner_user_id)
     elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
     observed = _observed_action(raw_events) if error is None else None
+    answer = "".join(str(event.get("content") or "") for event in raw_events if event.get("event") == "token")
+    if not answer:
+        answer = next(
+            (str(event.get("answer") or "") for event in raw_events if event.get("event") == "done"),
+            "",
+        )
     expected_value = (
         expected_labels.get(case_id)
         if expected_labels is not None
@@ -194,8 +317,10 @@ async def _run_case(
         "error": error,
         "duration_ms": elapsed_ms,
         "history_turns_available": len(record.get("history") or []),
-        "history_replayed": False,
+        "history_replayed": replay_history,
     }
+    if include_answer:
+        result["answer"] = answer
     return result
 
 
@@ -204,35 +329,54 @@ async def _run(
     records: list[dict[str, Any]],
     token: str,
     expected_labels: dict[str, str] | None,
+    *,
+    owner_user_id: int | None = None,
+    include_answer: bool = False,
 ) -> dict[str, Any]:
     headers = {"Authorization": f"Bearer {token}"}
     timeout = httpx.Timeout(args.timeout)
     limits = httpx.Limits(max_connections=1, max_keepalive_connections=1)
-    async with httpx.AsyncClient(
-        base_url=args.base_url.rstrip("/"),
-        headers=headers,
-        timeout=timeout,
-        limits=limits,
-    ) as client:
-        results: list[dict[str, Any]] = []
-        for index, record in enumerate(records, start=1):
-            result = await _run_case(
-                client,
-                record,
-                expected_field=args.expected_field,
-                expected_labels=expected_labels,
-                index=index,
-            )
-            results.append(result)
-            if not args.quiet and not args.summary_only:
-                print(
-                    f"[{index}/{len(records)}] {result['id']} "
-                    f"observed={result['observed_action'] or '-'} "
-                    f"expected={result['expected_action'] or '-'} "
-                    f"error={result['error'] or '-'}"
+    replay_pool_open = False
+    if args.replay_history or owner_user_id is not None:
+        from infra.db_pool import init_pool
+
+        await init_pool(minconn=1, maxconn=2)
+        replay_pool_open = True
+
+    try:
+        async with httpx.AsyncClient(
+            base_url=args.base_url.rstrip("/"),
+            headers=headers,
+            timeout=timeout,
+            limits=limits,
+        ) as client:
+            results: list[dict[str, Any]] = []
+            for index, record in enumerate(records, start=1):
+                result = await _run_case(
+                    client,
+                    record,
+                    expected_field=args.expected_field,
+                    expected_labels=expected_labels,
+                    index=index,
+                    replay_history=args.replay_history,
+                    owner_user_id=owner_user_id,
+                    include_answer=include_answer,
                 )
-            if index < len(records) and args.interval_seconds:
-                await asyncio.sleep(args.interval_seconds)
+                results.append(result)
+                if not args.quiet and not args.summary_only:
+                    print(
+                        f"[{index}/{len(records)}] {result['id']} "
+                        f"observed={result['observed_action'] or '-'} "
+                        f"expected={result['expected_action'] or '-'} "
+                        f"error={result['error'] or '-'}"
+                    )
+                if index < len(records) and args.interval_seconds:
+                    await asyncio.sleep(args.interval_seconds)
+    finally:
+        if replay_pool_open:
+            from infra.db_pool import close_pool
+
+            await close_pool()
 
     observed_counts = Counter(str(result["observed_action"]) for result in results if result["observed_action"])
     comparable = [result for result in results if result["expected_action"] and not result["error"]]
@@ -248,7 +392,8 @@ async def _run(
         "expected_label_field": args.expected_field,
         "expected_label_file": str(args.expected_file) if args.expected_file else None,
         "expected_label_provenance": "caller_supplied; not upgraded to gold",
-        "history_replayed": False,
+        "history_replayed": args.replay_history,
+        "answers_included": include_answer,
         "side_effects_allowed": True,
         "interval_seconds": args.interval_seconds,
         "evaluated": len(results),
@@ -283,6 +428,21 @@ def main() -> int:
     )
     parser.add_argument("--timeout", type=float, default=90.0, help="单条 HTTP 超时秒数")
     parser.add_argument("--allow-side-effects", action="store_true", help="确认在开发/测试环境允许创建工单等副作用")
+    parser.add_argument(
+        "--replay-history",
+        action="store_true",
+        help="把每条记录的 history 写入临时服务端 session，再发送 query（仅开发/测试环境）",
+    )
+    parser.add_argument(
+        "--owner-user-id",
+        type=int,
+        help="评测 session 所属客户用户 ID；用于 replay 写入和清理，必须与 JWT 所属用户一致",
+    )
+    parser.add_argument(
+        "--include-answer",
+        action="store_true",
+        help="显式保存 Agent 完整回复；仅用于脱敏测试样本，默认不保存",
+    )
     parser.add_argument("--quiet", action="store_true", help="不逐条打印结果；详细结果仍写入 --json-out")
     parser.add_argument(
         "--summary-only",
@@ -297,6 +457,15 @@ def main() -> int:
         parser.error("--summary-only 需要同时传 --json-out 保存逐条轨迹")
     if not args.allow_side_effects:
         parser.error("真实 Agent 评测可能写入工单；请确认使用开发/测试环境后传 --allow-side-effects")
+    if args.replay_history and args.owner_user_id is None:
+        parser.error("--replay-history 需要同时传 --owner-user-id，并确保它与 JWT 所属客户一致")
+    if args.replay_history and args.owner_user_id <= 0:
+        parser.error("--owner-user-id 必须为正整数")
+    if args.replay_history:
+        try:
+            _validate_replay_database()
+        except ValueError as exc:
+            parser.error(str(exc))
     if not args.source.is_file():
         parser.error(f"source does not exist: {args.source}")
     if args.expected_file and not args.expected_file.is_file():
@@ -327,12 +496,23 @@ def main() -> int:
         records = records[: args.limit]
     if not records:
         parser.error("source contains no records")
-    result = asyncio.run(_run(args, records, token, expected_labels))
+    result = asyncio.run(
+        _run(
+            args,
+            records,
+            token,
+            expected_labels,
+            owner_user_id=args.owner_user_id,
+            include_answer=args.include_answer,
+        )
+    )
     rendered = json.dumps(result, ensure_ascii=False, indent=2)
     if args.summary_only:
         summary_keys = (
             "dataset",
             "evaluation_kind",
+            "history_replayed",
+            "answers_included",
             "evaluated",
             "completed_without_transport_error",
             "transport_error_count",

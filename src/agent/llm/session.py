@@ -64,7 +64,7 @@ class SessionContext:
     def history(self) -> list[dict[str, Any]]:
         """返回经过 token 裁剪、适合发送给 LLM 的消息历史。"""
         return _trim_history(
-            self.messages,
+            _model_safe_messages(self.messages),
             max_tokens=settings.history_max_tokens,
         )
 
@@ -124,6 +124,12 @@ def _trim_history(
             len(head) + len(kept_tail),
         )
     return result
+
+
+def _model_safe_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """移除仅供服务端恢复事实的会话元数据后再交给模型。"""
+    allowed_keys = {"role", "content", "name", "tool_calls", "tool_call_id"}
+    return [{key: value for key, value in message.items() if key in allowed_keys} for message in messages]
 
 
 class SessionManager:
@@ -289,7 +295,17 @@ class SessionManager:
                     }
                 )
 
-        new_messages.append({"role": "assistant", "content": result.answer})
+        assistant_message: dict[str, Any] = {"role": "assistant", "content": result.answer}
+        if result.decision_facts:
+            # 这是服务端恢复用的元数据，history 属性会在交给 LLM 前剥离它。
+            assistant_message["_decision_facts"] = dict(result.decision_facts)
+        if result.decision_contexts:
+            # 退款/订单事实按 subject 保存；同样会在 _model_safe_messages 中剥离，
+            # 只供服务端下一轮恢复和事实边界使用。
+            assistant_message["_decision_contexts"] = json.loads(
+                json.dumps(result.decision_contexts, ensure_ascii=False)
+            )
+        new_messages.append(assistant_message)
 
         entities = dict(ctx.last_entities)
         entities.update(result.last_entities)

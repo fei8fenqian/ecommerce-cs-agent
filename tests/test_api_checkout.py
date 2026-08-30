@@ -101,6 +101,8 @@ async def test_customer_can_only_list_their_new_checkout_orders():
         tracking_company=None,
         tracking_number=None,
         created_at="2026-08-24T10:00:00+00:00",
+        refund_id="11111111-1111-4111-8111-111111111111",
+        refund_status="PENDING_FINANCE_APPROVAL",
     )
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         with patch(
@@ -111,7 +113,34 @@ async def test_customer_can_only_list_their_new_checkout_orders():
 
     assert response.status_code == 200
     assert response.json()["orders"][0]["order_no"] == "SO202608240001"
+    assert response.json()["orders"][0]["refund_status"] == "PENDING_MERCHANT_REVIEW"
     listed.assert_awaited_once_with(101)
+
+
+@pytest.mark.asyncio
+async def test_customer_refund_response_hides_internal_finance_review_state() -> None:
+    """客户只知道商家正在核实，不会收到内部财务审批状态。"""
+    refund_id = "33333333-3333-4333-8333-333333333333"
+    result = CustomerRefundResult(
+        refund_id=UUID(refund_id),
+        order_no="SO202608250003",
+        status="PENDING_FINANCE_APPROVAL",
+        amount_cents=300000,
+        currency="CNY",
+        reason="测试退款",
+        requested_at="2026-08-25T10:00:00+00:00",
+        idempotent_replay=False,
+    )
+    transport = httpx.ASGITransport(app=_app("customer"))
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        with patch("api.checkout.confirm_customer_refund", new=AsyncMock(return_value=result)):
+            response = await client.post(
+                f"/api/v1/checkout/refunds/{refund_id}/confirm",
+                headers={"Idempotency-Key": "customer-confirm-0001"},
+            )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "PENDING_MERCHANT_REVIEW"
 
 
 @pytest.mark.asyncio

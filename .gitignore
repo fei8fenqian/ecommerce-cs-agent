@@ -23,6 +23,7 @@ src/3c_cs_agent.egg-info/
 # 设计草稿
 PLAN.md
 PLAN_V*.md
+RESUME_PROJECT_EXPERIENCE_REWRITE.md
 
 # 离线脚本（非 Agent 运行所需）
 scripts/crawl/
@@ -41,8 +42,18 @@ logs/
 # 对抗性评测结果（运行输出）
 data/eval_adversarial_results.json
 
+# 外部评测语料（按来源许可在本机下载，不提交原始数据）
+evals/external/
+
+# JDDC 原始脱敏语料（仅本机筛选使用，不提交原始数据）
+data/benchmarks/jddc/raw/
+
 # 面试准备文档
 PROJECT_WALKTHROUGH.md
 
 # jwt私钥
 *.pem
+
+# 缓存
+__pycache__/
+*.py[cod]

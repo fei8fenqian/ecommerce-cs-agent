@@ -1,0 +1,76 @@
+{
+  "schema_version": "agent_eval_trace.v1",
+  "case_id": "",
+  "run": {
+    "run_id": "",
+    "agent_version": "",
+    "model": "",
+    "started_at": "",
+    "finished_at": ""
+  },
+  "parsed_goal": {
+    "primary": "",
+    "preferred_resolution": "",
+    "confidence": null
+  },
+  "facts_requested": [],
+  "plans": [
+    {
+      "revision": 1,
+      "steps": [
+        {
+          "step_id": "",
+          "precondition": [],
+          "capability": "",
+          "expected_result": "",
+          "success_branch": "",
+          "failure_branch": ""
+        }
+      ]
+    }
+  ],
+  "tool_calls": [
+    {
+      "step_id": "",
+      "capability": "",
+      "implementation": "",
+      "arguments": {},
+      "result": {},
+      "status": "success",
+      "error_code": ""
+    }
+  ],
+  "state_updates": [
+    {
+      "sequence": 0,
+      "state_before": {},
+      "facts_added": {},
+      "state_after": {},
+      "reason": ""
+    }
+  ],
+  "policy_checks": [
+    {
+      "sequence": 0,
+      "proposal": "",
+      "decision": "allow",
+      "reason": "",
+      "user_confirmation_required": false
+    }
+  ],
+  "evaluator_results": [
+    {
+      "sequence": 0,
+      "goal_status": "unresolved",
+      "reason": "",
+      "next_action": ""
+    }
+  ],
+  "final_response": "",
+  "final_case_status": "",
+  "outcome": {
+    "completion_type": "",
+    "resolved": false,
+    "resolution_reason": ""
+  }
+}

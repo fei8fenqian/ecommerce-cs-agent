@@ -60,7 +60,9 @@ class Settings(BaseSettings):
     # 密钥只保存为本机文件路径；不能写入代码、Git 或日志。
     alipay_sandbox_app_id: str = ""
     alipay_sandbox_seller_id: str = ""
-    alipay_sandbox_gateway: str = "https://openapi-sandbox.dl.alipaydev.com/gateway.do"
+    # 支付宝沙箱同时存在新旧网关；旧地址对电脑网站支付兼容性更稳，仍可通过
+    # ALIPAY_SANDBOX_GATEWAY 显式切换到新地址进行对照测试。
+    alipay_sandbox_gateway: str = "https://openapi.alipaydev.com/gateway.do"
     alipay_sandbox_app_private_key_path: str = ""
     alipay_sandbox_public_key_path: str = ""
     alipay_sandbox_notify_url: str = ""
@@ -78,6 +80,12 @@ class Settings(BaseSettings):
     # ---- 检索参数 ----
     retrieval_top_k: int = Field(default=20, ge=1, le=100, description="粗筛返回条数")
     rerank_top_k: int = Field(default=5, ge=1, le=20, description="精排后保留条数")
+    pre_rag_similarity_threshold: float = Field(
+        default=0.55,
+        ge=0.0,
+        le=1.0,
+        description="Pre-RAG 向量相似度最低阈值；低于阈值的知识不注入 Router",
+    )
 
     # ---- Agent 参数 ----
     temperature: float = Field(default=0.0, ge=0.0, le=2.0, description="llm输出温度")
