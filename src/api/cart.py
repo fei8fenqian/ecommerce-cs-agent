@@ -55,6 +55,7 @@ class CartCheckoutRequest(BaseModel):
     """从购物车发起结算时允许的浏览器回跳来源。"""
 
     return_origin: str | None = Field(default=None, max_length=200)
+    payment_provider: Literal["alipay_sandbox", "unionpay_test"] = "alipay_sandbox"
 
 
 class CartCheckoutResponse(BaseModel):
@@ -66,6 +67,7 @@ class CartCheckoutResponse(BaseModel):
     payment_form_action: str | None = None
     payment_form_fields: dict[str, str] | None = None
     payment_qr_code: str | None = None
+    payment_provider: Literal["alipay_sandbox", "unionpay_test"] = "alipay_sandbox"
 
 
 def _customer_id(request: Request) -> int:
@@ -115,7 +117,7 @@ async def delete_item(item_id: int, request: Request) -> CartResponse:
 async def checkout_cart(body: CartCheckoutRequest, request: Request) -> CartCheckoutResponse:
     """以当前购物车创建或复用一笔待支付订单，再让浏览器跳转收银台。"""
     try:
-        session = await create_cart_checkout_session(_customer_id(request), body.return_origin)
+        session = await create_cart_checkout_session(_customer_id(request), body.return_origin, body.payment_provider)
     except CartUnavailableError as exc:
         raise HTTPException(status_code=409, detail="购物车为空或有商品暂不可结算") from exc
     return CartCheckoutResponse(**session.__dict__)

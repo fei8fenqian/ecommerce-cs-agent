@@ -74,6 +74,27 @@ class Settings(BaseSettings):
         description="支付宝沙箱网关单次请求超时(秒)",
     )
 
+    # ---- UnionPay 5.1.0 U0 protocol + U1 checkout test ----
+    # U0 CLI remains independent; U1 checkout uses the same protocol settings.
+    unionpay_mer_id: str = ""
+    unionpay_sign_cert_path: str = ".secrets/unionpay/acp_test_sign.pfx"
+    unionpay_sign_cert_password: SecretStr = SecretStr("")
+    unionpay_root_cert_path: str = ".secrets/unionpay/acp_test_root.cer"
+    unionpay_middle_cert_path: str = ".secrets/unionpay/acp_test_middle.cer"
+    unionpay_encrypt_cert_path: str = ".secrets/unionpay/acp_test_enc.cer"
+    # 本地 Vite 使用 127.0.0.1；避免 UnionPay 回跳后因 origin 不同丢失
+    # sessionStorage 中的客户登录态。最终回跳仍经过 checkout service 的 allowlist。
+    unionpay_front_url: str = "http://127.0.0.1:5173/"
+    # U1.1 银联前台回跳只允许配置公网 FastAPI base URL；空值时禁止生成 U1.1 支付表单。
+    unionpay_public_base_url: str = ""
+    # 银联官方接口说明：不需要后台通知时可固定上送该地址。
+    unionpay_back_url: str = "http://www.specialUrl.com"
+    # 保持现有本地 .env 的 *_GATEWAY 命名，避免配置升级时把未知键当成错误。
+    unionpay_front_gateway: str = "https://gateway.test.95516.com/gateway/api/frontTransReq.do"
+    unionpay_query_gateway: str = "https://gateway.test.95516.com/gateway/api/queryTrans.do"
+    unionpay_back_gateway: str = "https://gateway.test.95516.com/gateway/api/backTransReq.do"
+    unionpay_timeout_seconds: float = Field(default=30.0, gt=0, le=60)
+
     # ---- 内部 Metrics 端点 ----
     metrics_bearer_token: SecretStr = SecretStr("")
 

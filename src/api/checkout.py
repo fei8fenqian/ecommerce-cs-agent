@@ -14,6 +14,7 @@ from service.checkout_refund_service import (
     RefundConfirmationUnavailableError,
     RefundGatewayUnavailableError,
     RefundNotEligibleError,
+    RefundProviderUnavailableError,
     approve_finance_refund,
     confirm_customer_refund,
     customer_visible_refund_status,
@@ -26,6 +27,7 @@ from service.checkout_service import (
     CheckoutUnavailableError,
     PaymentNotCreatedError,
     PaymentStatusUnavailableError,
+    UnionPayCancellationUnavailableError,
     cancel_checkout_session,
     create_checkout_session,
     refresh_customer_payment_status,
@@ -44,6 +46,7 @@ class CreateCheckoutRequest(BaseModel):
     product_id: str = Field(min_length=1, max_length=128)
     quantity: int = Field(default=1, ge=1, le=5)
     return_origin: str | None = Field(default=None, max_length=200)
+    payment_provider: Literal["alipay_sandbox", "unionpay_test"] = "alipay_sandbox"
 
 
 class ResumeCheckoutRequest(BaseModel):
@@ -61,6 +64,7 @@ class CheckoutSessionResponse(BaseModel):
     payment_form_action: str | None = None
     payment_form_fields: dict[str, str] | None = None
     payment_qr_code: str | None = None
+    payment_provider: Literal["alipay_sandbox", "unionpay_test"] = "alipay_sandbox"
 
 
 class CheckoutOrderItem(BaseModel):
@@ -78,6 +82,9 @@ class CheckoutOrderItem(BaseModel):
     created_at: str
     refund_id: str | None = None
     refund_status: str | None = None
+    payment_provider: Literal["alipay_sandbox", "unionpay_test"] = "alipay_sandbox"
+    refund_supported: bool = False
+    refund_eligible: bool = False
 
 
 class CheckoutOrderListResponse(BaseModel):
@@ -183,6 +190,9 @@ def _refund_response(result: CustomerRefundResult) -> CheckoutRefundResponse:
 def _customer_order_item(order: object) -> CheckoutOrderItem:
     """将客户订单投影为客户可理解的退款状态，不泄露内部岗位。"""
     values = dict(vars(order))
+    provider = values.pop("provider", "alipay_sandbox")
+    values["payment_provider"] = provider
+    values["refund_supported"] = provider in {"alipay_sandbox", "unionpay_test"}
     values["refund_status"] = customer_visible_refund_status(values.get("refund_status"))
     return CheckoutOrderItem(**values)
 
@@ -206,6 +216,7 @@ async def create_order(body: CreateCheckoutRequest, request: Request) -> Checkou
             product_id=body.product_id,
             quantity=body.quantity,
             return_origin=body.return_origin,
+            payment_provider=body.payment_provider,
         )
     except CheckoutUnavailableError as exc:
         raise HTTPException(status_code=409, detail="商品暂不可购买") from exc
@@ -239,10 +250,15 @@ async def cancel_order(order_no: str, request: Request) -> CancelCheckoutRespons
         raise HTTPException(status_code=403, detail="只有客户可以取消支付订单")
     try:
         await cancel_checkout_session(customer_user_id=int(user["id"]), order_no=order_no)
+    except UnionPayCancellationUnavailableError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="当前银联测试订单暂不支持在线取消，请完成或放弃本次测试支付",
+        ) from exc
     except CheckoutCancellationUnavailableError as exc:
         raise HTTPException(status_code=409, detail="该订单当前不能取消") from exc
     except PaymentStatusUnavailableError as exc:
-        raise HTTPException(status_code=503, detail="支付宝暂时无法关闭交易") from exc
+        raise HTTPException(status_code=503, detail="支付渠道暂时无法关闭交易") from exc
     return CancelCheckoutResponse(order_no=order_no, cancelled=True)
 
 
@@ -371,7 +387,7 @@ async def approve_finance_refund_route(
     except (ValueError, FinanceRefundDecisionUnavailableError) as exc:
         raise HTTPException(status_code=409, detail="该退款当前不能审批") from exc
     except RefundGatewayUnavailableError as exc:
-        raise HTTPException(status_code=503, detail="支付宝退款结果暂时无法确认，请稍后查看退款状态") from exc
+        raise HTTPException(status_code=503, detail="支付渠道退款结果暂时无法确认，请稍后查看退款状态") from exc
     return _refund_response(result)
 
 
@@ -408,9 +424,9 @@ async def refresh_payment(order_no: str, request: Request) -> CheckoutOrderItem:
     try:
         await refresh_customer_payment_status(customer_user_id=int(user["id"]), order_no=order_no)
     except PaymentNotCreatedError as exc:
-        raise HTTPException(status_code=409, detail="该订单未在支付宝侧创建交易，请重新下单") from exc
+        raise HTTPException(status_code=409, detail="该订单尚未创建可查询的支付交易，请重新打开付款") from exc
     except PaymentStatusUnavailableError as exc:
-        raise HTTPException(status_code=503, detail="支付宝暂时无法确认支付状态") from exc
+        raise HTTPException(status_code=503, detail="支付渠道暂时无法确认支付状态，请稍后重试") from exc
     orders = await list_customer_checkout_orders(int(user["id"]))
     order = next((item for item in orders if item.order_no == order_no), None)
     if order is None:
@@ -425,7 +441,7 @@ async def request_refund(
     request: Request,
     idempotency_key: str = Header(alias="Idempotency-Key", min_length=8, max_length=80),
 ) -> CheckoutRefundResponse:
-    """创建客户确认前的退款申请，不会立即向支付宝发起资金动作。"""
+    """创建客户确认前的退款申请，不会立即向支付渠道发起资金动作。"""
     user = request.state.user
     if user["role"] != "customer":
         raise HTTPException(status_code=403, detail="只有客户可以申请退款")
@@ -436,6 +452,8 @@ async def request_refund(
             reason=body.reason.strip(),
             request_idempotency_key=idempotency_key,
         )
+    except RefundProviderUnavailableError as exc:
+        raise HTTPException(status_code=409, detail="当前支付渠道暂不支持退款") from exc
     except RefundNotEligibleError as exc:
         raise HTTPException(status_code=409, detail="该订单当前不满足退款条件") from exc
     return _customer_refund_response(result)
@@ -447,7 +465,7 @@ async def confirm_refund(
     request: Request,
     idempotency_key: str = Header(alias="Idempotency-Key", min_length=8, max_length=80),
 ) -> CheckoutRefundResponse:
-    """在客户最后确认后提交一次全额支付宝沙箱退款。"""
+    """在客户最后确认后提交一次全额退款。"""
     from uuid import UUID
 
     user = request.state.user
@@ -459,16 +477,16 @@ async def confirm_refund(
             refund_id=UUID(refund_id),
             confirmation_idempotency_key=idempotency_key,
         )
+    except RefundGatewayUnavailableError as exc:
+        raise HTTPException(status_code=503, detail="退款结果暂时无法确认，请稍后查看订单状态") from exc
     except (ValueError, RefundConfirmationUnavailableError) as exc:
         raise HTTPException(status_code=409, detail="该退款当前不能确认") from exc
-    except RefundGatewayUnavailableError as exc:
-        raise HTTPException(status_code=503, detail="支付宝退款结果暂时无法确认，请稍后查看订单状态") from exc
     return _customer_refund_response(result)
 
 
 @checkout_router.post("/refunds/{refund_id}/refresh", response_model=CheckoutRefundResponse)
 async def refresh_refund(refund_id: str, request: Request) -> CheckoutRefundResponse:
-    """主动查询支付宝已提交退款的当前状态，不会再次发起退款。"""
+    """主动查询已提交退款的当前状态，不会再次发起退款。"""
     from uuid import UUID
 
     user = request.state.user
@@ -479,8 +497,8 @@ async def refresh_refund(refund_id: str, request: Request) -> CheckoutRefundResp
             customer_user_id=int(user["id"]),
             refund_id=UUID(refund_id),
         )
+    except RefundGatewayUnavailableError as exc:
+        raise HTTPException(status_code=503, detail="退款状态暂时无法确认，请稍后重试") from exc
     except (ValueError, RefundConfirmationUnavailableError) as exc:
         raise HTTPException(status_code=404, detail="退款不可用或无法核验") from exc
-    except RefundGatewayUnavailableError as exc:
-        raise HTTPException(status_code=503, detail="支付宝退款状态暂时无法确认，请稍后重试") from exc
     return _customer_refund_response(result)

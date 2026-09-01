@@ -23,6 +23,22 @@ _ORDINALS = {
     "叁": 3,
 }
 
+_SUBJECT_IDENTITY_EXCLUSION_MARKERS = ("不是", "不要", "排除", "除了")
+_SUBJECT_IDENTITY_COMPARATIVE_MARKERS = ("贵一点", "贵的", "金额高", "便宜", "金额低")
+
+# Require either a numeric component or an explicit separator after ``SO`` so
+# a brand such as ``Sony`` cannot be mistaken for an order identifier.
+_SUBJECT_ORDER_ID = re.compile(r"SO(?:[A-Z0-9]*\d[A-Z0-9_-]*|[-_][A-Z0-9_-]+)", re.IGNORECASE)
+_SUBJECT_MODEL = re.compile(r"(?=[a-z0-9_-]*\d)[a-z][a-z0-9_-]*$", re.IGNORECASE)
+_SUBJECT_BRANDS = (
+    "苹果|华为|小米|荣耀|三星|索尼|戴尔|联想|惠普|华硕|宏碁|微软|sony|apple|iphone|dell|lenovo|asus|"
+    "acer|huawei|xiaomi|samsung|bose|macbook"
+)
+_SUBJECT_CATEGORIES = (
+    "电脑|笔记本|手机|耳机|平板|相机|显示器|键盘|鼠标|手表|路由器|处理器|显卡|电视|主机|打印机|硬盘|内存"
+)
+_SUBJECT_TRAILING_ATTRIBUTES = re.compile(r"(?:黑色|白色|银色|灰色|金色|蓝色|红色|粉色|绿色|紫色|深空灰|星光色)+$")
+
 
 def _normalize(value: object) -> str:
     if not isinstance(value, str):
@@ -75,6 +91,92 @@ def _matching_choices(query: str, choices: list[dict[str, Any]]) -> list[dict[st
         if tokens and any(token in normalized_query for token in tokens):
             matches.append(choice)
     return matches
+
+
+def match_pending_subject_choices(raw_query: str, choices: object) -> list[dict[str, Any]]:
+    """Return the server-side candidate set for a subject description.
+
+    ``resolve_pending_subject_choice`` remains the authority for selecting one
+    choice.  This companion helper is only used when a caller needs to
+    distinguish zero candidates from an ambiguous candidate set (for example,
+    while preparing a controlled subject correction).  It reuses the same
+    normalization, product matching, exclusion, and amount-comparison rules;
+    it never returns an order outside the supplied server-owned choices.
+    """
+    valid = _valid_choices(choices)
+    if not valid:
+        return []
+    query = _normalize(raw_query)
+
+    exact = [choice for choice in valid if _order_id(choice).lower() in query]
+    if exact:
+        return exact
+
+    matches = _matching_choices(raw_query, valid)
+    if matches:
+        return matches
+
+    if any(marker in query for marker in ("贵一点", "贵的", "金额高")):
+        valued = [(choice, _amount_cents(choice)) for choice in valid]
+        if all(amount is not None for _, amount in valued):
+            maximum = max(int(amount) for _, amount in valued if amount is not None)
+            return [choice for choice, amount in valued if amount == maximum]
+    if any(marker in query for marker in ("便宜", "便宜的", "便宜一点", "金额低")):
+        valued = [(choice, _amount_cents(choice)) for choice in valid]
+        if all(amount is not None for _, amount in valued):
+            minimum = min(int(amount) for _, amount in valued if amount is not None)
+            return [choice for choice, amount in valued if amount == minimum]
+    return []
+
+
+def match_subject_identity_choices(raw_query: str, choices: object) -> list[dict[str, Any]]:
+    """只按订单号或商品身份匹配 correction 描述。
+
+    这是 ``subject_correction_description`` 专用的 discovery helper。它不解释
+    已展示候选的序号、金额比较或排除语义；这些能力只属于
+    ``resolve_pending_subject_choice``，因为只有该状态已经把候选展示给客户。
+    """
+    valid = _valid_choices(choices)
+    if not valid:
+        return []
+    query = _normalize(raw_query)
+    if any(
+        marker in query for marker in (*_SUBJECT_IDENTITY_EXCLUSION_MARKERS, *_SUBJECT_IDENTITY_COMPARATIVE_MARKERS)
+    ):
+        return []
+
+    exact = [choice for choice in valid if _order_id(choice).lower() in query]
+    if exact:
+        return exact
+    return _matching_choices(raw_query, valid)
+
+
+def looks_like_bare_subject_description(raw_query: str) -> bool:
+    """判断一轮输入是否像是在补充商品描述，而不是新的业务请求。
+
+    该判断只服务于 ``subject_correction_description`` pending 的 continuation。它不
+    选择订单，也不参与普通意图路由；无法确认时返回 False，让原有 Router 处理。
+    """
+    if not isinstance(raw_query, str):
+        return False
+    value = raw_query.strip()
+    if not value or len(value) > 80 or re.search(r"[。！？?!\n]", value):
+        return False
+    normalized = _normalize(value)
+    if not normalized:
+        return False
+    # This is a positive identity grammar.  It intentionally rejects a bare
+    # brand and business questions such as ``Sony价格``; false negatives are
+    # safer than allowing a hidden candidate pool to select an order.
+    identity = _SUBJECT_TRAILING_ATTRIBUTES.sub("", normalized)
+    if _SUBJECT_ORDER_ID.fullmatch(identity):
+        return True
+    if _SUBJECT_MODEL.fullmatch(identity):
+        return True
+    return bool(
+        re.fullmatch(rf"(?:{_SUBJECT_BRANDS})(?:{_SUBJECT_CATEGORIES})", identity, re.IGNORECASE)
+        or re.fullmatch(rf"(?:{_SUBJECT_BRANDS})[a-z][a-z0-9_-]*", identity, re.IGNORECASE)
+    )
 
 
 def _valid_choices(raw_choices: object) -> list[dict[str, Any]]:

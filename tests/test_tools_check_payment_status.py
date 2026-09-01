@@ -34,7 +34,7 @@ async def test_customer_payment_check_refreshes_only_own_order() -> None:
         )
 
     assert result.is_success
-    assert result.data["payment_result"] == "支付成功"
+    assert result.data["payment_result"] == "PAID"
     refresh.assert_awaited_once_with(customer_user_id=42, order_no="SO202608250001")
     assert orders.await_count == 2
     assert orders.await_args_list == [
@@ -61,7 +61,7 @@ async def test_payment_check_uses_existing_paid_fact_without_refreshing_gateway(
         )
 
     assert result.is_success
-    assert result.data["payment_result"] == "支付成功"
+    assert result.data["payment_result"] == "PAID"
     refresh.assert_not_awaited()
     orders.assert_awaited_once_with(42, order_id="SO202608250001")
 
@@ -101,14 +101,17 @@ async def test_payment_check_does_not_query_non_customer_or_non_checkout_orders(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("exception", "expected"),
+    ("exception", "expected_status"),
     [
-        (PaymentNotCreatedError("not found"), "尚未打开支付宝付款页"),
-        (PaymentStatusUnavailableError("unavailable"), "暂时无法确认"),
+        (PaymentNotCreatedError("not found"), "PAYMENT_NOT_CREATED"),
+        (PaymentStatusUnavailableError("unavailable"), "PAYMENT_STATUS_UNAVAILABLE"),
     ],
 )
-async def test_payment_check_returns_safe_gateway_errors(exception: Exception, expected: str) -> None:
-    """网关失败不泄露供应商异常文本，也不伪装成支付成功。"""
+async def test_payment_check_returns_controlled_unknown_or_not_created_fact(
+    exception: Exception,
+    expected_status: str,
+) -> None:
+    """网关不可用是 UNKNOWN，不让后续 LLM 自由解释为支付失败。"""
     tool = CheckPaymentStatus()
     refresh = AsyncMock(side_effect=exception)
 
@@ -118,7 +121,6 @@ async def test_payment_check_returns_safe_gateway_errors(exception: Exception, e
     ):
         result = await tool.execute(order_id="SO202608250001", tool_context=ToolContext(user_id=42, role="customer"))
 
-    assert not result.is_success
-    assert expected in result.error
-    assert "not found" not in result.error
-    assert "unavailable" not in result.error
+    assert result.is_success
+    assert result.data["payment_result"] == expected_status
+    assert result.data["order"]["order_id"] == "SO202608250001"

@@ -60,6 +60,22 @@ async def test_refund_entry_is_not_returned_when_current_customer_is_ineligible(
 
 
 @pytest.mark.asyncio
+async def test_refund_entry_can_reuse_current_workflow_eligibility_without_a_second_read() -> None:
+    with patch(
+        "service.checkout_refund_service.get_customer_refund_eligibility",
+        new=AsyncMock(side_effect=AssertionError("同一轮已核验的资格不应再次读取")),
+    ) as eligibility:
+        entry = await generate_customer_refund_entry(
+            customer_user_id=101,
+            order_no="SO202608250001",
+            eligibility_already_verified=True,
+        )
+
+    assert entry == "?page=orders&refund_order=SO202608250001"
+    eligibility.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_request_refund_creates_only_a_pending_confirmation_record() -> None:
     """申请阶段不得调用支付宝；客户确认前只能写本地退款记录。"""
     refund = _refund()

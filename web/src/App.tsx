@@ -5,6 +5,7 @@ import remarkGfm from "remark-gfm";
 import {
   AuthState,
   Cart,
+  ChatInteraction,
   CheckoutSession,
   CheckoutOrder,
   Fulfillment,
@@ -15,7 +16,10 @@ import {
   ProductContextRef,
   ProductCatalogPage,
   ProductDetail,
+  PaymentProvider,
   CustomerOrder,
+  CustomerAction,
+  CustomerPresentation,
   SessionItem,
   SupportReplyDraft,
   Ticket,
@@ -61,6 +65,8 @@ import {
   streamChat,
   updateCartItem,
 } from "./api";
+import { PresentationRenderer } from "./chat/PresentationRenderer";
+import { latestInteractiveChoiceMessageId } from "./chat/presentationState";
 
 // 登录态只属于当前标签页；避免一个标签页退出时清空所有打开中的工作台。
 const STORAGE_KEY = "ecommerce-agent.tab-auth";
@@ -70,22 +76,29 @@ type ChatMessage = {
   role: "user" | "assistant";
   content: string;
   sequenceNo?: number;
+  presentation?: CustomerPresentation | null;
 };
 
 type CustomerPage = "service" | "catalog" | "product" | "orders" | "cart" | "tickets";
 
 function toChatMessages(
   sessionId: string,
-  messages: Array<{ role: string; content?: string; sequence_no?: number }>,
+  messages: Array<{
+    role: string;
+    content?: string;
+    sequence_no?: number;
+    presentation?: CustomerPresentation | null;
+  }>,
 ): ChatMessage[] {
   // 将会话 API 的持久化消息转换为聊天页面需要的显示数据。
   return messages
-    .filter((message) => (message.role === "user" || message.role === "assistant") && Boolean(message.content))
+    .filter((message) => (message.role === "user" || message.role === "assistant") && (Boolean(message.content) || Boolean(message.presentation)))
     .map((message, index) => ({
       id: `history-${sessionId}-${message.sequence_no ?? index}`,
       role: message.role as "user" | "assistant",
       content: message.content ?? "",
       sequenceNo: message.sequence_no,
+      presentation: message.presentation,
     }));
 }
 
@@ -276,8 +289,8 @@ function CustomerStorefront({
       {page === "catalog" ? <ProductCatalog auth={auth} initialQuery={initialQuery} onView={onViewProduct} />
         : page === "product" && detailTarget ? <ProductDetailPage auth={auth} category={detailTarget.category} productId={detailTarget.productId} onBack={onBackToCatalog} onAsk={onAskProduct} />
           : page === "cart" ? <CartPage auth={auth} />
-            : page === "orders" ? <OrderList auth={auth} />
-              : <CustomerTicketCenter auth={auth} />}
+              : page === "orders" ? <OrderList auth={auth} focusOrderId={new URLSearchParams(window.location.search).get("order_id") ?? new URLSearchParams(window.location.search).get("refund_order") ?? undefined} />
+              : <CustomerTicketCenter auth={auth} focusTicketId={new URLSearchParams(window.location.search).get("ticket_id") ?? undefined} />}
     </section>
   </main>;
 }
@@ -359,8 +372,6 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [streamStatus, setStreamStatus] = useState("");
-  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
-  const [editingValue, setEditingValue] = useState("");
   const chatHistoryRef = useRef<HTMLDivElement>(null);
   const smoothScrollOnNextMessageRef = useRef(false);
   const scrollToOpenedSessionRef = useRef(false);
@@ -408,7 +419,6 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
     setQuery("");
     setSelectedProductForChat(undefined);
     setError("");
-    setEditingMessageId(null);
   };
 
   const openSession = async (nextSessionId: string): Promise<void> => {
@@ -477,18 +487,20 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
   const submitChatMessage = async (
     submittedText = query,
     replaceFromSequence?: number,
+    interaction?: ChatInteraction,
   ): Promise<void> => {
     const text = submittedText.trim();
-    if (!text || busy) return;
-    const productContext = replaceFromSequence === undefined ? selectedProductForChat : undefined;
+    if ((!text && !interaction) || busy) return;
+    const productContext = replaceFromSequence === undefined && !interaction ? selectedProductForChat : undefined;
+    const displayedUserMessage = interaction ? `已选择订单：${interaction.subject_id}` : text;
     // 用户发送后将当前会话平滑带到新消息；后续 SSE token 继续贴住最新回复。
     smoothScrollOnNextMessageRef.current = true;
-    setBusy(true); setError(""); setStreamStatus("正在思考…"); setQuery(""); setSelectedProductForChat(undefined); setEditingMessageId(null);
+    setBusy(true); setError(""); setStreamStatus("正在思考…"); setQuery(""); setSelectedProductForChat(undefined);
     const assistantId = `assistant-${Date.now()}`;
     if (replaceFromSequence !== undefined) {
       setChatMessages((items) => items.filter((message) => (message.sequenceNo ?? -1) < replaceFromSequence));
     }
-    setChatMessages((items) => [...items, { id: `user-${Date.now()}`, role: "user", content: text }, { id: assistantId, role: "assistant", content: "" }]);
+    setChatMessages((items) => [...items, { id: `user-${Date.now()}`, role: "user", content: displayedUserMessage }, { id: assistantId, role: "assistant", content: "" }]);
     const sourceSessionId = sessionId;
     let activeSessionId = sourceSessionId;
     try {
@@ -519,11 +531,15 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
         if (event.event === "done") {
           const completedAnswer = event.answer ?? event.data?.answer;
           if (selectedSessionIdRef.current === activeSessionId) {
-            if (completedAnswer) setChatMessages((items) => items.map((message) => message.id === assistantId && !message.content ? { ...message, content: completedAnswer } : message));
+            setChatMessages((items) => items.map((message) => message.id === assistantId ? {
+              ...message,
+              ...(completedAnswer && !message.content ? { content: completedAnswer } : {}),
+              presentation: event.presentation ?? message.presentation,
+            } : message));
             setStreamStatus("");
           }
         }
-      }, replaceFromSequence, productContext);
+      }, replaceFromSequence, productContext, interaction);
       setSessions(await listSessions(auth.token));
       if (activeSessionId && selectedSessionIdRef.current === activeSessionId) {
         const persisted = await getSession(auth.token, activeSessionId);
@@ -555,9 +571,28 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
     void submitChatMessage();
   };
 
-  const saveEditedMessage = (message: ChatMessage): void => {
-    if (message.sequenceNo === undefined) return;
-    void submitChatMessage(editingValue, message.sequenceNo);
+  const handlePresentationAction = (action: CustomerAction): void => {
+    if (action.type === "interaction") {
+      void submitChatMessage("", undefined, action.interaction);
+      return;
+    }
+    const parameters = new URLSearchParams();
+    if (action.destination === "orders") {
+      parameters.set("page", "orders");
+      // ``refund_order`` remains a compatibility URL for existing self-service
+      // links.  The Presentation contract itself is typed (order + focus), and
+      // other customer actions no longer masquerade as refund navigation.
+      if (action.target.focus === "refund") parameters.set("refund_order", action.target.order_id);
+      else parameters.set("order_id", action.target.order_id);
+      if (action.target.focus && action.target.focus !== "refund") parameters.set("focus", action.target.focus);
+      window.history.pushState(null, "", `${window.location.pathname}?${parameters}`);
+      setPage("orders");
+      return;
+    }
+    parameters.set("page", "tickets");
+    parameters.set("ticket_id", action.target.ticket_id);
+    window.history.pushState(null, "", `${window.location.pathname}?${parameters}`);
+    setPage("tickets");
   };
 
   const removeSession = async (targetSessionId: string): Promise<void> => {
@@ -599,6 +634,8 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
       onSignOut={onSignOut}
     /> : null;
 
+  const interactiveChoiceMessageId = latestInteractiveChoiceMessageId(chatMessages);
+
   return storefront ?? <main className={`customer-chat-app${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
     <aside className="chat-sidebar">
       <div className="chat-brand"><span>G</span><strong>Geex AI</strong><button className="sidebar-toggle" aria-label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"} onClick={() => setSidebarCollapsed((value) => !value)}>{sidebarCollapsed ? "›" : "‹"}</button></div>
@@ -614,8 +651,8 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
     </aside>
     <section className="chat-main">
       <header className="chat-main-header"><div><strong>{page === "service" ? "智能客服" : page === "catalog" ? "商品目录" : page === "product" ? "商品详情" : page === "orders" ? "我的订单" : page === "cart" ? "购物车" : "我的售后"}</strong><span>{page === "service" ? (sessionId ? "当前会话" : "新对话") : "Geex Digital"}</span></div><span className="role-badge">客户服务台</span></header>
-      {page === "catalog" ? <div className="customer-page-scroll"><ProductCatalog initialQuery={catalogQueryFromUrl} auth={auth} onView={openProductDetail} /></div> : page === "product" && detailTarget ? <div className="customer-page-scroll"><ProductDetailPage auth={auth} category={detailTarget.category} productId={detailTarget.productId} onBack={returnToCatalog} onAsk={askAboutProduct} /></div> : page === "orders" ? <div className="customer-page-scroll"><OrderList auth={auth} /></div> : page === "cart" ? <div className="customer-page-scroll"><CartPage auth={auth} /></div> : page === "tickets" ? <div className="customer-page-scroll"><CustomerTicketCenter auth={auth} /></div> : <section className="chat-canvas">
-        <div ref={chatHistoryRef} className="chat-history chatgpt-history">{chatMessages.length === 0 ? <div className="chat-welcome"><p className="eyebrow">GEEX DIGITAL · AI ASSISTANT</p><h1>今天想解决什么问题？</h1><p>我可以介绍商品、查询已归属订单，也能帮你发起售后工单。</p><div className="prompt-grid"><button className="prompt-card" onClick={() => setQuery("帮我推荐一台预算 5000 元左右的笔记本")}>推荐一台预算 5000 元的笔记本</button><button className="prompt-card" onClick={() => setQuery("帮我查询订单物流")}>查询我的订单物流</button><button className="prompt-card" onClick={() => setQuery("哪些手机目前有库存？")}>查询有库存的手机</button></div></div> : chatMessages.map((message) => <article className={`bubble ${message.role}${!message.content ? " thinking" : ""}${editingMessageId === message.id ? " editing" : ""}`} key={message.id}><div className="message-content">{message.role === "user" && editingMessageId === message.id ? <div className="message-edit"><textarea value={editingValue} onChange={(event) => setEditingValue(event.target.value)} maxLength={2000} autoFocus /></div> : message.content ? message.role === "assistant" ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown> : message.content : streamStatus || "正在思考…"}</div>{message.role === "user" && message.sequenceNo !== undefined && !busy && <div className="message-actions">{editingMessageId === message.id ? <><button className="secondary" onClick={() => { setEditingMessageId(null); setEditingValue(""); }}>取消</button><button onClick={() => saveEditedMessage(message)} disabled={!editingValue.trim()}>生成</button></> : <button className="message-edit-button" onClick={() => { setEditingMessageId(message.id); setEditingValue(message.content); }}>编辑</button>}</div>}</article>)}</div>
+      {page === "catalog" ? <div className="customer-page-scroll"><ProductCatalog initialQuery={catalogQueryFromUrl} auth={auth} onView={openProductDetail} /></div> : page === "product" && detailTarget ? <div className="customer-page-scroll"><ProductDetailPage auth={auth} category={detailTarget.category} productId={detailTarget.productId} onBack={returnToCatalog} onAsk={askAboutProduct} /></div> : page === "orders" ? <div className="customer-page-scroll"><OrderList auth={auth} focusOrderId={new URLSearchParams(window.location.search).get("order_id") ?? new URLSearchParams(window.location.search).get("refund_order") ?? undefined} /></div> : page === "cart" ? <div className="customer-page-scroll"><CartPage auth={auth} /></div> : page === "tickets" ? <div className="customer-page-scroll"><CustomerTicketCenter auth={auth} focusTicketId={new URLSearchParams(window.location.search).get("ticket_id") ?? undefined} /></div> : <section className="chat-canvas">
+        <div ref={chatHistoryRef} className="chat-history chatgpt-history">{chatMessages.length === 0 ? <div className="chat-welcome"><p className="eyebrow">GEEX DIGITAL · AI ASSISTANT</p><h1>今天想解决什么问题？</h1><p>我可以介绍商品、查询已归属订单，也能帮你发起售后工单。</p><div className="prompt-grid"><button className="prompt-card" onClick={() => setQuery("帮我推荐一台预算 5000 元左右的笔记本")}>推荐一台预算 5000 元的笔记本</button><button className="prompt-card" onClick={() => setQuery("帮我查询订单物流")}>查询我的订单物流</button><button className="prompt-card" onClick={() => setQuery("哪些手机目前有库存？")}>查询有库存的手机</button></div></div> : chatMessages.map((message) => <article className={`bubble ${message.role}${!message.content ? " thinking" : ""}`} key={message.id}><div className="message-content">{message.content ? message.role === "assistant" ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown> : message.content : streamStatus || "正在思考…"}{message.role === "assistant" && message.presentation && <PresentationRenderer presentation={message.presentation} onAction={handlePresentationAction} disabled={busy} choiceEnabled={message.id === interactiveChoiceMessageId} />}</div></article>)}</div>
         <form className="composer chatgpt-composer" onSubmit={submitChat}><textarea value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={handleChatKeyDown} placeholder="给 Geex AI 发送消息" maxLength={2000} rows={1} /><button aria-label="发送消息" disabled={busy || !query.trim()}>{busy ? "…" : "↑"}</button></form><p className="chat-disclaimer">Enter 发送 · Shift / Alt + Enter 换行</p>
       </section>}
     </section>
@@ -732,8 +769,8 @@ function productDisplayName(productName: string): string {
   return primaryName.length > 36 ? `${primaryName.slice(0, 36)}…` : primaryName;
 }
 
-/** 打开服务端生成的支付宝页面支付 URL；单件与购物车共用同一跳转方式。 */
-function openAlipayCheckout(session: CheckoutSession): void {
+/** 打开服务端生成的支付页面；具体渠道签名和表单字段只由后端决定。 */
+function openPaymentCheckout(session: CheckoutSession): void {
   if (!session.payment_form_action || !session.payment_form_fields) {
     window.location.assign(session.payment_url);
     return;
@@ -752,10 +789,14 @@ function openAlipayCheckout(session: CheckoutSession): void {
   form.submit();
 }
 
-/** 购物车结算先选择支付渠道；当前只接入支付宝，后续接微信时无需重做订单页。 */
-function CheckoutMethodDialog({ onClose, onChooseAlipay }: {
+function paymentProviderLabel(provider: PaymentProvider): string {
+  return provider === "unionpay_test" ? "银联测试支付" : "支付宝沙箱";
+}
+
+/** 结算前选择支付渠道；前端只提交后端允许的 provider 标识。 */
+function CheckoutMethodDialog({ onClose, onChooseProvider }: {
   onClose: () => void;
-  onChooseAlipay: () => void;
+  onChooseProvider: (provider: PaymentProvider) => void;
 }) {
   return <div className="modal-backdrop checkout-qr-backdrop" role="presentation">
     <section className="modal checkout-method-dialog" role="dialog" aria-modal="true" aria-label="选择付款方式">
@@ -763,7 +804,12 @@ function CheckoutMethodDialog({ onClose, onChooseAlipay }: {
       <p className="eyebrow">CHECKOUT</p>
       <h2>选择付款方式</h2>
       <p className="muted">付款金额和商品信息会由服务端再次核验。</p>
-      <button className="payment-method-option" onClick={onChooseAlipay}>
+      <button className="payment-method-option" onClick={() => onChooseProvider("unionpay_test")}>
+        <span className="payment-method-icon">银</span>
+        <span><strong>银联测试支付</strong><small>进入银联测试收银台完成付款</small></span>
+        <b>›</b>
+      </button>
+      <button className="payment-method-option" onClick={() => onChooseProvider("alipay_sandbox")}>
         <span className="payment-method-icon">支</span>
         <span><strong>支付宝沙箱</strong><small>进入支付宝沙箱收银台完成付款</small></span>
         <b>›</b>
@@ -796,6 +842,7 @@ function ProductDetailPage({
   const [addingToCart, setAddingToCart] = useState(false);
   const [cartMessage, setCartMessage] = useState("");
   const [error, setError] = useState("");
+  const [choosingPaymentMethod, setChoosingPaymentMethod] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -821,11 +868,22 @@ function ProductDetailPage({
   const buy = async (): Promise<void> => {
     if (!auth) { onRequireLogin?.(); return; }
     if (!product || buying) return;
-    if (!window.confirm(`确认购买「${product.product_name}」吗？将前往支付宝沙箱付款。`)) return;
+    setError("");
+    setChoosingPaymentMethod(true);
+  };
+  const startPayment = async (paymentProvider: PaymentProvider): Promise<void> => {
+    if (!auth || !product || buying) return;
+    setChoosingPaymentMethod(false);
     setBuying(true); setError("");
     try {
-      const session = await createCheckout(auth.token, category, product.id, window.location.origin);
-      openAlipayCheckout(session);
+      const session = await createCheckout(
+        auth.token,
+        category,
+        product.id,
+        window.location.origin,
+        paymentProvider,
+      );
+      openPaymentCheckout(session);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "暂时无法创建支付订单");
       setBuying(false);
@@ -856,13 +914,13 @@ function ProductDetailPage({
     {error && <p className="error">{error}</p>}
     <div className="product-detail-layout">
       <section className="product-detail-main panel">
-        <div className="product-hero"><ProductImage product={product} /><div><p className="detail-category">{product.product_type || "商品详情"}</p><h1 title={product.product_name}>{productDisplayName(product.product_name)}</h1><p className="muted product-detail-summary">{product.brand ? `${product.brand} · ` : ""}{product.description || "查看以下详细规格。"}</p><div className="detail-price-row"><strong>{product.price === null ? "价格待询" : `¥${product.price.toLocaleString("zh-CN")}`}</strong>{product.stock <= 0 && <span className="out-stock">暂时缺货</span>}</div><div className="product-actions"><button className="secondary" disabled={product.stock <= 0 || addingToCart} onClick={() => void addToCart()}>{addingToCart ? "加入中…" : "加入购物车"}</button><button className="detail-buy" disabled={product.stock <= 0 || buying} onClick={() => void buy()}>{buying ? "正在前往支付宝…" : "立即结算"}</button></div>{!auth && <p className="muted cart-login-tip">加入购物车或结算时需要登录。</p>}{cartMessage && <p className="cart-success">{cartMessage}</p>}</div></div>
+        <div className="product-hero"><ProductImage product={product} /><div><p className="detail-category">{product.product_type || "商品详情"}</p><h1 title={product.product_name}>{productDisplayName(product.product_name)}</h1><p className="muted product-detail-summary">{product.brand ? `${product.brand} · ` : ""}{product.description || "查看以下详细规格。"}</p><div className="detail-price-row"><strong>{product.price === null ? "价格待询" : `¥${product.price.toLocaleString("zh-CN")}`}</strong>{product.stock <= 0 && <span className="out-stock">暂时缺货</span>}</div><div className="product-actions"><button className="secondary" disabled={product.stock <= 0 || addingToCart} onClick={() => void addToCart()}>{addingToCart ? "加入中…" : "加入购物车"}</button><button className="detail-buy" disabled={product.stock <= 0 || buying} onClick={() => void buy()}>{buying ? "正在打开支付…" : "立即结算"}</button></div>{!auth && <p className="muted cart-login-tip">加入购物车或结算时需要登录。</p>}{cartMessage && <p className="cart-success">{cartMessage}</p>}</div></div>
         <h2>商品参数</h2>
         <div className="specification-table">{product.specifications.length ? product.specifications.map((specification) => <div className="specification-row" key={specification.name}><span>{specification.name}</span><strong>{specification.value}</strong></div>) : <p className="empty">暂未提供详细参数。</p>}</div>
       </section>
       <aside className="product-detail-ai panel"><p className="eyebrow">AI PRODUCT EXPERT</p><h2>问问 AI</h2><p className="muted">围绕这款商品的配置、使用场景或搭配方案提问。</p><form onSubmit={ask}><textarea value={question} onChange={(event) => setQuestion(event.target.value)} placeholder={`例如：${product.product_name} 适合玩 3A 游戏吗？`} maxLength={400} rows={5} /><button disabled={!question.trim()}>开始咨询</button></form><button className="text-button detail-default-question" onClick={() => onAsk(product)}>让 AI 介绍这款商品</button></aside>
     </div>
-  </section></>;
+  </section>{choosingPaymentMethod && <CheckoutMethodDialog onClose={() => setChoosingPaymentMethod(false)} onChooseProvider={(provider) => { void startPayment(provider); }} />}</>;
 }
 
 /** 客户在付款前统一核对商品、数量和总额的轻量购物车页面。 */
@@ -904,12 +962,12 @@ function CartPage({ auth }: { auth: AuthState }) {
     catch (reason) { setError(reason instanceof Error ? reason.message : "无法删除商品"); }
     finally { setUpdatingItem(null); }
   };
-  const checkout = async (): Promise<void> => {
+  const checkout = async (paymentProvider: PaymentProvider): Promise<void> => {
     if (checkingOut || cart.items.length === 0 || cart.items.some((item) => !item.available)) return;
     setCheckingOut(true); setError("");
     try {
-      const session = await checkoutCart(auth.token, window.location.origin);
-      openAlipayCheckout(session);
+      const session = await checkoutCart(auth.token, window.location.origin, paymentProvider);
+      openPaymentCheckout(session);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "暂时无法创建支付订单"); setCheckingOut(false); }
   };
   const openCheckout = (): void => {
@@ -920,10 +978,10 @@ function CartPage({ auth }: { auth: AuthState }) {
   const total = cart.items.reduce((sum, item) => sum + (item.price ?? 0) * item.quantity, 0);
   const canCheckout = cart.items.length > 0 && cart.items.every((item) => item.available && item.price !== null);
 
-  return <><section className="cart-page panel"><div className="section-title"><div><p className="eyebrow">SHOPPING CART</p><h2>购物车</h2><p className="muted">结算前会再次核验商品价格与库存。</p></div><button className="secondary" onClick={() => void load()} disabled={loading}>刷新</button></div>{error && <p className="error">{error}</p>}{loading ? <p className="empty">正在读取购物车…</p> : cart.items.length === 0 ? <p className="empty">购物车还是空的。去商品详情页把想买的商品加入这里吧。</p> : <><div className="cart-items">{cart.items.map((item) => <article className={`cart-item${item.available ? "" : " unavailable"}`} key={item.item_id}><div><p className="product-type">{item.brand || "商品"}</p><h3>{item.product_name}</h3><p className="muted">{item.available ? `库存可用：${item.stock}` : "商品已下架或当前库存不足，请删除后重新选择。"}</p></div><div className="cart-item-price"><strong>{item.price === null ? "价格待询" : `¥${item.price.toLocaleString("zh-CN")}`}</strong><div className="quantity-control"><button className="secondary" disabled={updatingItem === item.item_id} onClick={() => void changeQuantity(item.item_id, item.quantity - 1)}>−</button><span>{item.quantity}</span><button className="secondary" disabled={updatingItem === item.item_id || item.quantity >= Math.min(5, item.stock)} onClick={() => void changeQuantity(item.item_id, item.quantity + 1)}>＋</button></div><button className="text-button cart-remove" disabled={updatingItem === item.item_id} onClick={() => void remove(item.item_id)}>删除</button></div></article>)}</div><footer className="cart-summary"><div><span>合计</span><strong>¥{total.toLocaleString("zh-CN")}</strong></div><button disabled={!canCheckout || checkingOut} onClick={openCheckout}>{checkingOut ? "正在前往支付宝…" : "去结算"}</button></footer></>}</section>{choosingPaymentMethod && <CheckoutMethodDialog onClose={() => setChoosingPaymentMethod(false)} onChooseAlipay={() => { setChoosingPaymentMethod(false); void checkout(); }} />}</>;
+  return <><section className="cart-page panel"><div className="section-title"><div><p className="eyebrow">SHOPPING CART</p><h2>购物车</h2><p className="muted">结算前会再次核验商品价格与库存。</p></div><button className="secondary" onClick={() => void load()} disabled={loading}>刷新</button></div>{error && <p className="error">{error}</p>}{loading ? <p className="empty">正在读取购物车…</p> : cart.items.length === 0 ? <p className="empty">购物车还是空的。去商品详情页把想买的商品加入这里吧。</p> : <><div className="cart-items">{cart.items.map((item) => <article className={`cart-item${item.available ? "" : " unavailable"}`} key={item.item_id}><div><p className="product-type">{item.brand || "商品"}</p><h3>{item.product_name}</h3><p className="muted">{item.available ? `库存可用：${item.stock}` : "商品已下架或当前库存不足，请删除后重新选择。"}</p></div><div className="cart-item-price"><strong>{item.price === null ? "价格待询" : `¥${item.price.toLocaleString("zh-CN")}`}</strong><div className="quantity-control"><button className="secondary" disabled={updatingItem === item.item_id} onClick={() => void changeQuantity(item.item_id, item.quantity - 1)}>−</button><span>{item.quantity}</span><button className="secondary" disabled={updatingItem === item.item_id || item.quantity >= Math.min(5, item.stock)} onClick={() => void changeQuantity(item.item_id, item.quantity + 1)}>＋</button></div><button className="text-button cart-remove" disabled={updatingItem === item.item_id} onClick={() => void remove(item.item_id)}>删除</button></div></article>)}</div><footer className="cart-summary"><div><span>合计</span><strong>¥{total.toLocaleString("zh-CN")}</strong></div><button disabled={!canCheckout || checkingOut} onClick={openCheckout}>{checkingOut ? "正在打开支付…" : "去结算"}</button></footer></>}</section>{choosingPaymentMethod && <CheckoutMethodDialog onClose={() => setChoosingPaymentMethod(false)} onChooseProvider={(provider) => { void checkout(provider); }} />}</>;
 }
 
-function OrderList({ auth }: { auth: AuthState }) {
+function OrderList({ auth, focusOrderId }: { auth: AuthState; focusOrderId?: string }) {
   const [orders, setOrders] = useState<CustomerOrder[]>([]);
   const [checkoutOrders, setCheckoutOrders] = useState<CheckoutOrder[]>([]);
   const [error, setError] = useState("");
@@ -934,17 +992,59 @@ function OrderList({ auth }: { auth: AuthState }) {
   const [requestingRefundOrder, setRequestingRefundOrder] = useState<string | null>(null);
   const [confirmingRefundId, setConfirmingRefundId] = useState<string | null>(null);
   const [refreshingRefundId, setRefreshingRefundId] = useState<string | null>(null);
-  const load = async (paymentOrderNo?: string): Promise<void> => { setLoading(true); setError(""); try { if (paymentOrderNo) await refreshCheckoutPayment(auth.token, paymentOrderNo); const [legacyOrders, currentOrders] = await Promise.all([listMyOrders(auth.token), listMyCheckoutOrders(auth.token)]); setOrders(legacyOrders); setCheckoutOrders(currentOrders); } catch (reason) { setError(reason instanceof Error ? reason.message : "订单暂时无法读取"); } finally { setLoading(false); } };
-  useEffect(() => { const parameters = new URLSearchParams(window.location.search); const returnedOrderNo = parameters.get("payment_return") === "1" ? parameters.get("checkout_order") ?? undefined : undefined; void load(returnedOrderNo); if (parameters.get("payment_return") === "1") window.history.replaceState(null, "", `${window.location.pathname}?page=orders`); }, [auth.token]);
+  const [focusedOrderId, setFocusedOrderId] = useState<string | null>(null);
+  const [paymentReturnMessage, setPaymentReturnMessage] = useState<string | null>(null);
+  const orderCardRefs = useRef(new Map<string, HTMLElement>());
+  const refundRequestKeys = useRef(new Map<string, string>());
+  const refundConfirmationKeys = useRef(new Map<string, string>());
+  const load = async (paymentOrderNo?: string, isPaymentReturn = false): Promise<void> => {
+    setLoading(true); setError("");
+    if (isPaymentReturn) setPaymentReturnMessage("正在确认支付结果…");
+    let refreshedOrder: CheckoutOrder | null = null;
+    try {
+      if (paymentOrderNo) refreshedOrder = await refreshCheckoutPayment(auth.token, paymentOrderNo);
+    } catch (reason) {
+      if (isPaymentReturn) setPaymentReturnMessage("支付结果暂时无法确认，请稍后刷新。");
+      else setError(reason instanceof Error ? reason.message : "订单暂时无法读取");
+    }
+    try {
+      const [legacyOrders, currentOrders] = await Promise.all([listMyOrders(auth.token), listMyCheckoutOrders(auth.token)]);
+      setOrders(legacyOrders); setCheckoutOrders(currentOrders);
+      if (isPaymentReturn && !refreshedOrder) setPaymentReturnMessage("支付结果暂时无法确认，请稍后刷新。");
+      if (isPaymentReturn && refreshedOrder) setPaymentReturnMessage(refreshedOrder.status === "PAID" || refreshedOrder.payment_status === "SUCCEEDED" ? "支付成功" : "支付结果暂时无法确认，请稍后刷新。");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "订单暂时无法读取");
+    } finally { setLoading(false); }
+  };
+  useEffect(() => { const parameters = new URLSearchParams(window.location.search); const isPaymentReturn = parameters.get("payment_return") === "1"; const returnedOrderNo = isPaymentReturn ? parameters.get("checkout_order") ?? undefined : undefined; void load(returnedOrderNo, isPaymentReturn); if (isPaymentReturn) window.history.replaceState(null, "", `${window.location.pathname}?page=orders`); }, [auth.token]);
   useEffect(() => { const resetResume = (): void => setResumingOrder(null); window.addEventListener("pageshow", resetResume); window.addEventListener("focus", resetResume); return () => { window.removeEventListener("pageshow", resetResume); window.removeEventListener("focus", resetResume); }; }, []);
-  const resumePayment = async (orderNo: string): Promise<void> => { setResumingOrder(orderNo); setError(""); try { const session = await resumeCheckout(auth.token, orderNo, window.location.origin); openAlipayCheckout(session); } catch (reason) { setError(reason instanceof Error ? reason.message : "暂时无法继续付款"); setResumingOrder(null); } };
+  useEffect(() => {
+    if (!focusOrderId || loading) return;
+    const found = checkoutOrders.some((order) => order.order_no === focusOrderId)
+      || orders.some((order) => order.order_id === focusOrderId);
+    if (!found) {
+      setFocusedOrderId(null);
+      return;
+    }
+    setExpandedOrder(focusOrderId);
+    setFocusedOrderId(focusOrderId);
+    const frame = window.requestAnimationFrame(() => {
+      orderCardRefs.current.get(focusOrderId)?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+    const timer = window.setTimeout(() => setFocusedOrderId(null), 2200);
+    return () => { window.cancelAnimationFrame(frame); window.clearTimeout(timer); };
+  }, [checkoutOrders, orders, loading, focusOrderId]);
+  const resumePayment = async (orderNo: string): Promise<void> => { setResumingOrder(orderNo); setError(""); try { const session = await resumeCheckout(auth.token, orderNo, window.location.origin); openPaymentCheckout(session); } catch (reason) { setError(reason instanceof Error ? reason.message : "暂时无法继续付款"); setResumingOrder(null); } };
   const cancelPayment = async (orderNo: string): Promise<void> => { if (!window.confirm("确认取消这笔待支付订单吗？")) return; setCancellingOrder(orderNo); setError(""); try { await cancelCheckout(auth.token, orderNo); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "暂时无法取消订单"); await load(); } finally { setCancellingOrder(null); } };
   const requestRefund = async (order: CheckoutOrder): Promise<void> => {
     const reason = window.prompt("请简要说明退款原因（可留空）：", "");
     if (reason === null) return;
     setRequestingRefundOrder(order.order_no); setError("");
     try {
-      await requestCheckoutRefund(auth.token, order.order_no, reason, crypto.randomUUID());
+      const key = refundRequestKeys.current.get(order.order_no) ?? crypto.randomUUID();
+      refundRequestKeys.current.set(order.order_no, key);
+      await requestCheckoutRefund(auth.token, order.order_no, reason, key);
+      refundRequestKeys.current.delete(order.order_no);
       await load();
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : "暂时无法创建退款申请");
@@ -953,13 +1053,16 @@ function OrderList({ auth }: { auth: AuthState }) {
     }
   };
   const confirmRefund = async (order: CheckoutOrder): Promise<void> => {
-    if (!order.refund_id || !window.confirm("确认原路全额退款吗？提交后将立即请求支付宝沙箱退款。")) return;
+    if (!order.refund_id || !window.confirm("确认原路全额退款吗？提交后将按当前支付渠道处理退款。")) return;
     setConfirmingRefundId(order.refund_id); setError("");
     try {
-      await confirmCheckoutRefund(auth.token, order.refund_id, crypto.randomUUID());
+      const key = refundConfirmationKeys.current.get(order.refund_id) ?? crypto.randomUUID();
+      refundConfirmationKeys.current.set(order.refund_id, key);
+      await confirmCheckoutRefund(auth.token, order.refund_id, key);
+      refundConfirmationKeys.current.delete(order.refund_id);
       await load();
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : "支付宝退款暂时无法确认");
+      setError(failure instanceof Error ? failure.message : "退款暂时无法确认");
       await load();
     } finally {
       setConfirmingRefundId(null);
@@ -972,7 +1075,7 @@ function OrderList({ auth }: { auth: AuthState }) {
       await refreshCheckoutRefund(auth.token, order.refund_id);
       await load();
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : "支付宝退款状态暂时无法确认");
+      setError(failure instanceof Error ? failure.message : "退款状态暂时无法确认");
     } finally {
       setRefreshingRefundId(null);
     }
@@ -982,7 +1085,7 @@ function OrderList({ auth }: { auth: AuthState }) {
     if (order.refund_status === "PENDING_CONFIRMATION") return "待确认退款";
     if (["PENDING_MERCHANT_REVIEW", "PENDING_FINANCE_APPROVAL"].includes(order.refund_status ?? "")) return "退款申请已提交";
     if (order.refund_status === "PROCESSING") return "退款处理中";
-    if (order.refund_status === "SUCCEEDED" || order.status === "REFUNDED") return "已退款";
+    if (["SUCCEEDED", "COMPLETED"].includes(order.refund_status ?? "") || order.status === "REFUNDED") return "已退款";
     if (order.refund_status === "FAILED") return "退款失败";
     if (order.fulfillment_status === "DELIVERED") return "已签收";
     if (order.fulfillment_status === "SHIPPED") return "已发货";
@@ -992,28 +1095,30 @@ function OrderList({ auth }: { auth: AuthState }) {
   const checkoutDetail = (order: CheckoutOrder): string => {
     if (order.refund_status === "PENDING_CONFIRMATION") return "请确认后提交原路全额退款";
     if (["PENDING_MERCHANT_REVIEW", "PENDING_FINANCE_APPROVAL"].includes(order.refund_status ?? "")) return "商家正在核实退款申请，请留意后续结果";
-    if (order.refund_status === "PROCESSING") return "已提交支付宝，正在确认退款结果";
-    if (order.refund_status === "SUCCEEDED") return "退款已成功提交至原支付渠道";
-    if (order.refund_status === "FAILED") return "支付宝明确拒绝退款，请联系售后";
+    if (order.refund_status === "PROCESSING") return "已提交退款，正在确认退款结果";
+    if (["SUCCEEDED", "COMPLETED"].includes(order.refund_status ?? "")) return "退款已完成";
+    if (order.refund_status === "FAILED") return "支付渠道明确拒绝退款，请联系售后";
     if (order.tracking_company && order.tracking_number) return `${order.tracking_company} · ${order.tracking_number}`;
-    return order.status === "PAID" ? "支付成功，等待发货" : `支付宝沙箱 · ${order.payment_status}`;
+    return order.status === "PAID" ? "支付成功，等待发货" : `${paymentProviderLabel(order.payment_provider)} · ${order.payment_status}`;
   };
 
   return <><section className="orders panel">
     <div className="section-title"><div><p className="eyebrow">MY ORDERS</p><h2>我的订单</h2><p className="muted">显示你的新支付订单与已确认归属的历史订单。</p></div><button className="secondary" onClick={() => void load()}>刷新</button></div>
     {error && <p className="error">{error}</p>}
+    {paymentReturnMessage && <p className="order-focus-notice">{paymentReturnMessage}</p>}
+    {focusOrderId && !loading && checkoutOrders.every((order) => order.order_no !== focusOrderId) && orders.every((order) => order.order_id !== focusOrderId) && <p className="order-focus-notice">暂时无法在当前账户的订单中定位这笔订单，请确认订单信息。</p>}
     {loading ? <p className="empty">正在读取订单…</p> : <>
-      {checkoutOrders.length > 0 && <><h3 className="order-group-title">沙箱结算订单</h3><div className="order-list">{checkoutOrders.map((order) => <article className="order-card" key={order.order_no}>
-        <header><div><strong>{order.order_no}</strong><small>{formatDate(order.created_at)}</small></div><span className="status">{checkoutLabel(order)}</span></header>
+      {checkoutOrders.length > 0 && <><h3 className="order-group-title">沙箱结算订单</h3><div className="order-list">{checkoutOrders.map((order) => <article ref={(element) => { if (element) orderCardRefs.current.set(order.order_no, element); else orderCardRefs.current.delete(order.order_no); }} className={`order-card${focusedOrderId === order.order_no ? " order-card-focused" : ""}`} data-order-id={order.order_no} key={order.order_no}>
+        <header><div><strong>{order.order_no}</strong><small>{formatDate(order.created_at)}</small></div><div className="order-status-group"><span className="status">{checkoutLabel(order)}</span><small>{paymentProviderLabel(order.payment_provider)}</small></div></header>
         <div className="order-products"><p>{order.product_name}<span>×{order.quantity}</span></p></div>
         <footer><div><strong>实付 ¥{(order.total_amount_cents / 100).toLocaleString("zh-CN")}</strong><small>{checkoutDetail(order)}</small></div>
-          {order.status === "PENDING_PAYMENT" && <div className="order-actions"><button className="secondary" disabled={resumingOrder === order.order_no || cancellingOrder === order.order_no} onClick={() => void resumePayment(order.order_no)}>{resumingOrder === order.order_no ? "正在跳转…" : "继续付款"}</button><button className="secondary cancel-order-button" disabled={resumingOrder === order.order_no || cancellingOrder === order.order_no} onClick={() => void cancelPayment(order.order_no)}>{cancellingOrder === order.order_no ? "取消中…" : "取消订单"}</button></div>}
-          {order.status === "PAID" && !order.refund_status && <div className="order-actions"><button className="secondary" disabled={requestingRefundOrder === order.order_no} onClick={() => void requestRefund(order)}>{requestingRefundOrder === order.order_no ? "提交中…" : "申请退款"}</button></div>}
-          {order.refund_status === "PENDING_CONFIRMATION" && order.refund_id && <div className="order-actions"><button className="secondary" disabled={confirmingRefundId === order.refund_id} onClick={() => void confirmRefund(order)}>{confirmingRefundId === order.refund_id ? "退款提交中…" : "确认退款"}</button></div>}
-          {order.refund_status === "PROCESSING" && order.refund_id && <div className="order-actions"><button className="secondary" disabled={refreshingRefundId === order.refund_id} onClick={() => void refreshRefund(order)}>{refreshingRefundId === order.refund_id ? "查询中…" : "刷新退款状态"}</button></div>}
+          {order.status === "PENDING_PAYMENT" && <div className="order-actions"><button className="secondary" disabled={resumingOrder === order.order_no || cancellingOrder === order.order_no} onClick={() => void resumePayment(order.order_no)}>{resumingOrder === order.order_no ? "正在跳转…" : "继续付款"}</button>{order.payment_provider !== "unionpay_test" && <button className="secondary cancel-order-button" disabled={resumingOrder === order.order_no || cancellingOrder === order.order_no} onClick={() => void cancelPayment(order.order_no)}>{cancellingOrder === order.order_no ? "取消中…" : "取消订单"}</button>}</div>}
+          {order.refund_eligible && !order.refund_status && <div className="order-actions"><button className="secondary" disabled={requestingRefundOrder === order.order_no} onClick={() => void requestRefund(order)}>{requestingRefundOrder === order.order_no ? "提交中…" : "申请退款"}</button></div>}
+          {order.refund_supported && order.refund_status === "PENDING_CONFIRMATION" && order.refund_id && <div className="order-actions"><button className="secondary" disabled={confirmingRefundId === order.refund_id} onClick={() => void confirmRefund(order)}>{confirmingRefundId === order.refund_id ? "退款提交中…" : "确认退款"}</button></div>}
+          {order.refund_supported && order.refund_status === "PROCESSING" && order.refund_id && <div className="order-actions"><button className="secondary" disabled={refreshingRefundId === order.refund_id} onClick={() => void refreshRefund(order)}>{refreshingRefundId === order.refund_id ? "查询中…" : "刷新退款状态"}</button></div>}
         </footer>
       </article>)}</div></>}
-      {orders.length ? <><h3 className="order-group-title">历史订单</h3><div className="order-list">{orders.map((order) => <article className="order-card" key={order.order_id}>
+      {orders.length ? <><h3 className="order-group-title">历史订单</h3><div className="order-list">{orders.map((order) => <article ref={(element) => { if (element) orderCardRefs.current.set(order.order_id, element); else orderCardRefs.current.delete(order.order_id); }} className={`order-card${focusedOrderId === order.order_id ? " order-card-focused" : ""}`} data-order-id={order.order_id} key={order.order_id}>
         <header><div><strong>{order.order_id}</strong><small>{formatDate(order.order_date)}</small></div><span className="status">{order.status || "处理中"}</span></header>
         <div className="order-products">{order.items.slice(0, expandedOrder === order.order_id ? undefined : 2).map((item, index) => <p key={index}>{item.brand ? `${item.brand} · ` : ""}{item.product_name}<span>×{item.quantity ?? 1}</span></p>)}</div>
         <footer><div><strong>实付 ¥{order.paid_amount.toLocaleString("zh-CN")}</strong><small>{order.tracking.company && order.tracking.number ? `${order.tracking.company} · ${order.tracking.number}` : "暂无物流信息"}</small></div>{order.items.length > 2 && <button className="secondary" onClick={() => setExpandedOrder(expandedOrder === order.order_id ? null : order.order_id)}>{expandedOrder === order.order_id ? "收起" : `查看 ${order.items.length} 件商品`}</button>}</footer>
@@ -1023,7 +1128,7 @@ function OrderList({ auth }: { auth: AuthState }) {
 }
 
 /** 客户查看 Agent 售后处理进度，并在同一工单中继续补充问题。 */
-function CustomerTicketCenter({ auth }: { auth: AuthState }) {
+function CustomerTicketCenter({ auth, focusTicketId }: { auth: AuthState; focusTicketId?: string }) {
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [selectedTicket, setSelectedTicket] = useState<Ticket | null>(null);
   const [messages, setMessages] = useState<TicketMessage[]>([]);
@@ -1054,10 +1159,10 @@ function CustomerTicketCenter({ auth }: { auth: AuthState }) {
   useEffect(() => { void loadTickets(); }, [auth.token]);
 
   useEffect(() => {
-    // 从聊天中的“查看售后进度”进入时，直接打开最新工单并开始观察 Agent 处理结果。
-    // 客户仍可随时在左侧切换到其他历史工单。
-    if (!selectedTicket && tickets[0]) void selectTicket(tickets[0].ticket_id);
-  }, [tickets, selectedTicket?.ticket_id]);
+    if (selectedTicket || tickets.length === 0) return;
+    const target = focusTicketId ? tickets.find((ticket) => ticket.ticket_id === focusTicketId) : tickets[0];
+    if (target) void selectTicket(target.ticket_id);
+  }, [tickets, selectedTicket?.ticket_id, focusTicketId]);
 
   useEffect(() => {
     if (!selectedTicket || !["AI待处理", "AI处理中"].includes(selectedTicket.status)) return;
@@ -1115,7 +1220,7 @@ function CustomerTicketCenter({ auth }: { auth: AuthState }) {
   if (!loading && tickets.length === 0) return <section className="customer-ticket-empty panel">
     <p className="eyebrow">MY AFTER-SALES</p>
     <h2>暂时没有售后工单</h2>
-    <p>在智能客服中描述设备问题、保修或退款诉求后，Agent 会自动创建工单并优先处理；处理进度会显示在这里。</p>
+    <p>当问题需要人工客服处理并创建工单后，处理进度会显示在这里。</p>
     <button className="secondary" onClick={() => void loadTickets()}>刷新状态</button>
     {error && <p className="error">{error}</p>}
   </section>;
@@ -1123,7 +1228,7 @@ function CustomerTicketCenter({ auth }: { auth: AuthState }) {
   return <section className="customer-ticket-center">
     <section className="panel customer-ticket-list">
       <div className="section-title"><div><p className="eyebrow">MY AFTER-SALES</p><h2>我的售后</h2><p className="muted">Agent 会自动处理明确问题，复杂情况再转人工。</p></div><button className="secondary" onClick={() => void loadTickets()} disabled={loading}>刷新</button></div>
-      {loading ? <p className="empty">正在读取售后进度…</p> : tickets.length ? <div className="ticket-list">{tickets.map((ticket) => <button className={`ticket-card ${selectedTicket?.ticket_id === ticket.ticket_id ? "active" : ""}`} key={ticket.ticket_id} onClick={() => void selectTicket(ticket.ticket_id)}><span className="status">{ticket.status}</span><strong>{ticket.ticket_id}</strong><small>{formatDate(ticket.created_at)}</small></button>)}</div> : <p className="empty">暂时没有售后工单。你可以直接在智能客服中描述问题，Agent 会为你创建并处理。</p>}
+      {loading ? <p className="empty">正在读取售后进度…</p> : tickets.length ? <div className="ticket-list">{tickets.map((ticket) => <button className={`ticket-card ${selectedTicket?.ticket_id === ticket.ticket_id ? "active" : ""}`} key={ticket.ticket_id} onClick={() => void selectTicket(ticket.ticket_id)}><span className="status">{ticket.status}</span><strong>{ticket.ticket_id}</strong><small>{formatDate(ticket.created_at)}</small></button>)}</div> : <p className="empty">当问题需要人工客服处理并创建工单后，处理进度会显示在这里。</p>}
     </section>
     <section className="panel ticket-detail customer-ticket-detail">
       {selectedTicket ? <>

@@ -4,14 +4,17 @@
 """
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
 from uuid import UUID, uuid4
 
 from exceptions import DependencyUnavailableError
 from infra.alipay_sandbox import AlipayGatewayError, AlipayRefundRejectedError, AlipaySandboxClient
+from infra.unionpay_test import UNIONPAY_TIMEZONE, UnionPayProtocolError, UnionPayTestClient
 from store.checkout_refund_store import (
     CheckoutRefund,
+    RefundIdempotencyConflictError,
+    RefundProviderUnsupportedError,
     create_customer_refund_request,
     get_customer_checkout_refund,
     get_customer_refund_eligibility,
@@ -27,17 +30,29 @@ class RefundNotEligibleError(ValueError):
     """订单不属于当前客户，或不满足首版全额退款条件。"""
 
 
+class RefundProviderUnavailableError(ValueError):
+    """当前支付渠道尚未接入退款能力。"""
+
+
 class RefundConfirmationUnavailableError(ValueError):
     """退款已经完成、已失败，或确认状态发生并发变化。"""
 
 
-async def generate_customer_refund_entry(*, customer_user_id: int, order_no: str) -> str | None:
+async def generate_customer_refund_entry(
+    *,
+    customer_user_id: int,
+    order_no: str,
+    eligibility_already_verified: bool = False,
+) -> str | None:
     """返回当前客户可安全进入的退款自助页面，不创建或确认退款。
 
     入口在服务端再次按客户和订单校验资格后才会返回。链接只进入已登录客户的
     “我的订单”页面；真正的退款申请与资金确认仍由该页面上的受控 API 完成。
+
+    ``eligibility_already_verified`` 仅供同一轮客服 Workflow 在已通过当前客户、
+    当前订单的资格读取后复用该可信结果；订单页的真实退款写入口仍会重新校验。
     """
-    if not await get_customer_refund_eligibility(
+    if not eligibility_already_verified and not await get_customer_refund_eligibility(
         customer_user_id=customer_user_id,
         order_no=order_no,
     ):
@@ -48,7 +63,7 @@ async def generate_customer_refund_entry(*, customer_user_id: int, order_no: str
 
 
 class RefundGatewayUnavailableError(ValueError):
-    """支付宝结果未知，必须保留处理中状态而不是再次发起退款。"""
+    """支付渠道结果未知，必须保留处理中状态而不是再次发起退款。"""
 
 
 class FinanceRefundDecisionUnavailableError(ValueError):
@@ -124,18 +139,26 @@ async def request_customer_refund(
     Raises:
         RefundNotEligibleError: 订单未支付、已发货、超期、不属于客户或已存在退款。
     """
-    now = datetime.now(UTC)
+    # This is a stable provider order ID only.  UnionPay txnTime is persisted
+    # at the actual provider-submission boundary (``processing_at``), not at
+    # request creation time.
+    now = datetime.now(UNIONPAY_TIMEZONE)
     suffix = uuid4().hex[:12].upper()
     merchant_refund_no = f"RF{now:%Y%m%d%H%M%S}{suffix}"
-    refund = await create_customer_refund_request(
-        refund_id=uuid4(),
-        customer_user_id=customer_user_id,
-        order_no=order_no,
-        merchant_refund_no=merchant_refund_no,
-        request_idempotency_key=request_idempotency_key,
-        reason=reason,
-        status="AUTO",
-    )
+    try:
+        refund = await create_customer_refund_request(
+            refund_id=uuid4(),
+            customer_user_id=customer_user_id,
+            order_no=order_no,
+            merchant_refund_no=merchant_refund_no,
+            request_idempotency_key=request_idempotency_key,
+            reason=reason,
+            status="AUTO",
+        )
+    except RefundIdempotencyConflictError as exc:
+        raise RefundNotEligibleError("idempotency key is bound to another order") from exc
+    except RefundProviderUnsupportedError as exc:
+        raise RefundProviderUnavailableError("current payment provider has no refund support") from exc
     if refund is None:
         raise RefundNotEligibleError("checkout refund is not eligible")
     return _to_result(refund, idempotent_replay=refund.merchant_refund_no != merchant_refund_no)
@@ -147,10 +170,11 @@ async def confirm_customer_refund(
     refund_id: UUID,
     confirmation_idempotency_key: str,
 ) -> CustomerRefundResult:
-    """在客户明确确认后提交一次支付宝沙箱全额退款。
+    """在客户明确确认后提交一次全额退款。
 
-    网关超时或网络失败时不把退款改回可重试状态，因为支付宝可能已经受理；系统
-    保持 PROCESSING，后续只能通过退款查询/对账收敛，避免二次退款。
+    网关超时或网络失败时不把退款改回可重试状态，因为支付渠道可能已经受理；系统
+    保持 PROCESSING，后续只能通过退款查询/对账收敛，避免二次退款。该模式是
+    at-most-once provider submission + query reconciliation，并非 crash-safe exactly-once。
 
     Raises:
         RefundConfirmationUnavailableError: 退款已不处于可确认状态。
@@ -185,7 +209,7 @@ async def approve_finance_refund(
         decision_note: 财务审批备注。
 
     Returns:
-        处理中或最终成功/失败的退款结果；相同幂等键重放不会再次调用支付宝。
+        处理中或最终成功/失败的退款结果；相同幂等键重放不会再次调用支付渠道。
 
     Raises:
         FinanceRefundDecisionUnavailableError: 退款不在待审批状态。
@@ -225,7 +249,16 @@ async def reject_finance_refund_request(
 
 
 async def _submit_refund_to_provider(refund: CheckoutRefund) -> CustomerRefundResult:
-    """将已获得唯一提交资格的退款交给支付适配器并收敛本地状态。"""
+    """将已获得唯一提交资格的退款分发到已支持的支付渠道。"""
+    if refund.provider == "alipay_sandbox":
+        return await _submit_alipay_refund(refund)
+    if refund.provider == "unionpay_test":
+        return await _submit_unionpay_refund(refund)
+    raise RefundProviderUnavailableError("current payment provider has no refund support")
+
+
+async def _submit_alipay_refund(refund: CheckoutRefund) -> CustomerRefundResult:
+    """保留现有支付宝退款行为；不与银联协议混用。"""
     try:
         gateway_result = await AlipaySandboxClient.from_settings().refund_trade(
             merchant_payment_no=refund.merchant_payment_no,
@@ -246,11 +279,137 @@ async def _submit_refund_to_provider(refund: CheckoutRefund) -> CustomerRefundRe
     except (DependencyUnavailableError, AlipayGatewayError, KeyError, ValueError) as exc:
         if isinstance(exc, RefundGatewayUnavailableError):
             raise
-        raise RefundGatewayUnavailableError("支付宝退款结果暂时无法确认") from exc
+        raise RefundGatewayUnavailableError("退款结果暂时无法确认") from exc
 
     succeeded = await mark_checkout_refund_succeeded(
         refund_id=refund.refund_id,
         provider_refund_reference=str(gateway_result.get("trade_no") or "") or None,
+    )
+    if succeeded is None:
+        raise RefundConfirmationUnavailableError("refund state changed")
+    return _to_result(succeeded, idempotent_replay=False)
+
+
+def _unionpay_refund_txn_time(refund: CheckoutRefund) -> str:
+    if not refund.processing_at:
+        raise RefundGatewayUnavailableError("银联退款交易时间无法恢复")
+    try:
+        raw = refund.processing_at.replace("Z", "+00:00")
+        processing_at = datetime.fromisoformat(raw)
+    except (TypeError, ValueError) as exc:
+        raise RefundGatewayUnavailableError("银联退款交易时间无法恢复") from exc
+    if processing_at.tzinfo is None:
+        raise RefundGatewayUnavailableError("银联退款交易时间无法恢复")
+    return processing_at.astimezone(UNIONPAY_TIMEZONE).strftime("%Y%m%d%H%M%S")
+
+
+def _validate_unionpay_query_identity(
+    refund: CheckoutRefund,
+    result: object,
+    txn_time: str,
+) -> None:
+    """验证银联退款查询的签名结果与本地退款事实。"""
+    if getattr(result, "signature_verified", False) is not True:
+        raise RefundGatewayUnavailableError("退款查询响应验签未通过")
+    if getattr(result, "order_id", None) != refund.merchant_refund_no or getattr(result, "txn_time", None) != txn_time:
+        raise RefundGatewayUnavailableError("银联退款查询交易身份无法匹配")
+    # A signed query ``34`` means no provider record is currently available.
+    # It is intentionally kept PROCESSING and may omit transaction fields.
+    if getattr(result, "resp_code", None) == "34":
+        return
+    try:
+        amount_cents = int(str(getattr(result, "txn_amt", "")))
+    except (TypeError, ValueError) as exc:
+        raise RefundGatewayUnavailableError("银联退款查询金额无法核验") from exc
+    if amount_cents != refund.amount_cents:
+        raise RefundGatewayUnavailableError("银联退款查询金额无法匹配")
+    returned_original = getattr(result, "orig_qry_id", None)
+    if returned_original != refund.provider_trade_no:
+        raise RefundGatewayUnavailableError("银联退款查询原支付交易无法匹配")
+
+
+def _validate_unionpay_submission(refund: CheckoutRefund, result: object, txn_time: str) -> str:
+    """验证 backTransReq 的已验签响应，最终成功仍以 queryTrans 为准。"""
+    if getattr(result, "signature_verified", False) is not True:
+        raise RefundGatewayUnavailableError("银联退款响应验签未通过")
+    if getattr(result, "order_id", None) != refund.merchant_refund_no or getattr(result, "txn_time", None) != txn_time:
+        raise RefundGatewayUnavailableError("银联退款响应交易身份无法匹配")
+    try:
+        amount_cents = int(str(getattr(result, "txn_amt", "")))
+    except (TypeError, ValueError) as exc:
+        raise RefundGatewayUnavailableError("银联退款响应金额无法核验") from exc
+    if amount_cents != refund.amount_cents:
+        raise RefundGatewayUnavailableError("银联退款响应金额无法匹配")
+    returned_original = getattr(result, "orig_qry_id", None)
+    if returned_original != refund.provider_trade_no:
+        raise RefundGatewayUnavailableError("银联退款响应原支付交易无法匹配")
+    resp_code = str(getattr(result, "resp_code", ""))
+    if resp_code == "00":
+        return "ACCEPTED"
+    if resp_code in {"03", "04", "05"}:
+        return "PROCESSING"
+    # A signed, identity-bound deterministic rejection is a real provider
+    # failure; unlike a network/signature failure it must not remain forever
+    # indistinguishable from an in-flight request.
+    return "FAILED"
+
+
+def _unionpay_query_outcome(result: object) -> str:
+    """Classify only protocol-confirmed UnionPay refund query outcomes."""
+    resp_code = str(getattr(result, "resp_code", ""))
+    if resp_code == "34":
+        return "PROCESSING"
+    if resp_code != "00":
+        raise RefundGatewayUnavailableError("银联退款状态暂时无法确认")
+    orig_resp_code = str(getattr(result, "orig_resp_code", ""))
+    if orig_resp_code == "00":
+        return "SUCCEEDED"
+    if orig_resp_code in {"03", "04", "05"}:
+        return "PROCESSING"
+    if orig_resp_code:
+        return "FAILED"
+    raise RefundGatewayUnavailableError("银联退款状态暂时无法确认")
+
+
+async def _submit_unionpay_refund(refund: CheckoutRefund) -> CustomerRefundResult:
+    """提交并查询一笔银联全额退款；未知结果始终留在 PROCESSING。"""
+    if not isinstance(refund.provider_trade_no, str) or not refund.provider_trade_no.strip():
+        raise RefundGatewayUnavailableError("银联原支付交易号缺失")
+    txn_time = _unionpay_refund_txn_time(refund)
+    try:
+        client = UnionPayTestClient.from_settings()
+        submitted = await client.refund_transaction(
+            order_id=refund.merchant_refund_no,
+            txn_time=txn_time,
+            txn_amt=refund.amount_cents,
+            orig_qry_id=refund.provider_trade_no,
+        )
+        submission_outcome = _validate_unionpay_submission(refund, submitted, txn_time)
+        if submission_outcome == "FAILED":
+            failed = await mark_checkout_refund_failed(refund.refund_id)
+            if failed is None:
+                raise RefundConfirmationUnavailableError("refund state changed")
+            return _to_result(failed, idempotent_replay=False)
+        queried = await client.query_transaction(order_id=refund.merchant_refund_no, txn_time=txn_time)
+        _validate_unionpay_query_identity(refund, queried, txn_time)
+        query_outcome = _unionpay_query_outcome(queried)
+        if query_outcome == "PROCESSING":
+            return _to_result(refund, idempotent_replay=False)
+        if query_outcome == "FAILED":
+            failed = await mark_checkout_refund_failed(refund.refund_id)
+            if failed is None:
+                raise RefundConfirmationUnavailableError("refund state changed")
+            return _to_result(failed, idempotent_replay=False)
+        if not isinstance(queried.query_id, str) or not queried.query_id.strip():
+            raise RefundGatewayUnavailableError("银联退款查询交易号缺失")
+    except RefundGatewayUnavailableError:
+        raise
+    except (DependencyUnavailableError, UnionPayProtocolError, KeyError, TypeError, ValueError) as exc:
+        raise RefundGatewayUnavailableError("退款结果暂时无法确认") from exc
+
+    succeeded = await mark_checkout_refund_succeeded(
+        refund_id=refund.refund_id,
+        provider_refund_reference=queried.query_id,
     )
     if succeeded is None:
         raise RefundConfirmationUnavailableError("refund state changed")
@@ -262,9 +421,9 @@ async def refresh_customer_refund_status(
     customer_user_id: int,
     refund_id: UUID,
 ) -> CustomerRefundResult:
-    """主动查询支付宝，将结果未知的退款收敛为最终状态。
+    """主动查询支付渠道，将结果未知的退款收敛为最终状态。
 
-    只有 ``PROCESSING`` 会访问支付宝。已成功、失败或仍待客户确认的退款直接返回，
+    只有 ``PROCESSING`` 会访问支付渠道。已成功、失败或仍待客户确认的退款直接返回，
     因而浏览器重复点击刷新不会创建或重复提交退款。
 
     Args:
@@ -272,17 +431,22 @@ async def refresh_customer_refund_status(
         refund_id: 客户只能查询自己的退款记录。
 
     Returns:
-        当前退款状态；支付宝仍在处理中时保留 ``PROCESSING``。
+        当前退款状态；支付渠道仍在处理中时保留 ``PROCESSING``。
 
     Raises:
         RefundConfirmationUnavailableError: 退款不属于当前客户或不存在。
-        RefundGatewayUnavailableError: 支付宝无法可靠返回查询结果。
+        RefundGatewayUnavailableError: 支付渠道无法可靠返回查询结果。
     """
     refund = await get_customer_checkout_refund(customer_user_id, refund_id)
     if refund is None:
         raise RefundConfirmationUnavailableError("refund is unavailable")
     if refund.status != "PROCESSING":
         return _to_result(refund, idempotent_replay=True)
+
+    if refund.provider == "unionpay_test":
+        return await _refresh_unionpay_refund(refund)
+    if refund.provider != "alipay_sandbox":
+        raise RefundProviderUnavailableError("current payment provider has no refund support")
 
     try:
         gateway_result = await AlipaySandboxClient.from_settings().query_refund(
@@ -299,11 +463,11 @@ async def refresh_customer_refund_status(
             or returned_refund_no != refund.merchant_refund_no
             or refunded_cents != refund.amount_cents
         ):
-            raise RefundGatewayUnavailableError("支付宝退款查询结果无法匹配")
+            raise RefundGatewayUnavailableError("退款查询结果无法匹配")
     except (DependencyUnavailableError, AlipayGatewayError, KeyError, ValueError) as exc:
         if isinstance(exc, RefundGatewayUnavailableError):
             raise
-        raise RefundGatewayUnavailableError("支付宝退款状态暂时无法确认") from exc
+        raise RefundGatewayUnavailableError("退款状态暂时无法确认") from exc
 
     status = str(gateway_result.get("refund_status") or "")
     if status == "REFUND_SUCCESS":
@@ -320,3 +484,38 @@ async def refresh_customer_refund_status(
             raise RefundConfirmationUnavailableError("refund state changed")
         return _to_result(failed, idempotent_replay=False)
     return _to_result(refund, idempotent_replay=True)
+
+
+async def _refresh_unionpay_refund(refund: CheckoutRefund) -> CustomerRefundResult:
+    """只查询银联退款，不重复提交资金请求。"""
+    if not isinstance(refund.provider_trade_no, str) or not refund.provider_trade_no.strip():
+        raise RefundGatewayUnavailableError("银联原支付交易号缺失")
+    txn_time = _unionpay_refund_txn_time(refund)
+    try:
+        queried = await UnionPayTestClient.from_settings().query_transaction(
+            order_id=refund.merchant_refund_no,
+            txn_time=txn_time,
+        )
+        _validate_unionpay_query_identity(refund, queried, txn_time)
+    except RefundGatewayUnavailableError:
+        raise
+    except (DependencyUnavailableError, UnionPayProtocolError, KeyError, TypeError, ValueError) as exc:
+        raise RefundGatewayUnavailableError("退款状态暂时无法确认") from exc
+
+    query_outcome = _unionpay_query_outcome(queried)
+    if query_outcome == "PROCESSING":
+        return _to_result(refund, idempotent_replay=True)
+    if query_outcome == "FAILED":
+        failed = await mark_checkout_refund_failed(refund.refund_id)
+        if failed is None:
+            raise RefundConfirmationUnavailableError("refund state changed")
+        return _to_result(failed, idempotent_replay=False)
+    if not isinstance(queried.query_id, str) or not queried.query_id.strip():
+        raise RefundGatewayUnavailableError("银联退款查询交易号缺失")
+    succeeded = await mark_checkout_refund_succeeded(
+        refund_id=refund.refund_id,
+        provider_refund_reference=queried.query_id,
+    )
+    if succeeded is None:
+        raise RefundConfirmationUnavailableError("refund state changed")
+    return _to_result(succeeded, idempotent_replay=False)

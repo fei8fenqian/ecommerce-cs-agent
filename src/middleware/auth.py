@@ -16,6 +16,7 @@ ALLOWLIST_PATHS = {
     "/api/v1/products",
     "/api/v1/products/assistant",
     "/api/v1/payments/alipay/callback",
+    "/api/v1/payments/unionpay/front-return",
     "/internal/metrics",
     "/docs",
     "/openapi.json",

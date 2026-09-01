@@ -1,18 +1,26 @@
 import asyncio
+import inspect
 import json
 import logging
 import re
 import time
 import uuid
+from dataclasses import replace
 from typing import Literal
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
+from agent.customer_presentation import (
+    CustomerPresentation,
+    SubjectChoiceInteraction,
+    build_customer_presentation,
+)
 from agent.customer_response import compose_customer_response
 from agent.decision_context import (
+    SUBJECT_CONTEXT_RESET_MARKER,
     context_facts_for_subject,
     historicalize_decision_contexts,
     merge_decision_contexts,
@@ -24,8 +32,17 @@ from agent.llm.resolve import resolve_stock_follow_up
 from agent.llm.sentiment import build_escalation_prompt, detect_sentiment
 from agent.rag.knowledge_context import format_knowledge_context
 from agent.rag.retrieve import hybrid_search, pre_retrieve_knowledge
+from agent.subject_correction import (
+    SubjectCorrection,
+    detect_subject_correction,
+    resolve_subject_description,
+)
 from agent.support_control import confirmation_required
-from agent.support_subjects import looks_like_pending_subject_choice, resolve_pending_subject_choice
+from agent.support_subjects import (
+    looks_like_bare_subject_description,
+    looks_like_pending_subject_choice,
+    resolve_pending_subject_choice,
+)
 from agent.tools_registry import ToolContext
 from config import settings
 from exceptions import DependencyUnavailableError, LLMError
@@ -37,6 +54,7 @@ from service.customer_support_policy import (
 )
 from service.support_case_service import SupportCaseService
 from service.ticket_escalation import TicketEscalationReason, classify_ticket_escalation
+from store.checkout_store import list_customer_checkout_orders
 from store.product_catalog_store import build_public_product_context, get_product_detail
 from store.support_case_store import SupportCase
 from store.ticket_store import enqueue_human_ticket
@@ -45,15 +63,35 @@ _chat_logger = logging.getLogger(__name__)
 
 
 class ChatRequest(BaseModel):
-    query: str = Field(..., min_length=1, max_length=2000, description="用户消息")
+    # 结构化 subject_choice 可以不带自由文本；普通消息仍必须带非空 query。
+    query: str = Field(default="", max_length=2000, description="用户消息")
     session_id: str | None = Field(None, description="不传则自动创建新会话")
     replace_from_sequence: int | None = Field(
         None,
         ge=0,
-        description="编辑已有用户消息时，删除该条及之后的历史后再发送本消息",
+        description="内部兼容字段；客户聊天不允许编辑已发送消息",
     )
     product_category: Literal["laptops", "phones", "components"] | None = None
     product_id: str | None = Field(default=None, min_length=1, max_length=128)
+    interaction: SubjectChoiceInteraction | None = None
+
+    @model_validator(mode="after")
+    def validate_input(self) -> "ChatRequest":
+        has_query = bool(self.query.strip())
+        if self.interaction is None and not has_query:
+            raise ValueError("query 不能为空")
+        if self.interaction is not None and has_query:
+            raise ValueError("interaction 不能与 query 同时提交")
+        return self
+
+    @property
+    def history_content(self) -> str:
+        """为结构化点击生成可读的客户历史文本，不把它送回 Router 猜测。"""
+        if self.query.strip():
+            return self.query
+        if self.interaction is not None:
+            return f"已选择订单：{self.interaction.subject_id}"
+        return ""
 
 
 class ChatResponse(BaseModel):
@@ -61,6 +99,7 @@ class ChatResponse(BaseModel):
     session_id: str
     total_steps: int
     total_tokens: int
+    presentation: CustomerPresentation | None = None
 
 
 chat_router = APIRouter(prefix="/api/v1", tags=["聊天"])
@@ -88,9 +127,37 @@ def _compose_prompt_extras(*parts: str) -> str:
     return "\n\n".join(part.strip() for part in parts if part and part.strip())
 
 
+def _can_append_generic_customer_action(result: LoopResult) -> bool:
+    """Do not append unrelated navigation beneath a controlled response card."""
+    mode = str((result.response_control or {}).get("mode") or "")
+    return mode in {"", "GENERIC"}
+
+
 def _support_case_payloads(intent: Intent) -> list[dict]:
     """把路由器的受控多请求结构转换为可持久化 Case payload。"""
     return [support_request.to_case_payload() for support_request in intent.support_requests]
+
+
+def _recent_subject_router_context(case: SupportCase | None) -> str:
+    """Expose only a verified recent subject to the Router's relation classifier."""
+    if case is None or case.status != "COMPLETED" or _case_has_subject_context_reset(case):
+        return ""
+    order_id = case.selected_subjects.get("order_id")
+    if not isinstance(order_id, str) or not order_id.startswith("SO"):
+        return ""
+    return json.dumps(
+        {
+            "case_status": "COMPLETED",
+            "recent_verified_subject": {"subject_type": "order", "subject_id": order_id},
+            "recent_goal": [
+                {"domain": item.get("domain"), "operation": item.get("operation")}
+                for item in case.request_stack[:3]
+                if isinstance(item, dict)
+            ],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
 
 
 def _session_decision_facts(messages: list[dict[str, object]] | None) -> dict[str, object]:
@@ -124,6 +191,18 @@ def _case_refund_requests(case: SupportCase | None) -> list[dict[str, object]]:
     if case is None:
         return []
     return [item for item in case.request_stack if isinstance(item, dict) and str(item.get("domain") or "") == "refund"]
+
+
+def _case_ticket_id(case: SupportCase | None) -> str | None:
+    """Return only the ticket id persisted in an awaiting-staff Case."""
+    if case is None:
+        return None
+    pending = case.pending if isinstance(case.pending, dict) else {}
+    summary = pending.get("summary")
+    candidate = summary.get("ticket_id") if isinstance(summary, dict) else pending.get("ticket_id")
+    if isinstance(candidate, str) and candidate.strip():
+        return candidate.strip()[:80]
+    return None
 
 
 def _case_refund_facts(case: SupportCase | None) -> dict[str, object]:
@@ -160,11 +239,16 @@ def _merged_refund_facts(
 ) -> tuple[dict[str, object], bool]:
     """按 subject 合并兼容事实，并返回是否全部来自 historical。"""
     current_contexts = merge_decision_contexts(result.decision_contexts)
-    historical_contexts = merge_decision_contexts(
-        session_contexts or [],
-        _case_decision_contexts(recent_case),
-        default_provenance="historical",
-    )
+    if _case_has_subject_context_reset(recent_case):
+        # Keep the old contexts in storage for audit, but do not let a new
+        # request rediscover the disputed subject as its current transaction.
+        historical_contexts: list[dict[str, object]] = []
+    else:
+        historical_contexts = merge_decision_contexts(
+            session_contexts or [],
+            _case_decision_contexts(recent_case),
+            default_provenance="historical",
+        )
     all_contexts = merge_decision_contexts(current_contexts, historical_contexts)
     selected_id = None
     if recent_case is not None:
@@ -186,7 +270,10 @@ def _merged_refund_facts(
     # 只给完全没有 subject context 的旧会话/旧测试保留 flat 兼容路径。只要新格式
     # context 存在，就绝不能用 flat facts 绕过 subject 隔离；这也是迁移期间避免
     # 新旧 metadata 交叉污染的边界。
-    merged = dict(session_facts or {})
+    # ``session_facts`` 可能仍来自 disputed subject A 的旧 flat metadata。Case reset
+    # 是服务端明确的 subject-retirement barrier；本轮只有新 result 的 current facts
+    # 可以重新建立一个可信 subject，不能让 session fallback 把 A 重新带回来。
+    merged = {} if _case_has_subject_context_reset(recent_case) else dict(session_facts or {})
     progress_facts = result.workflow_progress.get("decision_facts")
     current_sources = (progress_facts, result.verified_facts, result.decision_facts)
     for source in current_sources:
@@ -200,9 +287,11 @@ def _refund_boundary_requests(
     intent: Intent,
     result: LoopResult,
     *,
+    query: str = "",
     recent_case: SupportCase | None = None,
     session_facts: dict[str, object] | None = None,
     session_contexts: list[dict[str, object]] | None = None,
+    session_messages: list[dict[str, object]] | None = None,
 ) -> list[dict[str, object]]:
     """为普通 AgentLoop 结果恢复最小退款事实边界输入。
 
@@ -211,24 +300,58 @@ def _refund_boundary_requests(
     status、eligibility 渲染，不从客户文本猜业务结论。
     """
     requests = _support_case_payloads(intent)
+    # Payment status and pending-order cancellation use the same shared
+    # customer-response composer as refund.  They must keep their canonical
+    # request rather than falling through to a free-form Agent answer.
+    controlled_requests = [
+        request
+        for request in requests
+        if (str(request.get("domain") or ""), str(request.get("operation") or ""))
+        in {
+            ("payment", "check_payment_status"),
+            ("order", "cancel"),
+        }
+    ]
+    if controlled_requests:
+        return controlled_requests
     refund_requests = [request for request in requests if str(request.get("domain") or "") == "refund"]
     if refund_requests:
         return refund_requests
-    recent_requests = _case_refund_requests(recent_case)
     facts, _ = _merged_refund_facts(
         result,
         recent_case=recent_case,
         session_facts=session_facts,
         session_contexts=session_contexts,
     )
-    # 非退款路由也可能在本轮读到了退款资格事实（例如订单售后流程）。优先渲染
-    # 资格结论，避免模型把 true 扩写成“全额退款资格”。
-    if isinstance(facts.get("refund_eligibility"), bool) and (
-        intent.domain != "refund" or intent.operation not in {"status", "eligibility"}
-    ):
-        return [{"domain": "refund", "operation": "eligibility"}]
-    if recent_requests:
-        return recent_requests[:1]
+    # A current read can establish a current refund boundary even if the Router
+    # did not emit a canonical request.  Historical facts, however, are never a
+    # reason to resurrect the historical refund goal.
+    current_fact_keys = _current_refund_fact_keys(result)
+    if current_fact_keys:
+        if isinstance(facts.get("refund_eligibility"), bool) and (
+            intent.domain != "refund" or intent.operation not in {"status", "eligibility"}
+        ):
+            return [{"domain": "refund", "operation": "eligibility"}]
+        if "refund_status" in current_fact_keys:
+            return [{"domain": "refund", "operation": "status"}]
+        if "refund_eligibility" in current_fact_keys:
+            return [{"domain": "refund", "operation": "eligibility"}]
+
+    # Transaction safety remains session-aware, but conversational goal
+    # continuation is intentionally narrower.  Only an immediate, explicit
+    # refund follow-up may reuse the previous Case request.
+    is_follow_up = _is_refund_follow_up(query or intent.query, session_messages=session_messages)
+    if is_follow_up:
+        recent_requests = _case_refund_requests(recent_case)
+        if recent_requests:
+            operation = str(recent_requests[0].get("operation") or "")
+            if operation in {"request", "eligibility"} and "refund_status" in facts:
+                return [{"domain": "refund", "operation": "status"}]
+            return recent_requests[:1]
+        if "refund_status" in facts:
+            return [{"domain": "refund", "operation": "status"}]
+        if isinstance(facts.get("refund_eligibility"), bool):
+            return [{"domain": "refund", "operation": "eligibility"}]
     if intent.domain == "refund" and intent.operation:
         # 旧兼容字段可能仍把退款状态查询写成泛化 operation（例如 ``refund``）。
         # 只要工具已经返回退款状态，就必须回到 status renderer，不能让这个
@@ -251,11 +374,71 @@ def _refund_boundary_requests(
             return [{"domain": "refund", "operation": "status"}]
         if isinstance(facts.get("refund_eligibility"), bool):
             return [{"domain": "refund", "operation": "eligibility"}]
-    if "refund_status" in facts:
+    if current_fact_keys and "refund_status" in facts:
         return [{"domain": "refund", "operation": "status"}]
-    if isinstance(facts.get("refund_eligibility"), bool):
+    if current_fact_keys and isinstance(facts.get("refund_eligibility"), bool):
         return [{"domain": "refund", "operation": "eligibility"}]
     return []
+
+
+def _current_refund_fact_keys(result: LoopResult) -> set[str]:
+    """List refund facts produced by this turn, excluding historical contexts."""
+    keys = {
+        "refund_status",
+        "refund_amount",
+        "refund_eligibility",
+        "refund_entry",
+        "expected_arrival_time",
+        "refund_processing_sla",
+        "refund_destination",
+        "refund_failure_reason",
+        "warehouse_receipt_status",
+    }
+    found: set[str] = set()
+    for source in (
+        result.decision_facts,
+        result.verified_facts,
+        result.workflow_progress.get("decision_facts"),
+    ):
+        if isinstance(source, dict):
+            found.update(name for name in keys if name in source)
+    for context in result.decision_contexts:
+        if not isinstance(context, dict) or context.get("provenance") not in {None, "current"}:
+            continue
+        context_facts = context.get("facts")
+        if isinstance(context_facts, dict):
+            found.update(name for name in keys if name in context_facts)
+    return found
+
+
+def _is_refund_follow_up(
+    query: str,
+    *,
+    session_messages: list[dict[str, object]] | None = None,
+) -> bool:
+    """Recognize a narrow transaction follow-up without inheriting a whole goal.
+
+    This is a response-safety gate, not Router logic.  It deliberately accepts
+    explicit refund/status language and a small set of pronoun-plus-status forms;
+    unrelated acknowledgements, emotion and new topics remain outside refund goal
+    continuation.
+    """
+    normalized = re.sub(r"\s+", "", query).lower()
+    if any(marker in normalized for marker in ("退款", "退钱", "返款", "到账", "退回")):
+        return True
+    if any(marker in normalized for marker in ("这笔", "这单", "刚才那笔")) and any(
+        marker in normalized for marker in ("状态", "怎么样", "处理中", "处理到哪", "完成", "进度")
+    ):
+        return True
+    if "页面" in normalized and any(marker in normalized for marker in ("处理中", "处理", "完成")):
+        return True
+    if normalized in {"为什么", "为什么呢", "怎么回事", "什么意思"}:
+        for message in reversed(session_messages or []):
+            if message.get("role") != "assistant":
+                continue
+            previous = re.sub(r"\s+", "", str(message.get("content") or "")).lower()
+            return any(marker in previous for marker in ("退款", "退款资格", "退款记录", "尚未发货"))
+    return False
 
 
 def _apply_customer_refund_fact_boundary(
@@ -266,19 +449,31 @@ def _apply_customer_refund_fact_boundary(
     recent_case: SupportCase | None = None,
     session_facts: dict[str, object] | None = None,
     session_contexts: list[dict[str, object]] | None = None,
+    session_messages: list[dict[str, object]] | None = None,
 ) -> None:
     """普通/流式出口统一委托共享 customer-response composer。"""
     requests = _refund_boundary_requests(
         intent,
         result,
+        query=query,
         recent_case=recent_case,
         session_facts=session_facts,
         session_contexts=session_contexts,
+        session_messages=session_messages,
     )
-    historical_contexts = merge_decision_contexts(
-        session_contexts or [],
-        _case_decision_contexts(recent_case),
-        default_provenance="historical",
+    current_request = any(str(item.get("domain") or "") == "refund" for item in _support_case_payloads(intent))
+    allow_historical_facts = current_request or _is_refund_follow_up(
+        query or intent.query,
+        session_messages=session_messages,
+    )
+    historical_contexts = (
+        merge_decision_contexts(
+            session_contexts or [],
+            _case_decision_contexts(recent_case),
+            default_provenance="historical",
+        )
+        if allow_historical_facts
+        else []
     )
     compose_customer_response(
         result,
@@ -309,6 +504,13 @@ def _case_has_refund_context(case: SupportCase | None) -> bool:
         for item in case.request_stack
         if isinstance(item, dict)
     )
+
+
+def _case_has_subject_context_reset(case: SupportCase | None) -> bool:
+    """Return whether a disputed subject awaits a fresh trusted binding."""
+    if case is None:
+        return False
+    return isinstance(case.verified_facts.get(SUBJECT_CONTEXT_RESET_MARKER), dict)
 
 
 def _refund_response_context(
@@ -362,6 +564,9 @@ async def _open_support_case(
     intent: Intent,
     session_id: str,
     customer_user_id: int,
+    recent_case: SupportCase | None = None,
+    raw_query: str = "",
+    tool_context: ToolContext | None = None,
 ) -> SupportCase | None:
     """为需要跨轮推进的客服请求创建或恢复 Support Case。
 
@@ -373,12 +578,88 @@ async def _open_support_case(
     service = getattr(request.app.state, "support_case_service", None)
     if not isinstance(service, SupportCaseService):
         return None
+    initial_selected_subjects = await _immediate_trusted_subject_continuation(
+        request,
+        intent=intent,
+        recent_case=recent_case,
+        raw_query=raw_query,
+        tool_context=tool_context,
+    )
     opened = await service.open_or_resume(
         session_id=session_id,
         customer_user_id=customer_user_id,
         request_stack=payloads,
+        initial_selected_subjects=initial_selected_subjects,
     )
     return opened.case
+
+
+def _explicit_order_reference(query: str) -> str | None:
+    match = re.search(r"\bSO[A-Z0-9_-]+\b", query, flags=re.IGNORECASE)
+    return match.group(0).upper() if match is not None else None
+
+
+def _trusted_subject_relation(intent: Intent, *, recent_order_id: str, raw_query: str) -> str:
+    """Classify subject relation from Router semantics, never from a generated id.
+
+    ``same`` is only a permission to reuse a server-verified recent subject;
+    it does not carry any transaction fact forward.  An explicit different
+    order, a Router-provided subject reference, or a correction expression is
+    treated as changed/unknown and must resolve again in the normal workflow.
+    """
+    declared_relation = str(getattr(intent, "subject_relation", "unknown") or "unknown")
+    if declared_relation in {"same", "changed"}:
+        return declared_relation
+    explicit_order_id = _explicit_order_reference(raw_query)
+    if explicit_order_id is not None:
+        return "same" if explicit_order_id == recent_order_id else "changed"
+    requests = intent.support_requests
+    if not requests:
+        return "unknown"
+    if any(request.subject_refs for request in requests):
+        # ``current_order`` is a Router semantic anaphora, not a model-supplied
+        # identifier.  Other refs may describe a different product/order.
+        refs = {ref.strip().lower() for request in requests for ref in request.subject_refs if ref.strip()}
+        return "same" if refs and refs <= {"current_order", "current_after_sale"} else "changed"
+    if intent.case_update == "continue":
+        return "same"
+    if intent.case_update == "new_request":
+        return "unknown"
+    return "unknown"
+
+
+async def _immediate_trusted_subject_continuation(
+    request: Request,
+    *,
+    intent: Intent,
+    recent_case: SupportCase | None,
+    raw_query: str,
+    tool_context: ToolContext | None,
+) -> dict[str, object] | None:
+    """Carry a just-verified order into an immediate, semantically same follow-up.
+
+    The Router classifies the current Goal; this function only authorizes reuse
+    of the server-bound subject after another ownership check.  Dynamic order,
+    payment and refund facts are intentionally never inherited.
+    """
+    if tool_context is None or tool_context.role != "customer" or recent_case is None:
+        return None
+    if recent_case.status != "COMPLETED" or _case_has_subject_context_reset(recent_case):
+        return None
+    selected_order_id = recent_case.selected_subjects.get("order_id")
+    if not isinstance(selected_order_id, str) or not selected_order_id.startswith("SO"):
+        return None
+    if not intent.support_requests:
+        return None
+    if _trusted_subject_relation(intent, recent_order_id=selected_order_id, raw_query=raw_query) != "same":
+        return None
+    if not await _verify_customer_order_subject(
+        request,
+        order_id=selected_order_id,
+        tool_context=tool_context,
+    ):
+        return None
+    return {"order_id": selected_order_id}
 
 
 async def _get_active_support_case(
@@ -397,6 +678,14 @@ async def _get_active_support_case(
 def _is_pending_case_reply(case: SupportCase | None, intent: Intent, raw_query: str) -> bool:
     """只把明确的短确认绑定回 pending，避免吞掉客户的新问题。"""
     if case is None or case.status != "AWAITING_CUSTOMER":
+        return False
+    # A correction description is not a general-purpose case confirmation.  A
+    # valid bare description is consumed before Router invocation; every other
+    # message must stay on the normal Router path and may supersede this frame.
+    # This prevents an acknowledgement or a new business request from being
+    # fed into the old correction Workflow merely because the Router said
+    # ``continue``.
+    if case.pending.get("kind") == "subject_correction_description":
         return False
     if case.pending.get("kind") == "customer_choice":
         choices = case.pending.get("choices", [])
@@ -434,6 +723,25 @@ def _is_pending_case_reply(case: SupportCase | None, intent: Intent, raw_query: 
     }
 
 
+async def _supersede_subject_correction_pending(
+    request: Request,
+    *,
+    case: SupportCase | None,
+) -> SupportCase | None:
+    """清理已被本轮普通 Router 输入取代的 correction 描述 pending。"""
+    if case is None or case.pending.get("kind") != "subject_correction_description":
+        return case
+    service = getattr(request.app.state, "support_case_service", None)
+    if not isinstance(service, SupportCaseService):
+        return case
+    updated = await service.supersede_subject_correction_description(case)
+    if updated is None:
+        # Do not let a stale Case be reattached by open_or_resume after an
+        # optimistic-lock race.  The caller will fail closed instead.
+        raise HTTPException(status_code=409, detail="当前订单纠正状态已变化，请重试。")
+    return updated
+
+
 def _intent_for_case_reply(case: SupportCase, intent: Intent) -> Intent:
     """用已持久化且重新校验的请求栈恢复 Workflow，而不是信任短回复的孤立路由。"""
     requests = IntentRouter.support_requests_from_case_payloads(case.request_stack)
@@ -456,14 +764,33 @@ def _intent_for_case_reply(case: SupportCase, intent: Intent) -> Intent:
 
 
 def _is_confirmed_human_handoff(case: SupportCase | None, raw_query: str) -> bool:
-    """仅在 Agent 已经进行过一次澄清后接受客户的人工交接确认。"""
-    if case is None or case.status != "AWAITING_CUSTOMER":
-        return False
-    operations = {str(item.get("operation") or "") for item in case.request_stack if isinstance(item, dict)}
-    if "human_handoff" not in operations:
-        return False
+    """只在客户明确请求人工时进入真实建单流程。
+
+    对独立的“转人工”消息没有必要先创建一个只会再次询问的 human Case；
+    直接复用现有 ``_create_customer_ticket`` 闸门。退款/设备等复合句仍由
+    原有的先引导、后确认流程处理。
+    """
     normalized = re.sub(r"[\s，。！？、,.!?：:；;“”‘’\"'（）()【】\[\]]+", "", raw_query).lower()
-    return normalized in {"是", "好的", "好", "确认", "需要", "仍需人工", "还是要人工", "转人工", "人工客服"}
+    if normalized in {
+        "转人工",
+        "请转人工",
+        "转接人工",
+        "找人工",
+        "找人工客服",
+        "需要人工",
+        "需要真人客服",
+        "我要人工客服",
+        "我要找人工",
+    }:
+        return True
+    operations = (
+        {str(item.get("operation") or "") for item in case.request_stack if isinstance(item, dict)}
+        if case is not None
+        else set()
+    )
+    if case is None or case.status != "AWAITING_CUSTOMER" or "human_handoff" not in operations:
+        return False
+    return normalized in {"是", "好的", "好", "确认", "需要", "仍需人工", "还是要人工"}
 
 
 async def _resume_pending_case(
@@ -471,6 +798,7 @@ async def _resume_pending_case(
     *,
     case: SupportCase | None,
     raw_query: str,
+    tool_context: ToolContext | None = None,
 ) -> SupportCase | None:
     if case is None:
         return None
@@ -491,13 +819,460 @@ async def _resume_pending_case(
         choice = selected.get("choice")
         if not isinstance(choice, dict):
             return case
+        if tool_context is not None:
+            return await _select_verified_pending_subject(
+                request,
+                case=case,
+                subject=choice,
+                selection_source=str(selected.get("selection_source") or "choice"),
+                tool_context=tool_context,
+            )
+        if case.pending.get("selection_event") == "subject_correction" or case.pending.get("transition_from_order_id"):
+            # A correction changes an authoritative subject, so the ownership
+            # re-check is mandatory even for internal callers of this helper.
+            # Without the request-scoped ToolContext, fail closed instead of
+            # transitioning from a natural-language match alone.
+            return case
+        selection_source = str(selected.get("selection_source") or "choice")
         updated = await service.select_customer_subject(
             case,
             subject=choice,
-            selection_source=str(selected.get("selection_source") or "choice"),
+            selection_source=selection_source,
         )
         return updated or case
     return await service.resume_customer_response(case)
+
+
+async def _verify_customer_order_subject(
+    request: Request,
+    *,
+    order_id: str,
+    tool_context: ToolContext,
+) -> bool:
+    """用当前身份和真实只读订单工具重新核验一个 subject。"""
+    registry = getattr(request.app.state, "registry", None)
+    execute = getattr(registry, "execute", None)
+    if not callable(execute):
+        raise HTTPException(status_code=503, detail="订单暂时无法核验，请稍后重试。")
+    # This is a narrowly scoped ownership re-check.  It must not inherit the
+    # currently bound subject, otherwise ToolRegistry would correctly reject
+    # the candidate before the transition has been persisted.  The later
+    # workflow call still receives the authoritative bound subject.
+    verification_context = (
+        replace(tool_context, selected_order_id=None) if tool_context.selected_order_id is not None else tool_context
+    )
+    verification = await execute(
+        "track_order",
+        tool_context=verification_context,
+        order_id=order_id,
+    )
+    if not getattr(verification, "is_success", False):
+        return False
+    verified_data = getattr(verification, "data", {})
+    return isinstance(verified_data, dict) and verified_data.get("order_id") == order_id
+
+
+async def _select_verified_pending_subject(
+    request: Request,
+    *,
+    case: SupportCase,
+    subject: dict[str, object],
+    selection_source: str,
+    tool_context: ToolContext,
+) -> SupportCase:
+    """让结构化点击与自然语言选择汇聚到同一条验证/持久化路径。"""
+    order_id = subject.get("order_id")
+    if not isinstance(order_id, str) or not await _verify_customer_order_subject(
+        request,
+        order_id=order_id,
+        tool_context=tool_context,
+    ):
+        raise HTTPException(status_code=409, detail="该订单选择已失效，请重新选择要查询的订单。")
+    service = getattr(request.app.state, "support_case_service", None)
+    if not isinstance(service, SupportCaseService):
+        raise HTTPException(status_code=503, detail="订单选择暂时无法保存，请稍后重试。")
+    pending = case.pending
+    if pending.get("selection_event") == "subject_correction" or pending.get("transition_from_order_id"):
+        updated = await service.transition_customer_subject(
+            case,
+            subject=subject,
+            selection_source=selection_source,
+        )
+    else:
+        updated = await service.select_customer_subject(
+            case,
+            subject=subject,
+            selection_source=selection_source,
+        )
+    if updated is None:
+        raise HTTPException(status_code=409, detail="该订单选择已失效，请重新选择要查询的订单。")
+    return updated
+
+
+async def _apply_subject_choice_interaction(
+    request: Request,
+    *,
+    case: SupportCase | None,
+    interaction: SubjectChoiceInteraction,
+    tool_context: ToolContext,
+) -> SupportCase:
+    """验证并应用客户点击的订单选择。
+
+    浏览器提交的 subject_id 只是 selector，不能直接写入 Case。候选快照先经过
+    active Case/pending membership 校验，再用当前客户身份调用真实只读订单工具，
+    确认订单仍存在且仍归属当前用户，最后才复用 Case service 的同 Case selection。
+    """
+    error = "该订单选择已失效，请重新选择要查询的订单。"
+    if tool_context.role != "customer":
+        raise HTTPException(status_code=403, detail="该交互仅支持客户会话。")
+    if case is None or case.status != "AWAITING_CUSTOMER":
+        raise HTTPException(status_code=409, detail=error)
+    pending = case.pending
+    if pending.get("kind") != "customer_choice" or pending.get("subject_type", "order") != "order":
+        raise HTTPException(status_code=409, detail=error)
+    choices = pending.get("choices")
+    if not isinstance(choices, list):
+        raise HTTPException(status_code=409, detail=error)
+    candidate = next(
+        (item for item in choices if isinstance(item, dict) and item.get("order_id") == interaction.subject_id),
+        None,
+    )
+    if candidate is None:
+        raise HTTPException(status_code=409, detail=error)
+
+    return await _select_verified_pending_subject(
+        request,
+        case=case,
+        subject=candidate,
+        selection_source="structured_interaction",
+        tool_context=tool_context,
+    )
+
+
+def _subject_choice_from_checkout_order(order: object) -> dict[str, object] | None:
+    """把 checkout store 的本人订单摘要裁成最小候选字段。
+
+    调用方已经是 ownership-scoped ``list_customer_checkout_orders``，因此这里不再
+    接受混合 legacy/checkout 的通用订单 payload，也不接受客户端或模型提供的候选。
+    """
+    order_id = getattr(order, "order_no", None)
+    product_name = getattr(order, "product_name", None)
+    amount_cents = getattr(order, "total_amount_cents", None)
+    if not isinstance(order_id, str) or not order_id.startswith("SO"):
+        return None
+    choice: dict[str, object] = {"order_id": order_id}
+    if isinstance(product_name, str) and product_name.strip():
+        choice["product_name"] = product_name.strip()[:160]
+    if isinstance(amount_cents, int) and not isinstance(amount_cents, bool) and amount_cents >= 0:
+        choice["amount_cents"] = amount_cents
+    return choice
+
+
+async def _customer_subject_choices(customer_user_id: int) -> list[dict[str, object]]:
+    """只读取当前客户最近 30 笔 checkout 订单，保持数据库展示顺序。"""
+    orders = await list_customer_checkout_orders(customer_user_id, limit=30)
+    choices: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for order in orders:
+        choice = _subject_choice_from_checkout_order(order)
+        if choice is None:
+            continue
+        order_id = str(choice["order_id"])
+        if order_id in seen:
+            continue
+        seen.add(order_id)
+        choices.append(choice)
+    return choices[:30]
+
+
+def _bound_subject_correction_case(
+    active_case: SupportCase | None,
+    recent_case: SupportCase | None,
+) -> SupportCase | None:
+    """只对当前绑定订单的活动 Case 或最近终态 Case 触发 correction 检测。"""
+    if active_case is not None:
+        if active_case.status not in {"ACTIVE", "AWAITING_CUSTOMER"}:
+            # AWAITING_STAFF is a control-plane handoff.  A customer message
+            # must not silently bypass that boundary by changing the subject.
+            return None
+        order_id = active_case.selected_subjects.get("order_id")
+        if (
+            isinstance(order_id, str)
+            and order_id.startswith("SO")
+            and active_case.pending.get("kind") != "customer_choice"
+        ):
+            return active_case
+        # 有其他活动 Case 时不能把终态历史 Case 当成当前 subject。
+        return None
+    if recent_case is not None and recent_case.status in {"COMPLETED", "FAILED", "CANCELLED"}:
+        order_id = recent_case.selected_subjects.get("order_id")
+        if isinstance(order_id, str) and order_id.startswith("SO"):
+            return recent_case
+    return None
+
+
+async def _detect_customer_subject_correction(
+    request: Request,
+    *,
+    case: SupportCase,
+    query: str,
+    history: list[dict[str, object]],
+) -> SubjectCorrection:
+    """调用独立 correction detector；不改动 IntentRouter 的 canonical 结果。"""
+    detector = getattr(request.app.state, "subject_correction_detector", None)
+    kwargs = {
+        "query": query,
+        "history": history,
+        "current_subject_id": str(case.selected_subjects.get("order_id") or ""),
+    }
+    if callable(detector):
+        try:
+            value = detector(**kwargs)
+            if inspect.isawaitable(value):
+                value = await value
+            if isinstance(value, SubjectCorrection):
+                return value
+            from agent.subject_correction import parse_subject_correction
+
+            return parse_subject_correction(value)
+        except Exception:
+            _chat_logger.warning("subject correction detector override failed")
+            return SubjectCorrection(False)
+    intent_router = getattr(request.app.state, "intent_router", None)
+    llm = getattr(intent_router, "llm", None)
+    return await detect_subject_correction(llm, **kwargs)
+
+
+async def _prepare_customer_subject_correction(
+    request: Request,
+    *,
+    case: SupportCase | None,
+    query: str,
+    history: list[dict[str, object]],
+    customer_user_id: int,
+    tool_context: ToolContext,
+) -> tuple[str, SupportCase | None, dict[str, object] | None, list[dict[str, object]]]:
+    """检测并准备 correction；返回 kind/case/unique subject/choice frame。"""
+    if case is None or tool_context.role != "customer":
+        return "none", case, None, []
+
+    if case.pending.get("kind") == "subject_correction_description":
+        continuation = await _continue_subject_correction_description(
+            request,
+            case=case,
+            query=query,
+            customer_user_id=customer_user_id,
+            tool_context=tool_context,
+        )
+        if continuation is not None:
+            return continuation
+
+    correction = await _detect_customer_subject_correction(
+        request,
+        case=case,
+        query=query,
+        history=history,
+    )
+    if not correction.is_correction:
+        return "none", case, None, []
+    try:
+        all_choices = await _customer_subject_choices(customer_user_id)
+    except Exception:
+        # 明确 correction 但候选查询不可用时，不让旧 subject 继续回答为新 subject。
+        _chat_logger.warning("customer subject correction candidate lookup failed")
+        return "unavailable", case, None, []
+    old_order_id = case.selected_subjects.get("order_id")
+    choices = [item for item in all_choices if item.get("order_id") != old_order_id]
+    resolution_kind, subject, matches = resolve_subject_description(correction.subject_description, choices)
+    if resolution_kind == "none":
+        service = getattr(request.app.state, "support_case_service", None)
+        if not isinstance(service, SupportCaseService):
+            return "unavailable", case, None, []
+        updated = await service.await_subject_correction_description(case)
+        return ("description", updated, None, []) if updated is not None else ("unavailable", case, None, [])
+    if resolution_kind == "multiple":
+        service = getattr(request.app.state, "support_case_service", None)
+        if not isinstance(service, SupportCaseService):
+            return "unavailable", case, None, []
+        updated = await service.prepare_subject_correction(
+            case,
+            choices=matches,
+        )
+        if updated is None:
+            return "unavailable", case, None, []
+        return "multiple", updated, None, matches
+    if subject is None:
+        return "unavailable", case, None, []
+    order_id = subject.get("order_id")
+    if not isinstance(order_id, str):
+        return "none_found", case, None, []
+    if not await _verify_customer_order_subject(request, order_id=order_id, tool_context=tool_context):
+        return "unavailable", case, None, []
+    service = getattr(request.app.state, "support_case_service", None)
+    if not isinstance(service, SupportCaseService):
+        return "unavailable", case, None, []
+    if case.status in {"COMPLETED", "FAILED", "CANCELLED"}:
+        updated = await service.open_subject_correction_case(
+            case,
+            subject=subject,
+            selection_source="subject_correction",
+        )
+    else:
+        updated = await service.transition_customer_subject(
+            case,
+            subject=subject,
+            selection_source="subject_correction",
+        )
+    if updated is None:
+        return "unavailable", case, None, []
+    return "unique", updated, subject, []
+
+
+async def _continue_subject_correction_description(
+    request: Request,
+    *,
+    case: SupportCase,
+    query: str,
+    customer_user_id: int,
+    tool_context: ToolContext,
+) -> tuple[str, SupportCase | None, dict[str, object] | None, list[dict[str, object]]] | None:
+    """只把下一轮裸商品描述送入 correction resolver，不重新触发 canonical Router。"""
+    if not looks_like_bare_subject_description(query):
+        # 完整业务问题（例如“那 Sony 那个退款怎么样？”）继续走原有 Router，
+        # 不把新请求误认为是对 pending correction 的补充描述。
+        return None
+    try:
+        all_choices = await _customer_subject_choices(customer_user_id)
+    except Exception:
+        _chat_logger.warning("customer subject correction continuation lookup failed")
+        return "unavailable", case, None, []
+    pending = case.pending
+    old_order_id = pending.get("transition_from_order_id") or case.selected_subjects.get("order_id")
+    choices = [item for item in all_choices if item.get("order_id") != old_order_id]
+    resolution_kind, subject, matches = resolve_subject_description(query, choices)
+    service = getattr(request.app.state, "support_case_service", None)
+    if not isinstance(service, SupportCaseService):
+        return "unavailable", case, None, []
+    if resolution_kind == "multiple":
+        updated = await service.prepare_subject_correction(case, choices=matches)
+        return ("multiple", updated, None, matches) if updated is not None else ("unavailable", case, None, [])
+    if resolution_kind == "unique" and subject is not None:
+        order_id = subject.get("order_id")
+        if not isinstance(order_id, str) or not await _verify_customer_order_subject(
+            request,
+            order_id=order_id,
+            tool_context=tool_context,
+        ):
+            return "unavailable", case, None, []
+        updated = await service.transition_customer_subject(
+            case,
+            subject=subject,
+            selection_source="subject_correction_description",
+        )
+        return ("unique", updated, subject, []) if updated is not None else ("unavailable", case, None, [])
+
+    updated = await service.await_subject_correction_description(case)
+    return ("description", updated, None, []) if updated is not None else ("unavailable", case, None, [])
+
+
+def _subject_correction_intent(case: SupportCase, query: str) -> Intent:
+    """从原 Case request stack 恢复 goal，避免 correction 文本再次触发 Router。"""
+    return _intent_for_case_reply(
+        case,
+        Intent(
+            target="agent",
+            query=query,
+            confidence=1.0,
+            route_source="subject_correction",
+            case_update="continue",
+        ),
+    )
+
+
+def _subject_correction_short_circuit(
+    kind: str,
+    *,
+    case: SupportCase,
+    intent: Intent,
+    choices: list[dict[str, object]],
+) -> tuple[LoopResult, dict | None]:
+    """构造 0/N candidate 的安全回答；不调用旧 subject 的 Workflow facts。"""
+    if kind == "multiple":
+        answer = "我找到多笔符合描述的订单，请选择你指的那一笔。"
+        result = LoopResult(
+            answer=answer,
+            response_control={"mode": "ASK_CHOICE", "subject_id": None},
+            workflow_progress={
+                "goal_status": "awaiting_customer",
+                "control_state": "AWAITING_CUSTOMER",
+                "next_action": "ASK_CHOICE",
+                "next_actor": "CUSTOMER",
+                "pending_choices": choices,
+            },
+        )
+        return result, _customer_presentation(result, intent, case=case)
+    if kind == "description":
+        answer = "我还没有找到符合描述的订单，请直接告诉我商品品牌、型号或订单号，我再帮你核对。"
+    elif kind == "none_found":
+        # Keep the legacy branch defensive for old callers; new correction misses
+        # are persisted as subject_correction_description before reaching here.
+        answer = "我没有在你的订单中找到符合这个描述的订单，请重新描述商品。"
+    else:
+        answer = "目前无法核验你要找的订单，请稍后重试或重新描述商品。"
+    return LoopResult(answer=answer), None
+
+
+def _customer_presentation(
+    result: LoopResult,
+    intent: Intent,
+    *,
+    case: SupportCase | None = None,
+    ticket_id: str | None = None,
+) -> dict | None:
+    """把受控结果投影成 API 可公开的 presentation，并缓存到 LoopResult。"""
+    presentation = build_customer_presentation(
+        result,
+        _support_case_payloads(intent),
+        case=case,
+        ticket_id=ticket_id,
+    )
+    result.customer_presentation = presentation or {}
+    return presentation
+
+
+def _awaiting_staff_response(case: SupportCase) -> tuple[LoopResult, dict | None, str | None]:
+    """Render an actual ticket handoff; tolerate legacy invalid Cases safely."""
+    ticket_id = _case_ticket_id(case)
+    if ticket_id:
+        answer = (
+            f"这项问题已经转人工处理，工单 {ticket_id} 正在处理中。"
+            "可以在售后进度中继续补充问题细节。\n\n"
+            "[查看售后进度](?page=tickets)"
+        )
+    else:
+        answer = "当前自动流程暂时无法继续处理。如需人工客服协助，请回复“转人工”。"
+    result = LoopResult(
+        answer=answer,
+        response_control={"mode": "STAFF_HANDOFF" if ticket_id else "FACT", "subject_id": None},
+        workflow_progress={
+            "goal_status": "blocked",
+            "control_state": "BLOCKED",
+            "next_actor": "STAFF",
+            "next_action": "STAFF_HANDOFF",
+            "reason": "case_already_handed_off",
+        },
+    )
+    presentation = (
+        _customer_presentation(
+            result,
+            Intent(target="agent", query=answer, confidence=1.0),
+            case=case,
+            ticket_id=ticket_id,
+        )
+        if ticket_id
+        else None
+    )
+    return result, presentation, ticket_id
 
 
 async def _merge_new_support_request(
@@ -567,6 +1342,7 @@ async def _await_support_case_customer(
     next_action = str((workflow_progress or {}).get("next_action") or "")
     request_payloads = _support_case_payloads(intent)
     requires_confirmation = confirmation_required(request_payloads)
+    missing_facts = (workflow_progress or {}).get("missing_facts")
     pending = {
         "kind": (
             "execution_blocked"
@@ -579,7 +1355,7 @@ async def _await_support_case_customer(
         ),
         "operation": primary.operation,
         "next_step": next_action,
-        "missing_facts": list((workflow_progress or {}).get("missing_facts") or []),
+        "missing_facts": ([str(item) for item in missing_facts] if isinstance(missing_facts, list) else []),
         "options_limit": 3,
     }
     if workflow_progress:
@@ -684,22 +1460,19 @@ async def _persist_support_case_progress(
         return None
     workflow_progress = loop_result.workflow_progress
     next_actor = str(workflow_progress.get("next_actor") or "")
-    if next_actor in {"STAFF", "SYSTEM"}:
-        service = getattr(request.app.state, "support_case_service", None)
-        if isinstance(service, SupportCaseService):
-            updated = await service.mark_awaiting_staff(
-                case,
-                reason=str(workflow_progress.get("reason") or "CONTROL_PLANE_BLOCKED"),
-                handoff_summary={
-                    "goal": str(workflow_progress.get("goal") or "customer_support"),
-                    "next_actor": next_actor,
-                    "next_action": str(workflow_progress.get("next_action") or ""),
-                    "unsupported_workflows": list(workflow_progress.get("unsupported_workflows") or []),
-                    "unavailable_capabilities": list(workflow_progress.get("unavailable_capabilities") or []),
-                },
-            )
-            return updated or case
-        return case
+    if next_actor == "STAFF":
+        # Workflow capability gaps never create an AWAITING_STAFF case.  The
+        # only transition to that state is `_mark_support_case_awaiting_staff`
+        # after `_create_customer_ticket` succeeds.  Keep this defensive branch
+        # terminal too, so an older Workflow result cannot reintroduce a
+        # session-absorbing staff Case.
+        workflow_progress["next_actor"] = "NONE"
+        workflow_progress["next_action"] = "EXPLAIN_LIMITATION_OR_HANDOFF"
+    if next_actor == "SYSTEM" and str(workflow_progress.get("goal_status") or "") == "unresolved":
+        # A replan is local to this Workflow invocation.  If it reaches the API
+        # boundary unresolved, finish the Case with a safe limitation instead
+        # of persisting an artificial staff handoff.
+        workflow_progress["next_actor"] = "NONE"
     if _support_case_needs_customer_turn(intent, case, loop_result.workflow_progress):
         updated = await _await_support_case_customer(
             request,
@@ -714,7 +1487,12 @@ async def _persist_support_case_progress(
         updated = await service.complete(
             case,
             outcome={
-                "completion": resolution_type or "read_only_answer_returned",
+                "completion": resolution_type
+                or (
+                    "safe_partial_answer_returned"
+                    if str(loop_result.workflow_progress.get("goal_status") or "") == "resolved_with_limitation"
+                    else "read_only_answer_returned"
+                ),
                 "resolution_type": resolution_type or None,
                 "request_count": len(intent.support_requests),
                 "execution": loop_result.workflow_progress,
@@ -872,7 +1650,7 @@ async def _create_customer_ticket(
         if not queued:
             raise DependencyUnavailableError("人工客服队列暂时不可用")
 
-    return ticket_id, f"已为您创建售后工单 {ticket_id}，已转人工客服处理。您可以在当前会话补充问题细节。"
+    return ticket_id, f"已为您创建售后工单 {ticket_id}，已转人工客服处理。可以在售后进度中继续补充问题细节。"
 
 
 def _build_context(docs: list[dict], *, customer_view: bool) -> str:
@@ -1001,7 +1779,7 @@ async def _selected_product_context(chat_req: ChatRequest) -> tuple[str, str, st
     return build_public_product_context(product), table, str(product.get("product_name") or "")
 
 
-@chat_router.post("/chat", response_model=ChatResponse)
+@chat_router.post("/chat", response_model=ChatResponse, response_model_exclude_none=True)
 async def chat(chat_req: ChatRequest, request: Request):
     try:
         agent = request.app.state.agent
@@ -1015,6 +1793,8 @@ async def chat(chat_req: ChatRequest, request: Request):
             blocked_tools=frozenset({"create_ticket"}) if role == "customer" else frozenset(),
             allowed_tools=_CUSTOMER_CHAT_READ_TOOLS if role == "customer" else None,
         )
+        if role == "customer" and chat_req.replace_from_sequence is not None:
+            raise HTTPException(status_code=400, detail="客户消息发送后不可编辑，请重新发送更正内容")
         selected_product_context, selected_product_table, selected_product_name = await _selected_product_context(
             chat_req
         )
@@ -1032,13 +1812,8 @@ async def chat(chat_req: ChatRequest, request: Request):
         if ctx is None:
             raise HTTPException(status_code=404, detail="会话不存在")
 
-        # 判断指代词对应的实体
-        resolved_query = await session.resolve(chat_req.query, ctx.session_id, user_id)
-        resolved_query = resolve_stock_follow_up(
-            resolved_query,
-            ctx.last_entities,
-            ctx.history,
-        )
+        # 判断指代词对应的实体。结构化订单选择已经由服务端验证并写入 Case，
+        # 不能再交给 Router 根据一段自然语言重新猜测。
         active_support_case = await _get_active_support_case(
             request,
             session_id=ctx.session_id,
@@ -1051,33 +1826,122 @@ async def chat(chat_req: ChatRequest, request: Request):
         )
         session_facts = _session_decision_facts(ctx.messages)
         session_contexts = _session_decision_contexts(ctx.messages)
-        active_case_context = (
-            SupportCaseService.to_prompt_context(active_support_case) if active_support_case is not None else ""
-        )
-        # Pre-RAG 只给 Router 解释项目术语；业务事实和最终回答证据仍由后续层获取。
-        pre_knowledge_context = await _pre_route_knowledge_context(resolved_query)
-        if active_case_context:
-            intent = await intent_router.route(
-                resolved_query,
-                history=ctx.history,
-                case_context=active_case_context,
-                knowledge_context=pre_knowledge_context,
-            )
-        else:
-            intent = await intent_router.route(
-                resolved_query,
-                history=ctx.history,
-                knowledge_context=pre_knowledge_context,
-            )
-        confirmed_human_handoff = _is_confirmed_human_handoff(active_support_case, chat_req.query)
-        resuming_support_case = _is_pending_case_reply(active_support_case, intent, chat_req.query)
-        if resuming_support_case and active_support_case is not None:
-            intent = _intent_for_case_reply(active_support_case, intent)
-            active_support_case = await _resume_pending_case(
+        if chat_req.interaction is not None:
+            active_support_case = await _apply_subject_choice_interaction(
                 request,
                 case=active_support_case,
-                raw_query=chat_req.query,
+                interaction=chat_req.interaction,
+                tool_context=tool_context,
             )
+            recent_support_case = active_support_case
+            resolved_query = chat_req.history_content
+            intent = _intent_for_case_reply(
+                active_support_case,
+                Intent(
+                    target="agent",
+                    query=resolved_query,
+                    confidence=1.0,
+                    route_source="structured_interaction",
+                    case_update="continue",
+                ),
+            )
+            confirmed_human_handoff = False
+            resuming_support_case = True
+        else:
+            resolved_query = await session.resolve(chat_req.query, ctx.session_id, user_id)
+            resolved_query = resolve_stock_follow_up(
+                resolved_query,
+                ctx.last_entities,
+                ctx.history,
+            )
+            correction_case = _bound_subject_correction_case(active_support_case, recent_support_case)
+            correction_kind = "none"
+            if correction_case is not None:
+                correction_kind, corrected_case, _, correction_choices = await _prepare_customer_subject_correction(
+                    request,
+                    case=correction_case,
+                    query=chat_req.query,
+                    history=ctx.history,
+                    customer_user_id=user_id,
+                    tool_context=tool_context,
+                )
+                if correction_kind == "unique" and corrected_case is not None:
+                    active_support_case = corrected_case
+                    recent_support_case = corrected_case
+                    intent = _subject_correction_intent(corrected_case, resolved_query)
+                    confirmed_human_handoff = False
+                    resuming_support_case = True
+                elif (
+                    correction_kind in {"multiple", "description", "none_found", "unavailable"}
+                    and corrected_case is not None
+                ):
+                    intent = _subject_correction_intent(corrected_case, resolved_query)
+                    correction_result, correction_presentation = _subject_correction_short_circuit(
+                        correction_kind,
+                        case=corrected_case,
+                        intent=intent,
+                        choices=correction_choices,
+                    )
+                    await session.add_turn_simple(
+                        ctx.session_id,
+                        user_id,
+                        chat_req.history_content,
+                        correction_result.answer,
+                        presentation=correction_presentation,
+                    )
+                    return ChatResponse(
+                        answer=correction_result.answer,
+                        session_id=ctx.session_id,
+                        total_steps=0,
+                        total_tokens=0,
+                        presentation=correction_presentation,
+                    )
+            if correction_kind == "none":
+                active_case_context = (
+                    SupportCaseService.to_prompt_context(active_support_case)
+                    if active_support_case is not None
+                    else _recent_subject_router_context(recent_support_case)
+                )
+                # Pre-RAG 只给 Router 解释项目术语；业务事实和最终回答证据仍由后续层获取。
+                pre_knowledge_context = await _pre_route_knowledge_context(resolved_query)
+                if active_case_context:
+                    intent = await intent_router.route(
+                        resolved_query,
+                        history=ctx.history,
+                        case_context=active_case_context,
+                        knowledge_context=pre_knowledge_context,
+                    )
+                else:
+                    intent = await intent_router.route(
+                        resolved_query,
+                        history=ctx.history,
+                        knowledge_context=pre_knowledge_context,
+                    )
+                # A non-description turn has now been adjudicated by the
+                # normal Router.  Retire the correction-description frame
+                # before any workflow/request-stack resume can occur.  This is
+                # intentionally independent of case_update: a misclassified
+                # ``continue`` must not revive the stale correction either.
+                if (
+                    active_support_case is not None
+                    and active_support_case.pending.get("kind") == "subject_correction_description"
+                    and not looks_like_bare_subject_description(chat_req.query)
+                ):
+                    active_support_case = await _supersede_subject_correction_pending(
+                        request,
+                        case=active_support_case,
+                    )
+                    recent_support_case = active_support_case
+                confirmed_human_handoff = _is_confirmed_human_handoff(active_support_case, chat_req.query)
+                resuming_support_case = _is_pending_case_reply(active_support_case, intent, chat_req.query)
+                if resuming_support_case and active_support_case is not None:
+                    intent = _intent_for_case_reply(active_support_case, intent)
+                    active_support_case = await _resume_pending_case(
+                        request,
+                        case=active_support_case,
+                        raw_query=chat_req.query,
+                        tool_context=tool_context,
+                    )
         effective_query = intent.query or resolved_query
         evidence_plan = resolve_evidence(
             domain=intent.domain,
@@ -1124,12 +1988,29 @@ async def chat(chat_req: ChatRequest, request: Request):
                 ticket_id=ticket_id,
             )
             answer += "\n\n[查看售后进度](?page=tickets)"
-            await session.add_turn_simple(ctx.session_id, user_id, chat_req.query, answer)
+            handoff_result = LoopResult(
+                answer=answer,
+                response_control={"mode": "STAFF_HANDOFF", "subject_id": None},
+            )
+            presentation = _customer_presentation(
+                handoff_result,
+                intent,
+                case=active_support_case,
+                ticket_id=ticket_id,
+            )
+            await session.add_turn_simple(
+                ctx.session_id,
+                user_id,
+                chat_req.history_content,
+                answer,
+                presentation=presentation,
+            )
             return ChatResponse(
                 answer=answer,
                 session_id=ctx.session_id,
                 total_steps=1,
                 total_tokens=0,
+                presentation=presentation,
             )
         if support_decision.action in {
             CustomerSupportAction.SHOW_REFUND_PROGRESS,
@@ -1137,7 +2018,7 @@ async def chat(chat_req: ChatRequest, request: Request):
             CustomerSupportAction.OFFER_WARRANTY_TROUBLESHOOTING,
         }:
             answer = support_decision.answer
-            await session.add_turn_simple(ctx.session_id, user_id, chat_req.query, answer)
+            await session.add_turn_simple(ctx.session_id, user_id, chat_req.history_content, answer)
             return ChatResponse(
                 answer=answer,
                 session_id=ctx.session_id,
@@ -1153,19 +2034,31 @@ async def chat(chat_req: ChatRequest, request: Request):
             )
 
         if support_decision.action == CustomerSupportAction.CREATE_TICKET:
-            _, answer = await _create_customer_ticket(
+            ticket_id, answer = await _create_customer_ticket(
                 request,
                 issue=chat_req.query,
                 tool_context=tool_context,
                 history=ctx.messages,
             )
             answer = _append_customer_action_suffix(answer, intent.target, intent.table, effective_query)
-            await session.add_turn_simple(ctx.session_id, user_id, chat_req.query, answer)
+            handoff_result = LoopResult(
+                answer=answer,
+                response_control={"mode": "STAFF_HANDOFF", "subject_id": None},
+            )
+            presentation = _customer_presentation(handoff_result, intent, ticket_id=ticket_id)
+            await session.add_turn_simple(
+                ctx.session_id,
+                user_id,
+                chat_req.history_content,
+                answer,
+                presentation=presentation,
+            )
             return ChatResponse(
                 answer=answer,
                 session_id=ctx.session_id,
                 total_steps=1,
                 total_tokens=0,
+                presentation=presentation,
             )
 
         response_case = recent_support_case
@@ -1178,7 +2071,12 @@ async def chat(chat_req: ChatRequest, request: Request):
                 tool_context=tool_context,
             )
             # plan_execute 不走 AgentLoop，手动记录到 session
-            await session.add_turn_simple(ctx.session_id, user_id, chat_req.query, plan_state.get("answer", ""))
+            await session.add_turn_simple(
+                ctx.session_id,
+                user_id,
+                chat_req.history_content,
+                plan_state.get("answer", ""),
+            )
             return ChatResponse(
                 answer=plan_state.get("answer", ""),
                 session_id=ctx.session_id,
@@ -1191,7 +2089,13 @@ async def chat(chat_req: ChatRequest, request: Request):
                 active_support_case
                 if resuming_support_case
                 else await _open_support_case(
-                    request, intent=intent, session_id=ctx.session_id, customer_user_id=user_id
+                    request,
+                    intent=intent,
+                    session_id=ctx.session_id,
+                    customer_user_id=user_id,
+                    recent_case=recent_support_case,
+                    raw_query=chat_req.query,
+                    tool_context=tool_context,
                 )
             )
             support_case = await _merge_new_support_request(request, case=support_case, intent=intent)
@@ -1258,11 +2162,17 @@ async def chat(chat_req: ChatRequest, request: Request):
                 recent_case=response_case,
                 session_facts=session_facts,
                 session_contexts=session_contexts,
+                session_messages=ctx.messages,
             )
 
         if (
             tool_context.role == "customer"
-            and loop_result.workflow_progress.get("resolution_type") != "SELF_SERVICE_HANDOFF"
+            and loop_result.workflow_progress.get("resolution_type")
+            not in {
+                "SELF_SERVICE_HANDOFF",
+                "SELF_SERVICE_ORDER_CANCEL",
+            }
+            and _can_append_generic_customer_action(loop_result)
         ):
             loop_result.answer = _append_customer_action_suffix(
                 loop_result.answer,
@@ -1272,13 +2182,15 @@ async def chat(chat_req: ChatRequest, request: Request):
                 loop_result.last_entities.get("product", ""),
             )
 
+        presentation = _customer_presentation(loop_result, intent, case=response_case)
         # 当前对话放入上下文ctx
-        await session.add_turn(ctx.session_id, user_id, chat_req.query, loop_result)
+        await session.add_turn(ctx.session_id, user_id, chat_req.history_content, loop_result)
         return ChatResponse(
             answer=loop_result.answer,
             session_id=ctx.session_id,
             total_steps=loop_result.total_steps,
             total_tokens=loop_result.total_tokens,
+            presentation=presentation,
         )
     except DependencyUnavailableError:
         raise
@@ -1310,6 +2222,8 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
             blocked_tools=frozenset({"create_ticket"}) if role == "customer" else frozenset(),
             allowed_tools=_CUSTOMER_CHAT_READ_TOOLS if role == "customer" else None,
         )
+        if role == "customer" and chat_req.replace_from_sequence is not None:
+            raise HTTPException(status_code=400, detail="客户消息发送后不可编辑，请重新发送更正内容")
         selected_product_context, selected_product_table, selected_product_name = await _selected_product_context(
             chat_req
         )
@@ -1330,12 +2244,6 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
         history = session_ctx.history
         session_id = session_ctx.session_id
         chat_run_id = await _claim_chat_run(session_id)
-        resolve_query = await session.resolve(chat_req.query, session_id, user_id)
-        resolve_query = resolve_stock_follow_up(
-            resolve_query,
-            session_ctx.last_entities,
-            history,
-        )
         active_support_case = await _get_active_support_case(
             request,
             session_id=session_id,
@@ -1348,32 +2256,103 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
         )
         session_facts = _session_decision_facts(session_ctx.messages)
         session_contexts = _session_decision_contexts(session_ctx.messages)
-        active_case_context = (
-            SupportCaseService.to_prompt_context(active_support_case) if active_support_case is not None else ""
-        )
-        pre_knowledge_context = await _pre_route_knowledge_context(resolve_query)
-        if active_case_context:
-            intent = await intent_router.route(
-                resolve_query,
-                history=history,
-                case_context=active_case_context,
-                knowledge_context=pre_knowledge_context,
-            )
-        else:
-            intent = await intent_router.route(
-                resolve_query,
-                history=history,
-                knowledge_context=pre_knowledge_context,
-            )
-        confirmed_human_handoff = _is_confirmed_human_handoff(active_support_case, chat_req.query)
-        resuming_support_case = _is_pending_case_reply(active_support_case, intent, chat_req.query)
-        if resuming_support_case and active_support_case is not None:
-            intent = _intent_for_case_reply(active_support_case, intent)
-            active_support_case = await _resume_pending_case(
+        subject_correction_short_circuit: tuple[LoopResult, dict | None] | None = None
+        if chat_req.interaction is not None:
+            active_support_case = await _apply_subject_choice_interaction(
                 request,
                 case=active_support_case,
-                raw_query=chat_req.query,
+                interaction=chat_req.interaction,
+                tool_context=tool_context,
             )
+            recent_support_case = active_support_case
+            resolve_query = chat_req.history_content
+            intent = _intent_for_case_reply(
+                active_support_case,
+                Intent(
+                    target="agent",
+                    query=resolve_query,
+                    confidence=1.0,
+                    route_source="structured_interaction",
+                    case_update="continue",
+                ),
+            )
+            confirmed_human_handoff = False
+            resuming_support_case = True
+        else:
+            resolve_query = await session.resolve(chat_req.query, session_id, user_id)
+            resolve_query = resolve_stock_follow_up(
+                resolve_query,
+                session_ctx.last_entities,
+                history,
+            )
+            correction_case = _bound_subject_correction_case(active_support_case, recent_support_case)
+            correction_kind = "none"
+            if correction_case is not None:
+                correction_kind, corrected_case, _, correction_choices = await _prepare_customer_subject_correction(
+                    request,
+                    case=correction_case,
+                    query=chat_req.query,
+                    history=history,
+                    customer_user_id=user_id,
+                    tool_context=tool_context,
+                )
+                if correction_kind == "unique" and corrected_case is not None:
+                    active_support_case = corrected_case
+                    recent_support_case = corrected_case
+                    intent = _subject_correction_intent(corrected_case, resolve_query)
+                    confirmed_human_handoff = False
+                    resuming_support_case = True
+                elif (
+                    correction_kind in {"multiple", "description", "none_found", "unavailable"}
+                    and corrected_case is not None
+                ):
+                    intent = _subject_correction_intent(corrected_case, resolve_query)
+                    subject_correction_short_circuit = _subject_correction_short_circuit(
+                        correction_kind,
+                        case=corrected_case,
+                        intent=intent,
+                        choices=correction_choices,
+                    )
+            if correction_kind == "none":
+                active_case_context = (
+                    SupportCaseService.to_prompt_context(active_support_case)
+                    if active_support_case is not None
+                    else _recent_subject_router_context(recent_support_case)
+                )
+                pre_knowledge_context = await _pre_route_knowledge_context(resolve_query)
+                if active_case_context:
+                    intent = await intent_router.route(
+                        resolve_query,
+                        history=history,
+                        case_context=active_case_context,
+                        knowledge_context=pre_knowledge_context,
+                    )
+                else:
+                    intent = await intent_router.route(
+                        resolve_query,
+                        history=history,
+                        knowledge_context=pre_knowledge_context,
+                    )
+                if (
+                    active_support_case is not None
+                    and active_support_case.pending.get("kind") == "subject_correction_description"
+                    and not looks_like_bare_subject_description(chat_req.query)
+                ):
+                    active_support_case = await _supersede_subject_correction_pending(
+                        request,
+                        case=active_support_case,
+                    )
+                    recent_support_case = active_support_case
+                confirmed_human_handoff = _is_confirmed_human_handoff(active_support_case, chat_req.query)
+                resuming_support_case = _is_pending_case_reply(active_support_case, intent, chat_req.query)
+                if resuming_support_case and active_support_case is not None:
+                    intent = _intent_for_case_reply(active_support_case, intent)
+                    active_support_case = await _resume_pending_case(
+                        request,
+                        case=active_support_case,
+                        raw_query=chat_req.query,
+                        tool_context=tool_context,
+                    )
         effective_query = intent.query or resolve_query
         evidence_plan = resolve_evidence(
             domain=intent.domain,
@@ -1417,12 +2396,13 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
         "total_tokens": 0,
         "decision_facts": {},
         "decision_contexts": [],
+        "presentation": None,
     }
     start_t = time.perf_counter()
     support_decision = decide_customer_support_action(
         intent_target=intent.target,
         role=tool_context.role,
-        query=chat_req.query,
+        query=chat_req.history_content,
         history=session_ctx.messages,
     )
     _chat_logger.info(
@@ -1457,6 +2437,29 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
             # 先推一个 start 事件给前端，带 session_id
             yield f"data: {json.dumps({'event': 'start', 'session_id': session_id}, ensure_ascii=False)}\n\n"
 
+            if subject_correction_short_circuit is not None:
+                correction_result, correction_presentation = subject_correction_short_circuit
+                answer = correction_result.answer
+                yield f"data: {json.dumps({'event': 'token', 'content': answer}, ensure_ascii=False)}\n\n"
+                phase = "persist"
+                await session.add_turn_simple(
+                    session_id,
+                    user_id,
+                    chat_req.history_content,
+                    answer,
+                    presentation=correction_presentation,
+                )
+                done_event = {
+                    "event": "done",
+                    "answer": answer,
+                    "session_id": session_id,
+                    "total_steps": 0,
+                    "total_tokens": 0,
+                    "presentation": correction_presentation,
+                }
+                yield f"data: {json.dumps(done_event, ensure_ascii=False)}\n\n"
+                return
+
             if support_decision.action in {
                 CustomerSupportAction.SHOW_REFUND_PROGRESS,
                 CustomerSupportAction.OFFER_REFUND_SELF_SERVICE,
@@ -1465,14 +2468,21 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                 answer = support_decision.answer
                 yield f"data: {json.dumps({'event': 'token', 'content': answer}, ensure_ascii=False)}\n\n"
                 try:
-                    await session.add_turn_simple(session_id, user_id, chat_req.query, answer)
+                    await session.add_turn_simple(session_id, user_id, chat_req.history_content, answer)
                 except Exception as exc:
                     _chat_logger.error(
                         "customer support guidance persistence failed action=%s error_type=%s",
                         support_decision.action,
                         type(exc).__name__,
                     )
-                done_event = {"event": "done", "answer": answer, "total_steps": 0}
+                done_event = {
+                    "event": "done",
+                    "answer": answer,
+                    "session_id": session_id,
+                    "total_steps": 0,
+                    "total_tokens": 0,
+                    "presentation": None,
+                }
                 yield f"data: {json.dumps(done_event, ensure_ascii=False)}\n\n"
                 return
 
@@ -1484,7 +2494,7 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                 phase = "ticket_create"
                 ticket_id, answer = await _create_customer_ticket(
                     request,
-                    issue=chat_req.query,
+                    issue=chat_req.history_content,
                     tool_context=tool_context,
                     history=session_ctx.messages,
                 )
@@ -1499,6 +2509,16 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                     answer += "\n\n[查看售后进度](?page=tickets)"
                 else:
                     answer = _append_customer_action_suffix(answer, intent.target, intent.table, effective_query)
+                handoff_result = LoopResult(
+                    answer=answer,
+                    response_control={"mode": "STAFF_HANDOFF", "subject_id": None},
+                )
+                presentation = _customer_presentation(
+                    handoff_result,
+                    intent,
+                    case=active_support_case,
+                    ticket_id=ticket_id,
+                )
                 if not await _is_current_chat_run(session_id, chat_run_id):
                     yield f"data: {json.dumps(_superseded_stream_event(request), ensure_ascii=False)}\n\n"
                     return
@@ -1509,12 +2529,21 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                 done_event = {
                     "event": "done",
                     "answer": answer,
+                    "session_id": session_id,
                     "total_steps": 1,
+                    "total_tokens": 0,
                     "ticket_id": ticket_id,
+                    "presentation": presentation,
                 }
                 phase = "persist"
                 try:
-                    await session.add_turn_simple(session_id, user_id, chat_req.query, answer)
+                    await session.add_turn_simple(
+                        session_id,
+                        user_id,
+                        chat_req.history_content,
+                        answer,
+                        presentation=presentation,
+                    )
                 except Exception as exc:
                     # 工单已在独立事务中成功创建；会话存档失败不能伪装成工单失败。
                     _chat_logger.error(
@@ -1535,7 +2564,13 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                     active_support_case
                     if resuming_support_case
                     else await _open_support_case(
-                        request, intent=intent, session_id=session_id, customer_user_id=user_id
+                        request,
+                        intent=intent,
+                        session_id=session_id,
+                        customer_user_id=user_id,
+                        recent_case=recent_support_case,
+                        raw_query=chat_req.query,
+                        tool_context=tool_context,
                     )
                 )
                 support_case = await _merge_new_support_request(request, case=support_case, intent=intent)
@@ -1576,13 +2611,24 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                         recent_case=response_case or support_case,
                         session_facts=session_facts,
                         session_contexts=session_contexts,
+                        session_messages=session_ctx.messages,
                     )
                     answer = workflow_result.answer
+                presentation = _customer_presentation(
+                    workflow_result,
+                    intent,
+                    case=response_case or support_case,
+                )
                 if (
                     tool_context.role == "customer"
-                    and workflow_result.workflow_progress.get("resolution_type") != "SELF_SERVICE_HANDOFF"
+                    and workflow_result.workflow_progress.get("resolution_type")
+                    not in {
+                        "SELF_SERVICE_HANDOFF",
+                        "SELF_SERVICE_ORDER_CANCEL",
+                    }
                     and "generate_refund_entry"
                     not in workflow_result.workflow_progress.get("unavailable_capabilities", [])
+                    and _can_append_generic_customer_action(workflow_result)
                 ):
                     answer = _append_customer_action_suffix(
                         answer,
@@ -1608,7 +2654,7 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                 await session.add_turn(
                     session_id,
                     user_id,
-                    chat_req.query,
+                    chat_req.history_content,
                     LoopResult(
                         answer=answer,
                         steps=workflow_result.steps,
@@ -1620,12 +2666,16 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                         decision_contexts=workflow_result.decision_contexts,
                         workflow_progress=workflow_result.workflow_progress,
                         response_control=workflow_result.response_control,
+                        customer_presentation=presentation or {},
                     ),
                 )
                 done_event = {
                     "event": "done",
                     "answer": answer,
+                    "session_id": session_id,
                     "total_steps": workflow_result.total_steps,
+                    "total_tokens": workflow_result.total_tokens,
+                    "presentation": presentation,
                 }
                 yield f"data: {json.dumps(done_event, ensure_ascii=False)}\n\n"
                 return
@@ -1647,11 +2697,22 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
 
                     if chunk.get("event") == "done":
                         data = chunk.get("data", {})
+                        if not isinstance(data, dict):
+                            data = {}
                         stream_res["answer"] = data.get("answer", "")
                         stream_res["total_steps"] = len(data.get("plan", []))
                         stream_res["total_tokens"] = data.get("total_tokens", 0)
                         stream_completed = True
-                        pending_done_event = chunk
+                        # plan_execute 的内部 plan 也不是客户 Chat Contract 的一部分；
+                        # 只发布与普通/Workflow 流一致的受控 done payload。
+                        pending_done_event = {
+                            "event": "done",
+                            "answer": stream_res["answer"],
+                            "session_id": session_id,
+                            "total_steps": stream_res["total_steps"],
+                            "total_tokens": stream_res["total_tokens"],
+                            "presentation": None,
+                        }
                     else:
                         yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
 
@@ -1663,7 +2724,7 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                     await session.add_turn(
                         session_id,
                         user_id,
-                        chat_req.query,
+                        chat_req.history_content,
                         LoopResult(
                             answer=stream_res["answer"],
                             total_steps=stream_res["total_steps"],
@@ -1705,6 +2766,7 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                     decision_contexts = event.get("decision_contexts", [])
                     if not isinstance(decision_contexts, list):
                         decision_contexts = []
+                    guarded_result: LoopResult | None = None
                     if response_fact_sensitive:
                         guarded_result = LoopResult(
                             answer=answer or "".join(buffered_response_tokens),
@@ -1718,6 +2780,7 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                             recent_case=recent_support_case,
                             session_facts=session_facts,
                             session_contexts=session_contexts,
+                            session_messages=session_ctx.messages,
                         )
                         answer = guarded_result.answer
                         if answer:
@@ -1735,13 +2798,31 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                     if suffix:
                         answer += suffix
                         yield f"data: {json.dumps({'event': 'token', 'content': suffix}, ensure_ascii=False)}\n\n"
-                    event = {**event, "answer": answer}
+                    presentation_result = guarded_result or LoopResult(
+                        answer=answer,
+                        decision_facts=decision_facts,
+                        decision_contexts=decision_contexts,
+                    )
+                    presentation = _customer_presentation(
+                        presentation_result,
+                        intent,
+                        case=recent_support_case,
+                    )
                     stream_res["answer"] = answer
                     stream_res["total_steps"] = event.get("total_steps", 0)
+                    stream_res["total_tokens"] = event.get("total_tokens", 0)
                     stream_res["decision_facts"] = decision_facts
                     stream_res["decision_contexts"] = decision_contexts
+                    stream_res["presentation"] = presentation
                     stream_completed = True
-                    pending_done_event = event
+                    pending_done_event = {
+                        "event": "done",
+                        "answer": answer,
+                        "session_id": session_id,
+                        "total_steps": stream_res["total_steps"],
+                        "total_tokens": stream_res["total_tokens"],
+                        "presentation": presentation,
+                    }
                     continue
 
                 if event.get("event") == "token" and response_fact_sensitive:
@@ -1758,7 +2839,7 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                 await session.add_turn(
                     session_id,
                     user_id,
-                    chat_req.query,
+                    chat_req.history_content,
                     LoopResult(
                         answer=stream_res["answer"],
                         total_steps=stream_res["total_steps"],
@@ -1766,6 +2847,8 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                         last_entities=last_entities,
                         decision_facts=stream_res["decision_facts"],
                         decision_contexts=stream_res["decision_contexts"],
+                        response_control=(guarded_result.response_control if guarded_result is not None else {}),
+                        customer_presentation=stream_res["presentation"] or {},
                     ),
                 )
                 if pending_done_event is not None:

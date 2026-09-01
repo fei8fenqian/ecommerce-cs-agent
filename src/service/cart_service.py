@@ -5,7 +5,8 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from infra.alipay_sandbox import AlipaySandboxClient
-from service.checkout_service import CheckoutSession, build_alipay_checkout_session
+from infra.unionpay_test import UNIONPAY_TIMEZONE, UnionPayTestClient
+from service.checkout_service import CheckoutSession, _build_payment_checkout_session
 from store.cart_store import find_cart_item, list_cart_items, put_cart_item, remove_cart_item
 from store.checkout_store import (
     CURRENT_PAYMENT_NO_PREFIX,
@@ -13,6 +14,7 @@ from store.checkout_store import (
     CheckoutCategory,
     CheckoutLine,
     CheckoutProduct,
+    PaymentProviderName,
     create_checkout_order_from_lines,
     find_reusable_pending_cart_checkout,
     get_checkout_product,
@@ -97,13 +99,20 @@ async def delete_cart_item(customer_user_id: int, item_id: int) -> bool:
     return await remove_cart_item(customer_user_id, item_id)
 
 
-async def create_cart_checkout_session(customer_user_id: int, return_origin: str | None) -> CheckoutSession:
-    """将当前购物车创建为一笔待支付订单，并返回支付宝电脑网站支付表单。
+async def create_cart_checkout_session(
+    customer_user_id: int,
+    return_origin: str | None,
+    payment_provider: PaymentProviderName = "alipay_sandbox",
+) -> CheckoutSession:
+    """将当前购物车创建为一笔待支付订单，并返回选定支付渠道的表单。
 
     只有当前购物车与旧订单快照完全一致时才复用，避免把旧金额带到新购物车。
     ``return_origin`` 用于支付宝付款完成后的受控浏览器回跳。
     """
-    alipay_client = AlipaySandboxClient.from_settings()
+    if payment_provider not in {"alipay_sandbox", "unionpay_test"}:
+        raise CartUnavailableError("unsupported payment provider")
+    alipay_client = AlipaySandboxClient.from_settings() if payment_provider == "alipay_sandbox" else None
+    unionpay_client = UnionPayTestClient.from_settings() if payment_provider == "unionpay_test" else None
     stored_items = await list_cart_items(customer_user_id)
     if not stored_items:
         raise CartUnavailableError("cart empty")
@@ -138,17 +147,24 @@ async def create_cart_checkout_session(customer_user_id: int, return_origin: str
         customer_user_id,
         cart_lines,
         total_amount_cents,
+        payment_provider,
     )
     if existing is not None:
-        return await build_alipay_checkout_session(
-            alipay_client,
+        return await _build_payment_checkout_session(
+            payment_provider=existing.provider,
             order_no=existing.order_no,
             merchant_payment_no=existing.merchant_payment_no,
             amount_cents=existing.amount_cents,
             subject=existing.subject,
+            provider_txn_time=existing.provider_txn_time,
             return_origin=return_origin,
+            alipay_client=alipay_client,
+            unionpay_client=unionpay_client,
         )
 
+    provider_txn_time = (
+        datetime.now(UNIONPAY_TIMEZONE).strftime("%Y%m%d%H%M%S") if payment_provider == "unionpay_test" else None
+    )
     await create_checkout_order_from_lines(
         sales_order_id=uuid4(),
         order_no=order_no,
@@ -157,14 +173,19 @@ async def create_cart_checkout_session(customer_user_id: int, return_origin: str
         customer_user_id=customer_user_id,
         lines=lines,
         cart_lines=cart_lines,
+        provider=payment_provider,
+        provider_txn_time=provider_txn_time,
     )
-    return await build_alipay_checkout_session(
-        alipay_client,
+    return await _build_payment_checkout_session(
+        payment_provider=payment_provider,
         order_no=order_no,
         merchant_payment_no=merchant_payment_no,
         amount_cents=total_amount_cents,
         subject=subject,
+        provider_txn_time=provider_txn_time,
         return_origin=return_origin,
+        alipay_client=alipay_client,
+        unionpay_client=unionpay_client,
     )
 
 

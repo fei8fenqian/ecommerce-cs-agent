@@ -12,6 +12,7 @@ from agent.support_control import (
     confirmation_required,
     extract_decision_context,
     extract_decision_facts,
+    partial_completion_satisfied,
     readiness_satisfied,
     resolve_workflow,
     validate_execution_plan,
@@ -62,6 +63,7 @@ def test_financial_refund_operations_do_not_create_agent_confirmation_boundary()
         ("refund", "destination"),
         ("refund", "eligibility"),
         ("refund", "request"),
+        ("refund", "procedure"),
         ("refund", "cancel"),
         ("return", "refund_dependency"),
         ("price_protection", "refund_status"),
@@ -141,6 +143,17 @@ def test_refund_expected_arrival_does_not_complete_from_processing_status_alone(
     assert completion_satisfied(requests, facts) is False
     assert validation["coverage_complete"] is False
     assert validation["unavailable_capabilities"] == ["query_refund_expected_arrival"]
+    assert partial_completion_satisfied(requests, facts) is True
+
+
+def test_refund_request_does_not_degrade_when_the_safe_self_service_entry_is_missing():
+    facts = {
+        "order_identified": True,
+        "refund_status": "NOT_FOUND",
+        "refund_eligibility": True,
+    }
+
+    assert partial_completion_satisfied([{"domain": "refund", "operation": "request"}], facts) is False
 
 
 def test_refund_eligibility_false_is_a_known_policy_result():
@@ -149,6 +162,22 @@ def test_refund_eligibility_false_is_a_known_policy_result():
 
     assert completion_satisfied(requests, facts) is True
     assert readiness_satisfied(requests, facts) is True
+
+
+def test_pending_payment_order_resolves_refund_request_as_cancel_handoff_not_refund():
+    facts = {"order_identified": True, "order_status": "PENDING_PAYMENT"}
+
+    assert completion_satisfied([{"domain": "refund", "operation": "eligibility"}], facts) is True
+    assert completion_satisfied([{"domain": "refund", "operation": "request"}], facts) is True
+    assert confirmation_required([{"domain": "order", "operation": "cancel"}]) is False
+
+
+def test_payment_and_pending_order_cancel_workflows_are_registered():
+    payment = [{"domain": "payment", "operation": "check_payment_status"}]
+    cancel = [{"domain": "order", "operation": "cancel"}]
+
+    assert completion_satisfied(payment, {"order_identified": True, "payment_status": "PAYMENT_STATUS_UNAVAILABLE"})
+    assert completion_satisfied(cancel, {"order_identified": True, "order_status": "PENDING_PAYMENT"})
 
 
 def test_price_protection_status_is_read_only():
@@ -187,6 +216,18 @@ def test_refund_request_plan_uses_available_read_eligibility_capability():
     assert "check_refund_eligibility" in [step["tool"] for step in plan]
     assert "generate_refund_entry" in [step["tool"] for step in plan]
     assert validation["coverage_complete"] is True
+
+
+def test_refund_procedure_is_deterministic_informational_workflow():
+    requests = [{"domain": "refund", "operation": "procedure"}]
+
+    plan, required_facts, completion_facts = build_execution_plan(requests)
+
+    assert plan == []
+    assert required_facts == []
+    assert completion_facts == []
+    assert validate_execution_plan(requests, plan)["coverage_complete"] is True
+    assert completion_satisfied(requests, {}) is True
 
 
 def test_refund_cancel_exposes_unavailable_capability_without_claiming_success():

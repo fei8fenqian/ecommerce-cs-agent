@@ -7,6 +7,7 @@ from agent.goal_taxonomy import (
     GOAL_DEFINITIONS,
     LEGACY_GOAL_ALIASES,
     LEGACY_OPERATION_ALIASES,
+    ORDER_PAYMENT_ROUTING_GUIDANCE,
     REFUND_GOAL_ROUTING_GUIDANCE,
     canonicalize_goal,
     is_canonical_goal,
@@ -43,6 +44,8 @@ target 的兼容含义：
 
 """
     + REFUND_GOAL_ROUTING_GUIDANCE
+    + "\n\n"
+    + ORDER_PAYMENT_ROUTING_GUIDANCE
     + """
 
 Router 的权威输出只有 domain、operation、subject_refs、customer_claims、ambiguities 和多请求拆解。
@@ -83,14 +86,18 @@ requests 必须包含对应 canonical semantic request，即使 target=rag、暂
 requests=[] 仅用于 STATEMENT、ACKNOWLEDGEMENT、FUTURE_INTENTION、CLARIFICATION_NEEDED，或确实没有
 可确定 Goal 的输入。客户同时表达多个目标时，请拆成多个 request，例如“换货改退货 + 查询兼容型号”。
 
-若“活动 Support Case”不是“无活动案件”，还必须返回 case_update：
+若提供了服务端 Case/最近已验证 subject 摘要，还必须返回 case_update，并输出 subject_relation：
 - continue：当前话是在回答该案件 pending 的问题、确认/否决其选项、补充该案件事实
 - new_request：当前话提出了与该案件不同的新问题
 - none：无法判断或没有活动案件
 
+subject_relation 只能描述当前话相对于最近服务端已验证订单的语义：same、changed 或 unknown。
+它不能提供或猜测 order_id，也不能把用户文本里的订单号视为已验证事实。"这笔/刚才那笔/为什么"
+通常是 same；"另一笔/不是这个/我说的是另一台"通常是 changed；无法可靠判断时为 unknown。
+
 返回格式（只返回 JSON，不要其他文字。不要照抄示例的 confidence 值）：
 {"query":"改写后的完整问题","target":"rag","speech_act":"INFORMATION_QUERY","domain":"product","operation":"answer",
- "next_step":"ANSWER","required_tools":[],"requests":[{"domain":"product","operation":"answer","next_step":"ANSWER","required_tools":[],"risk":"read_only"}],"case_update":"none","table":"laptop_products","confidence":0.98}
+ "next_step":"ANSWER","required_tools":[],"requests":[{"domain":"product","operation":"answer","next_step":"ANSWER","required_tools":[],"risk":"read_only"}],"case_update":"none","subject_relation":"unknown","table":"laptop_products","confidence":0.98}
 {"query":"怎么申请退款","target":"rag","speech_act":"INFORMATION_QUERY","domain":"refund","operation":"procedure",
  "next_step":"ANSWER","required_tools":[],"requests":[{"domain":"refund","operation":"procedure","next_step":"ANSWER","required_tools":[],"risk":"read_only"}],"table":"knowledge_chunks","confidence":0.95}
 {"query":"改写后的完整问题","target":"agent","speech_act":"INFORMATION_QUERY","domain":"delivery","operation":"track_order",
@@ -143,6 +150,7 @@ _ROUTE_TOOLS = {
 }
 _ROUTE_RISKS = {"read_only", "customer_confirmation", "staff_approval", "prohibited"}
 _CASE_UPDATES = {"none", "continue", "new_request"}
+_SUBJECT_RELATIONS = {"same", "changed", "unknown"}
 _SPEECH_ACTS = {
     "ACTION_REQUEST",
     "INFORMATION_QUERY",
@@ -232,6 +240,9 @@ class Intent:
     # 有活动 Support Case 时，模型只判断本轮是回复该 Case 还是提出了新诉求；它不
     # 获得修改 Case 的权限。
     case_update: str = "none"
+    # Semantic relation only.  The order id remains server-owned and is
+    # independently ownership-verified before any Tool receives it.
+    subject_relation: str = "unknown"
 
     @property
     def support_requests(self) -> list[SupportRequest]:
@@ -423,6 +434,9 @@ class IntentRouter:
                 required_tools = self._validated_tools(result.get("required_tools"))
                 requests = self._validated_support_requests(result.get("requests"))
                 case_update = self._validated_route_value(result.get("case_update"), _CASE_UPDATES, "none")
+                subject_relation = self._validated_route_value(
+                    result.get("subject_relation"), _SUBJECT_RELATIONS, "unknown"
+                )
                 speech_act = self._validated_route_value(
                     result.get("speech_act"),
                     _SPEECH_ACTS,
@@ -571,6 +585,7 @@ class IntentRouter:
                     ambiguities=ambiguities,
                     requests=requests,
                     case_update=case_update,
+                    subject_relation=subject_relation,
                 )
 
             except (json.JSONDecodeError, ValueError, KeyError):
@@ -848,6 +863,10 @@ class IntentRouter:
         explicit_action_markers = (
             "取消退款",
             "撤销退款",
+            "取消订单",
+            "取消这笔订单",
+            "不买了",
+            "不想买了",
             "不想退款",
             "不要退款",
             "不要退款了",
@@ -1241,6 +1260,22 @@ class IntentRouter:
         # 请求；不能被“退款”这个词压扁成单一自助退货流程。
         if any(marker in normalized for marker in ("换货", "换机", "返厂", "主板", "cpu", "兼容")):
             return None
+        # 仅对明确的“订单取消”给出小范围 canonical hint。退款取消仍由退款
+        # 语义处理，不能把“取消退款”误送到待支付订单取消。
+        if (
+            any(marker in normalized for marker in ("取消订单", "取消这笔订单", "不买了", "不想买了"))
+            and "退款" not in normalized
+            and "退货" not in normalized
+        ):
+            return {
+                "domain": "order",
+                "operation": "cancel",
+                "desired_outcome": "cancel_pending_checkout_order",
+                "next_step": "LOOKUP",
+                "required_tools": ["track_order"],
+                "risk": "read_only",
+                "_speech_act": "ACTION_REQUEST",
+            }
         refund_progress_markers = (
             "已经退了",
             "已退了",

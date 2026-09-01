@@ -39,11 +39,103 @@ export interface TicketMessage {
   created_at: string;
 }
 
+export interface CustomerDisplayField {
+  label: string;
+  value: string;
+}
+
+export interface CustomerSubjectSummary {
+  subject_type: "order";
+  subject_id: string;
+  title: string;
+  subtitle?: string;
+}
+
+export interface SubjectChoiceInteraction {
+  type: "subject_choice";
+  subject_type: "order";
+  subject_id: string;
+}
+
+export type ChatInteraction = SubjectChoiceInteraction;
+
+export type CustomerNavigateAction =
+  | {
+      type: "navigate";
+      id: string;
+      label: string;
+      destination: "orders";
+      target: { order_id: string; focus?: "details" | "refund" | "cancel" };
+    }
+  | {
+      type: "navigate";
+      id: string;
+      label: string;
+      destination: "tickets";
+      target: { ticket_id: string };
+    };
+
+export interface CustomerInteractionAction {
+  type: "interaction";
+  id: string;
+  label: string;
+  interaction: SubjectChoiceInteraction;
+}
+
+export type CustomerAction = CustomerNavigateAction | CustomerInteractionAction;
+
+export interface ChoiceOption {
+  id: string;
+  subject: CustomerSubjectSummary;
+  meta: CustomerDisplayField[];
+  action: CustomerInteractionAction;
+}
+
+export interface ChoicePresentation {
+  version: 1;
+  kind: "choice";
+  title: string;
+  description?: string;
+  options: ChoiceOption[];
+}
+
+export interface StatusPresentation {
+  version: 1;
+  kind: "status";
+  title: string;
+  subject: CustomerSubjectSummary;
+  status: string;
+  details: CustomerDisplayField[];
+}
+
+export interface ActionPresentation {
+  version: 1;
+  kind: "action";
+  title: string;
+  description?: string;
+  actions: CustomerAction[];
+}
+
+export interface HandoffPresentation {
+  version: 1;
+  kind: "handoff";
+  title: string;
+  description: string;
+  actions: CustomerAction[];
+}
+
+export type CustomerPresentation =
+  | ChoicePresentation
+  | StatusPresentation
+  | ActionPresentation
+  | HandoffPresentation;
+
 export interface ChatResponse {
   answer: string;
   session_id: string;
   total_steps: number;
   total_tokens: number;
+  presentation?: CustomerPresentation | null;
 }
 
 export interface ChatStreamEvent {
@@ -52,6 +144,7 @@ export interface ChatStreamEvent {
   content?: string;
   answer?: string;
   data?: { answer?: string };
+  presentation?: CustomerPresentation | null;
   code?: string;
   message?: string;
 }
@@ -67,7 +160,12 @@ export interface SessionItem {
 export interface SessionDetail {
   session_id: string;
   title: string;
-  messages: Array<{ role: string; content?: string; sequence_no?: number }>;
+  messages: Array<{
+    role: "user" | "assistant";
+    content: string;
+    sequence_no: number;
+    presentation?: CustomerPresentation | null;
+  }>;
 }
 
 export interface Product {
@@ -103,7 +201,10 @@ export interface CheckoutSession {
   payment_form_action?: string | null;
   payment_form_fields?: Record<string, string> | null;
   payment_qr_code?: string | null;
+  payment_provider: PaymentProvider;
 }
+
+export type PaymentProvider = "alipay_sandbox" | "unionpay_test";
 
 export interface PublicAssistantResponse {
   answer: string;
@@ -128,13 +229,16 @@ export interface CheckoutOrder {
   created_at: string;
   refund_id: string | null;
   refund_status: string | null;
+  payment_provider: PaymentProvider;
+  refund_supported: boolean;
+  refund_eligible: boolean;
 }
 
 /** 新商城订单的全额退款状态；支付网关原始字段不会发送给浏览器。 */
 export interface CheckoutRefund {
   refund_id: string;
   order_no: string;
-  status: "PENDING_CONFIRMATION" | "PENDING_MERCHANT_REVIEW" | "PENDING_FINANCE_APPROVAL" | "PROCESSING" | "SUCCEEDED" | "FAILED" | "REJECTED";
+  status: "PENDING_CONFIRMATION" | "PENDING_MERCHANT_REVIEW" | "PENDING_FINANCE_APPROVAL" | "PROCESSING" | "COMPLETED" | "SUCCEEDED" | "FAILED" | "REJECTED";
   amount_cents: number;
   currency: "CNY";
   reason: string;
@@ -274,10 +378,15 @@ export function signOut(token: string): Promise<{ message: string }> {
   return api("/api/v1/auth/logout", { method: "POST" }, token);
 }
 
-export function sendChat(token: string, query: string, sessionId?: string): Promise<ChatResponse> {
+export function sendChat(
+  token: string,
+  query: string,
+  sessionId?: string,
+  interaction?: ChatInteraction,
+): Promise<ChatResponse> {
   return api("/api/v1/chat", {
     method: "POST",
-    body: JSON.stringify({ query, session_id: sessionId }),
+    body: JSON.stringify({ query, session_id: sessionId, interaction }),
   }, token);
 }
 
@@ -289,6 +398,7 @@ export async function streamChat(
   onEvent: (event: ChatStreamEvent) => void,
   replaceFromSequence?: number,
   product?: ProductContextRef,
+  interaction?: ChatInteraction,
 ): Promise<void> {
   const response = await fetch("/api/v1/chat/stream", {
     method: "POST",
@@ -300,6 +410,7 @@ export async function streamChat(
       replace_from_sequence: replaceFromSequence,
       product_category: product?.category,
       product_id: product?.productId,
+      interaction,
     }),
   });
   if (!response.ok || !response.body) {
@@ -370,10 +481,17 @@ export function createCheckout(
   category: "laptops" | "phones" | "components",
   productId: string,
   returnOrigin: string,
+  paymentProvider: PaymentProvider,
 ): Promise<CheckoutSession> {
   return api<CheckoutSession>("/api/v1/checkout/orders", {
     method: "POST",
-    body: JSON.stringify({ category, product_id: productId, quantity: 1, return_origin: returnOrigin }),
+    body: JSON.stringify({
+      category,
+      product_id: productId,
+      quantity: 1,
+      return_origin: returnOrigin,
+      payment_provider: paymentProvider,
+    }),
   }, token);
 }
 
@@ -409,10 +527,14 @@ export function deleteCartItem(token: string, itemId: number): Promise<Cart> {
 }
 
 /** 以购物车当前内容创建或复用一笔待支付订单。 */
-export function checkoutCart(token: string, returnOrigin: string): Promise<CheckoutSession> {
+export function checkoutCart(
+  token: string,
+  returnOrigin: string,
+  paymentProvider: PaymentProvider,
+): Promise<CheckoutSession> {
   return api<CheckoutSession>("/api/v1/cart/checkout", {
     method: "POST",
-    body: JSON.stringify({ return_origin: returnOrigin }),
+    body: JSON.stringify({ return_origin: returnOrigin, payment_provider: paymentProvider }),
   }, token);
 }
 
@@ -455,7 +577,7 @@ export function requestCheckoutRefund(
   }, token);
 }
 
-/** 客户明确确认后才会提交一次支付宝沙箱退款。 */
+/** 客户明确确认后才会提交一次全额退款。 */
 export function confirmCheckoutRefund(
   token: string,
   refundId: string,

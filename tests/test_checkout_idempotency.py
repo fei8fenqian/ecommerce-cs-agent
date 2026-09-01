@@ -109,6 +109,7 @@ async def test_cart_checkout_keeps_items_until_payment_is_confirmed():
         101,
         [CartCheckoutLine(category="components", product_id="memory-1", quantity=2, unit_amount_cents=66900)],
         133800,
+        "alipay_sandbox",
     )
     assert create_order.await_args.kwargs["cart_lines"] == [
         CartCheckoutLine(category="components", product_id="memory-1", quantity=2, unit_amount_cents=66900)

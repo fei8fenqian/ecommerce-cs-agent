@@ -80,4 +80,28 @@ async def test_cart_checkout_returns_one_payment_redirect():
 
     assert response.status_code == 200
     assert response.json()["order_no"] == "SOCART"
-    checkout.assert_awaited_once_with(101, "http://localhost:5173")
+    checkout.assert_awaited_once_with(101, "http://localhost:5173", "alipay_sandbox")
+
+
+@pytest.mark.asyncio
+async def test_cart_checkout_can_select_unionpay() -> None:
+    """购物车支付渠道由客户显式选择，不在前端或 API 内静默切换。"""
+    session = CheckoutSession(
+        "SOCARTUP",
+        899800,
+        "",
+        payment_form_action="https://gateway.test.95516.com/gateway/api/frontTransReq.do",
+        payment_form_fields={"orderId": "PMV2CART"},
+        payment_provider="unionpay_test",
+    )
+    transport = httpx.ASGITransport(app=_app("customer"))
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        with patch("api.cart.create_cart_checkout_session", new=AsyncMock(return_value=session)) as checkout:
+            response = await client.post(
+                "/api/v1/cart/checkout",
+                json={"return_origin": "http://localhost:5173", "payment_provider": "unionpay_test"},
+            )
+
+    assert response.status_code == 200
+    assert response.json()["payment_provider"] == "unionpay_test"
+    checkout.assert_awaited_once_with(101, "http://localhost:5173", "unionpay_test")

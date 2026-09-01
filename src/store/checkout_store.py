@@ -1,15 +1,32 @@
 """应用自有 checkout 数据访问层；绝不读取或写入 legacy orders。"""
 
+import re
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Literal
+from typing import Literal, cast
 from uuid import UUID, uuid4
 
 from infra.db_pool import get_connection, put_connection
 from store.refund_store_types import AsyncConnection
 
 CheckoutCategory = Literal["laptops", "phones", "components"]
+PaymentProviderName = Literal["alipay_sandbox", "unionpay_test"]
 CURRENT_PAYMENT_NO_PREFIX = "PMV2"
+_PAYMENT_PROVIDER_NAMES = {"alipay_sandbox", "unionpay_test"}
+_PROVIDER_TXN_TIME_PATTERN = re.compile(r"^\d{14}$")
+
+
+def _validate_payment_provider(provider: str) -> PaymentProviderName:
+    if provider not in _PAYMENT_PROVIDER_NAMES:
+        raise ValueError("unsupported payment provider")
+    return cast(PaymentProviderName, provider)
+
+
+def _payment_provider_from_row(value: object) -> PaymentProviderName:
+    """将数据库中的渠道枚举转换为当前已实现的 provider 类型。"""
+    return _validate_payment_provider(str(value))
+
+
 _PRODUCT_TABLES: dict[CheckoutCategory, str] = {
     "laptops": "laptop_products",
     "phones": "phone_products",
@@ -37,6 +54,8 @@ class CreatedCheckoutOrder:
     order_no: str
     merchant_payment_no: str
     total_amount_cents: int
+    provider: PaymentProviderName = "alipay_sandbox"
+    provider_txn_time: str | None = None
 
 
 @dataclass(frozen=True)
@@ -89,6 +108,8 @@ class CustomerCheckoutOrder:
     refund_id: str | None = None
     refund_status: str | None = None
     refund_amount_cents: int | None = None
+    provider: PaymentProviderName = "alipay_sandbox"
+    refund_eligible: bool = False
 
 
 @dataclass(frozen=True)
@@ -98,6 +119,22 @@ class CustomerPendingPayment:
     merchant_payment_no: str
     amount_cents: int
     subject: str
+    provider: PaymentProviderName = "alipay_sandbox"
+    provider_txn_time: str | None = None
+
+
+@dataclass(frozen=True)
+class UnionPayFrontReturnPayment:
+    """从已验证银联商户交易号定位本地订单所需的内部支付事实。"""
+
+    order_no: str
+    customer_user_id: int
+    merchant_payment_no: str
+    amount_cents: int
+    provider: PaymentProviderName
+    provider_txn_time: str | None
+    payment_status: str
+    order_status: str
 
 
 @dataclass(frozen=True)
@@ -106,6 +143,8 @@ class CustomerPendingCheckout:
 
     order_no: str
     merchant_payment_no: str
+    provider: PaymentProviderName = "alipay_sandbox"
+    provider_txn_time: str | None = None
 
 
 @dataclass(frozen=True)
@@ -116,6 +155,8 @@ class ReusablePendingCheckout:
     merchant_payment_no: str
     amount_cents: int
     subject: str
+    provider: PaymentProviderName = "alipay_sandbox"
+    provider_txn_time: str | None = None
 
 
 @dataclass(frozen=True)
@@ -170,6 +211,8 @@ async def create_checkout_order(
     customer_user_id: int,
     product: CheckoutProduct,
     quantity: int,
+    provider: PaymentProviderName = "alipay_sandbox",
+    provider_txn_time: str | None = None,
 ) -> CreatedCheckoutOrder:
     """创建一笔单商品结算订单，兼容商品详情页的立即购买入口。"""
     return await create_checkout_order_from_lines(
@@ -180,6 +223,8 @@ async def create_checkout_order(
         customer_user_id=customer_user_id,
         lines=[CheckoutLine(product=product, quantity=quantity)],
         cart_lines=None,
+        provider=provider,
+        provider_txn_time=provider_txn_time,
     )
 
 
@@ -192,6 +237,8 @@ async def create_checkout_order_from_lines(
     customer_user_id: int,
     lines: list[CheckoutLine],
     cart_lines: list[CartCheckoutLine] | None = None,
+    provider: PaymentProviderName = "alipay_sandbox",
+    provider_txn_time: str | None = None,
 ) -> CreatedCheckoutOrder:
     """在一个事务中写入多商品订单和待支付交易。
 
@@ -204,6 +251,12 @@ async def create_checkout_order_from_lines(
     Raises:
         ValueError: 商品缺货、金额异常、数量不合法或购物车为空。
     """
+    _validate_payment_provider(provider)
+    if provider == "unionpay_test":
+        if provider_txn_time is None or _PROVIDER_TXN_TIME_PATTERN.fullmatch(provider_txn_time) is None:
+            raise ValueError("invalid UnionPay provider transaction time")
+    elif provider_txn_time is not None:
+        raise ValueError("Alipay orders cannot carry provider transaction time")
     if not lines or len(lines) > 10:
         raise ValueError("invalid line count")
     if any(line.quantity < 1 or line.quantity > 5 for line in lines):
@@ -260,10 +313,11 @@ async def create_checkout_order_from_lines(
         await connection.execute(
             """
             INSERT INTO payment_transactions (
-                id, sales_order_id, provider, merchant_payment_no, status, amount_cents, currency
-            ) VALUES (%s, %s, 'alipay_sandbox', %s, 'PENDING', %s, 'CNY')
+                id, sales_order_id, provider, provider_txn_time, merchant_payment_no,
+                status, amount_cents, currency
+            ) VALUES (%s, %s, %s, %s, %s, 'PENDING', %s, 'CNY')
             """,
-            (payment_id, sales_order_id, merchant_payment_no, total_amount_cents),
+            (payment_id, sales_order_id, provider, provider_txn_time, merchant_payment_no, total_amount_cents),
         )
         await connection.commit()
         return CreatedCheckoutOrder(
@@ -271,6 +325,8 @@ async def create_checkout_order_from_lines(
             order_no=order_no,
             merchant_payment_no=merchant_payment_no,
             total_amount_cents=total_amount_cents,
+            provider=provider,
+            provider_txn_time=provider_txn_time,
         )
     except Exception:
         await connection.rollback()
@@ -299,7 +355,7 @@ async def apply_alipay_callback(
             """
             SELECT id, sales_order_id, amount_cents, status
             FROM payment_transactions
-            WHERE merchant_payment_no = %s
+            WHERE merchant_payment_no = %s AND provider = 'alipay_sandbox'
             FOR UPDATE
             """,
             (merchant_payment_no,),
@@ -375,7 +431,8 @@ async def get_customer_pending_payment(
     try:
         cursor = await connection.execute(
             """
-            SELECT p.merchant_payment_no, p.amount_cents, MIN(i.product_name)
+            SELECT p.merchant_payment_no, p.amount_cents, MIN(i.product_name),
+                   p.provider, p.provider_txn_time
             FROM sales_orders AS o
             JOIN payment_transactions AS p ON p.sales_order_id = o.id
             JOIN sales_order_items AS i ON i.sales_order_id = o.id
@@ -383,15 +440,59 @@ async def get_customer_pending_payment(
               AND o.order_no = %s
               AND o.status = 'PENDING_PAYMENT'
               AND p.status IN ('PENDING', 'PROCESSING')
-              AND p.provider = 'alipay_sandbox'
-            GROUP BY p.merchant_payment_no, p.amount_cents
+            GROUP BY p.merchant_payment_no, p.amount_cents, p.provider, p.provider_txn_time
             """,
             (customer_user_id, order_no),
         )
         row = await cursor.fetchone()
         if row is None:
             return None
-        return CustomerPendingPayment(merchant_payment_no=str(row[0]), amount_cents=int(row[1]), subject=str(row[2]))
+        return CustomerPendingPayment(
+            merchant_payment_no=str(row[0]),
+            amount_cents=int(row[1]),
+            subject=str(row[2]),
+            provider=_payment_provider_from_row(row[3]),
+            provider_txn_time=str(row[4]) if row[4] is not None else None,
+        )
+    finally:
+        await put_connection(connection)
+
+
+async def get_unionpay_front_return_payment(
+    merchant_payment_no: str,
+) -> UnionPayFrontReturnPayment | None:
+    """仅按银联 provider 和已签名商户交易号读取本地支付事实。
+
+    该入口不接受客户身份，也不直接推进状态；调用方必须先完成银联回报验签，
+    随后仍需用 queryTrans 的已验真结果调用通用成功收敛函数。
+    """
+    connection = await get_connection()
+    try:
+        cursor = await connection.execute(
+            """
+            SELECT o.order_no, o.customer_user_id, p.merchant_payment_no,
+                   p.amount_cents, p.provider, p.provider_txn_time,
+                   p.status, o.status
+            FROM sales_orders AS o
+            JOIN payment_transactions AS p ON p.sales_order_id = o.id
+            WHERE p.merchant_payment_no = %s
+              AND p.provider = 'unionpay_test'
+            """,
+            (merchant_payment_no,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return UnionPayFrontReturnPayment(
+            order_no=str(row[0]),
+            customer_user_id=int(row[1]),
+            merchant_payment_no=str(row[2]),
+            amount_cents=int(row[3]),
+            provider=_payment_provider_from_row(row[4]),
+            provider_txn_time=str(row[5]) if row[5] is not None else None,
+            payment_status=str(row[6]),
+            order_status=str(row[7]),
+        )
     finally:
         await put_connection(connection)
 
@@ -400,6 +501,7 @@ async def find_reusable_pending_checkout(
     customer_user_id: int,
     product: CheckoutProduct,
     quantity: int,
+    provider: PaymentProviderName = "alipay_sandbox",
 ) -> ReusablePendingCheckout | None:
     """返回同一商品、数量和价格的最近待支付订单，避免重试生成废单。
 
@@ -409,14 +511,15 @@ async def find_reusable_pending_checkout(
     try:
         cursor = await connection.execute(
             """
-            SELECT o.order_no, p.merchant_payment_no, p.amount_cents, i.product_name
+            SELECT o.order_no, p.merchant_payment_no, p.amount_cents, i.product_name,
+                   p.provider, p.provider_txn_time
             FROM sales_orders AS o
             JOIN sales_order_items AS i ON i.sales_order_id = o.id
             JOIN payment_transactions AS p ON p.sales_order_id = o.id
             WHERE o.customer_user_id = %s
               AND o.status = 'PENDING_PAYMENT'
               AND p.status IN ('PENDING', 'PROCESSING')
-              AND p.provider = 'alipay_sandbox'
+              AND p.provider = %s
               AND p.merchant_payment_no LIKE %s
               AND i.catalog_category = %s
               AND i.catalog_product_id = %s
@@ -427,6 +530,7 @@ async def find_reusable_pending_checkout(
             """,
             (
                 customer_user_id,
+                provider,
                 f"{CURRENT_PAYMENT_NO_PREFIX}%",
                 product.category,
                 product.product_id,
@@ -442,33 +546,51 @@ async def find_reusable_pending_checkout(
             merchant_payment_no=str(row[1]),
             amount_cents=int(row[2]),
             subject=str(row[3]),
+            provider=_payment_provider_from_row(row[4]),
+            provider_txn_time=str(row[5]) if row[5] is not None else None,
         )
     finally:
         await put_connection(connection)
 
 
-async def get_customer_latest_pending_checkout(customer_user_id: int) -> ReusablePendingCheckout | None:
+async def get_customer_latest_pending_checkout(
+    customer_user_id: int,
+    provider: PaymentProviderName = "alipay_sandbox",
+) -> ReusablePendingCheckout | None:
     """返回客户最近一笔待支付订单，防止并行结算产生多笔悬挂支付。"""
     connection = await get_connection()
     try:
         cursor = await connection.execute(
             """
-            SELECT o.order_no, p.merchant_payment_no, p.amount_cents, MIN(i.product_name)
+            SELECT o.order_no, p.merchant_payment_no, p.amount_cents, MIN(i.product_name),
+                   p.provider, p.provider_txn_time
             FROM sales_orders AS o
             JOIN payment_transactions AS p ON p.sales_order_id = o.id
             JOIN sales_order_items AS i ON i.sales_order_id = o.id
             WHERE o.customer_user_id = %s
               AND o.status = 'PENDING_PAYMENT'
               AND p.status IN ('PENDING', 'PROCESSING')
-              AND p.provider = 'alipay_sandbox'
-            GROUP BY o.order_no, p.merchant_payment_no, p.amount_cents, o.created_at
+              AND p.provider = %s
+            GROUP BY o.order_no, p.merchant_payment_no, p.amount_cents, o.created_at,
+                     p.provider, p.provider_txn_time
             ORDER BY o.created_at DESC
             LIMIT 1
             """,
-            (customer_user_id,),
+            (customer_user_id, provider),
         )
         row = await cursor.fetchone()
-        return None if row is None else ReusablePendingCheckout(str(row[0]), str(row[1]), int(row[2]), str(row[3]))
+        return (
+            None
+            if row is None
+            else ReusablePendingCheckout(
+                str(row[0]),
+                str(row[1]),
+                int(row[2]),
+                str(row[3]),
+                _payment_provider_from_row(row[4]),
+                str(row[5]) if row[5] is not None else None,
+            )
+        )
     finally:
         await put_connection(connection)
 
@@ -477,6 +599,7 @@ async def find_reusable_pending_cart_checkout(
     customer_user_id: int,
     cart_lines: list[CartCheckoutLine],
     total_amount_cents: int,
+    provider: PaymentProviderName = "alipay_sandbox",
 ) -> ReusablePendingCheckout | None:
     """只复用与当前购物车快照完全一致的待支付订单。
 
@@ -497,7 +620,7 @@ async def find_reusable_pending_cart_checkout(
             """
             SELECT o.order_no, p.merchant_payment_no, p.amount_cents,
                    c.catalog_category, c.catalog_product_id, c.quantity, i.unit_amount_cents,
-                   i.product_name
+                   i.product_name, p.provider, p.provider_txn_time
             FROM sales_orders AS o
             JOIN payment_transactions AS p ON p.sales_order_id = o.id
             -- checkout_cart_lines is the cart-origin marker.  A direct-buy order
@@ -512,26 +635,41 @@ async def find_reusable_pending_cart_checkout(
             WHERE o.customer_user_id = %s
               AND o.status = 'PENDING_PAYMENT'
               AND p.status IN ('PENDING', 'PROCESSING')
-              AND p.provider = 'alipay_sandbox'
+              AND p.provider = %s
               AND p.merchant_payment_no LIKE %s
             ORDER BY o.created_at DESC
             """,
-            (customer_user_id, f"{CURRENT_PAYMENT_NO_PREFIX}%"),
+            (customer_user_id, provider, f"{CURRENT_PAYMENT_NO_PREFIX}%"),
         )
         rows = await cursor.fetchall()
-        candidates: dict[tuple[str, str, int], tuple[list[tuple[str, str, int, int]], str]] = {}
+        candidates: dict[tuple[str, str, int], tuple[list[tuple[str, str, int, int]], str, str, str | None]] = {}
         for row in rows:
             key = (str(row[0]), str(row[1]), int(row[2]))
-            lines, subject = candidates.setdefault(key, ([], str(row[7])))
+            lines, subject, stored_provider, provider_txn_time = candidates.setdefault(
+                key,
+                (
+                    [],
+                    str(row[7]),
+                    str(row[8]) if len(row) > 8 and row[8] is not None else provider,
+                    str(row[9]) if len(row) > 9 and row[9] is not None else None,
+                ),
+            )
             lines.append((str(row[3]), str(row[4]), int(row[5]), int(row[6])))
 
-        for (order_no, merchant_payment_no, amount_cents), (existing_lines, subject) in candidates.items():
+        for (order_no, merchant_payment_no, amount_cents), (
+            existing_lines,
+            subject,
+            stored_provider,
+            provider_txn_time,
+        ) in candidates.items():
             if amount_cents == total_amount_cents and sorted(existing_lines) == expected_lines:
                 return ReusablePendingCheckout(
                     order_no=order_no,
                     merchant_payment_no=merchant_payment_no,
                     amount_cents=amount_cents,
                     subject=subject,
+                    provider=_payment_provider_from_row(stored_provider),
+                    provider_txn_time=provider_txn_time,
                 )
         return None
     finally:
@@ -555,7 +693,7 @@ async def apply_alipay_trade_query(
             """
             SELECT id, sales_order_id, amount_cents, status
             FROM payment_transactions
-            WHERE merchant_payment_no = %s
+            WHERE merchant_payment_no = %s AND provider = 'alipay_sandbox'
             FOR UPDATE
             """,
             (merchant_payment_no,),
@@ -605,6 +743,76 @@ async def apply_alipay_trade_query(
                 """,
                 (row[1],),
             )
+        await connection.commit()
+        return True
+    except Exception:
+        await connection.rollback()
+        raise
+    finally:
+        await put_connection(connection)
+
+
+async def apply_verified_payment_success(
+    *,
+    provider: PaymentProviderName,
+    merchant_payment_no: str,
+    provider_trade_no: str,
+    amount_cents: int,
+) -> bool:
+    """在单一事务中收敛已完成验真的支付，并幂等消费订单后置动作。
+
+    调用方必须在进入本函数前完成供应商签名、订单号、交易时间和金额等外部报文
+    校验。本函数只接受非空供应商交易号，并再次按 provider 锁定本地支付记录，
+    防止不同支付渠道的交易结果交叉收敛。
+    """
+    _validate_payment_provider(provider)
+    if not provider_trade_no:
+        return False
+    connection = await get_connection()
+    try:
+        await connection.execute("BEGIN")
+        cursor = await connection.execute(
+            """
+            SELECT id, sales_order_id, amount_cents, status
+            FROM payment_transactions
+            WHERE merchant_payment_no = %s AND provider = %s
+            FOR UPDATE
+            """,
+            (merchant_payment_no, provider),
+        )
+        row = await cursor.fetchone()
+        if row is None or int(row[2]) != amount_cents:
+            await connection.rollback()
+            return False
+        status = str(row[3])
+        if status == "SUCCEEDED":
+            await _consume_paid_cart_lines(connection, row[1])
+            await _ensure_pending_fulfillment(connection, row[1])
+            await connection.commit()
+            return True
+        if status not in {"PENDING", "PROCESSING"}:
+            await connection.rollback()
+            return False
+
+        await connection.execute(
+            """
+            UPDATE payment_transactions
+            SET status = 'SUCCEEDED', provider_trade_no = %s,
+                succeeded_at = NOW(), updated_at = NOW(), version = version + 1
+            WHERE id = %s AND provider = %s AND status IN ('PENDING', 'PROCESSING')
+            """,
+            (provider_trade_no, row[0], provider),
+        )
+        await connection.execute(
+            """
+            UPDATE sales_orders
+            SET status = 'PAID', updated_at = NOW(), version = version + 1
+            WHERE id = %s AND status = 'PENDING_PAYMENT'
+            """,
+            (row[1],),
+        )
+        await _consume_paid_cart_lines(connection, row[1])
+        await _ensure_pending_fulfillment(connection, row[1])
         await connection.commit()
         return True
     except Exception:
@@ -672,7 +880,16 @@ async def list_customer_checkout_orders(customer_user_id: int, limit: int = 30) 
             """
             SELECT o.order_no, o.status, o.total_amount_cents, MIN(i.product_name), SUM(i.quantity),
                    p.status, f.status, f.carrier, f.tracking_number, o.created_at,
-                   r.id, r.status, r.amount_cents
+                   r.id, r.status, r.amount_cents, p.provider,
+                   CASE
+                       WHEN o.status = 'PAID'
+                        AND p.status = 'SUCCEEDED'
+                        AND COALESCE(f.status, 'PENDING_FULFILLMENT') = 'PENDING_FULFILLMENT'
+                        AND p.succeeded_at >= NOW() - INTERVAL '7 days'
+                        AND r.id IS NULL
+                        AND p.provider IN ('alipay_sandbox', 'unionpay_test')
+                       THEN TRUE ELSE FALSE
+                   END
             FROM sales_orders AS o
             JOIN sales_order_items AS i ON i.sales_order_id = o.id
             JOIN payment_transactions AS p ON p.sales_order_id = o.id
@@ -681,7 +898,7 @@ async def list_customer_checkout_orders(customer_user_id: int, limit: int = 30) 
             WHERE o.customer_user_id = %s
             GROUP BY o.order_no, o.status, o.total_amount_cents, p.status,
                      f.status, f.carrier, f.tracking_number, o.created_at, r.id, r.status,
-                     r.amount_cents
+                     r.amount_cents, p.provider, p.succeeded_at
             ORDER BY o.created_at DESC
             LIMIT %s
             """,
@@ -708,6 +925,10 @@ async def list_customer_checkout_orders(customer_user_id: int, limit: int = 30) 
                 refund_id=str(row[10]) if row[10] is not None else None,
                 refund_status=str(row[11]) if row[11] is not None else None,
                 refund_amount_cents=int(row[12]) if row[12] is not None else None,
+                provider=(
+                    _payment_provider_from_row(row[13]) if len(row) > 13 and row[13] is not None else "alipay_sandbox"
+                ),
+                refund_eligible=bool(row[14]) if len(row) > 14 else False,
             )
             for row in rows
         ]
@@ -724,24 +945,36 @@ async def get_customer_pending_checkout(
     try:
         cursor = await connection.execute(
             """
-            SELECT o.order_no, p.merchant_payment_no
+            SELECT o.order_no, p.merchant_payment_no, p.provider, p.provider_txn_time
             FROM sales_orders AS o
             JOIN payment_transactions AS p ON p.sales_order_id = o.id
             WHERE o.customer_user_id = %s
               AND o.order_no = %s
               AND o.status = 'PENDING_PAYMENT'
               AND p.status IN ('PENDING', 'PROCESSING')
-              AND p.provider = 'alipay_sandbox'
             """,
             (customer_user_id, order_no),
         )
         row = await cursor.fetchone()
-        return None if row is None else CustomerPendingCheckout(str(row[0]), str(row[1]))
+        return (
+            None
+            if row is None
+            else CustomerPendingCheckout(
+                str(row[0]),
+                str(row[1]),
+                (_payment_provider_from_row(row[2]) if len(row) > 2 and row[2] is not None else "alipay_sandbox"),
+                str(row[3]) if len(row) > 3 and row[3] is not None else None,
+            )
+        )
     finally:
         await put_connection(connection)
 
 
-async def cancel_customer_pending_checkout(customer_user_id: int, order_no: str) -> bool:
+async def cancel_customer_pending_checkout(
+    customer_user_id: int,
+    order_no: str,
+    provider: PaymentProviderName = "alipay_sandbox",
+) -> bool:
     """条件取消客户自己的本地待支付订单，返回是否由本次调用成功推进。"""
     connection = await get_connection()
     try:
@@ -756,10 +989,10 @@ async def cancel_customer_pending_checkout(customer_user_id: int, order_no: str)
               AND o.order_no = %s
               AND o.status = 'PENDING_PAYMENT'
               AND p.status IN ('PENDING', 'PROCESSING')
-              AND p.provider = 'alipay_sandbox'
+              AND p.provider = %s
             RETURNING p.sales_order_id
             """,
-            (customer_user_id, order_no),
+            (customer_user_id, order_no, provider),
         )
         row = await cursor.fetchone()
         if row is None:
@@ -796,6 +1029,12 @@ async def list_operator_fulfillments(limit: int = 50) -> list[OperatorFulfillmen
             JOIN payment_transactions AS p ON p.sales_order_id = o.id
             LEFT JOIN fulfillments AS f ON f.sales_order_id = o.id
             WHERE o.status = 'PAID' AND p.status = 'SUCCEEDED'
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM checkout_refunds AS r
+                  WHERE r.sales_order_id = o.id
+                    AND r.status IN ('PENDING_CONFIRMATION', 'PENDING_FINANCE_APPROVAL', 'PROCESSING')
+              )
             ORDER BY CASE COALESCE(f.status, 'PENDING_FULFILLMENT')
                          WHEN 'PENDING_FULFILLMENT' THEN 0
                          WHEN 'EXCEPTION' THEN 1
@@ -839,6 +1078,19 @@ async def mark_fulfillment_shipped(
         await connection.execute("BEGIN")
         # 迁移前已支付的 application 订单没有履约行。只在运营明确登记
         # 发货时补建该行；绝不读取或修改 legacy orders。
+        # Lock the same mutable order/payment/fulfillment facts used by the
+        # refund submission boundary before deciding whether shipping may win.
+        await connection.execute(
+            """
+            SELECT o.id
+            FROM sales_orders AS o
+            JOIN payment_transactions AS p ON p.sales_order_id = o.id
+            LEFT JOIN fulfillments AS f ON f.sales_order_id = o.id
+            WHERE o.order_no = %s
+            FOR UPDATE OF o, p
+            """,
+            (order_no,),
+        )
         await connection.execute(
             """
             INSERT INTO fulfillments (id, sales_order_id, status)
@@ -846,6 +1098,12 @@ async def mark_fulfillment_shipped(
             FROM sales_orders AS o
             JOIN payment_transactions AS p ON p.sales_order_id = o.id
             WHERE o.order_no = %s AND o.status = 'PAID' AND p.status = 'SUCCEEDED'
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM checkout_refunds AS r
+                  WHERE r.sales_order_id = o.id
+                    AND r.status IN ('PENDING_CONFIRMATION', 'PENDING_FINANCE_APPROVAL', 'PROCESSING')
+              )
             ON CONFLICT (sales_order_id) DO NOTHING
             """,
             (uuid4(), order_no),
@@ -856,8 +1114,18 @@ async def mark_fulfillment_shipped(
                 SELECT f.id
                 FROM fulfillments AS f
                 JOIN sales_orders AS o ON o.id = f.sales_order_id
-                WHERE o.order_no = %s AND f.status = 'PENDING_FULFILLMENT'
-                FOR UPDATE
+                JOIN payment_transactions AS p ON p.sales_order_id = o.id
+                WHERE o.order_no = %s
+                  AND o.status = 'PAID'
+                  AND p.status = 'SUCCEEDED'
+                  AND f.status = 'PENDING_FULFILLMENT'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM checkout_refunds AS r
+                      WHERE r.sales_order_id = o.id
+                        AND r.status IN ('PENDING_CONFIRMATION', 'PENDING_FINANCE_APPROVAL', 'PROCESSING')
+                  )
+                FOR UPDATE OF f, o, p
             )
             UPDATE fulfillments AS f
             SET status = 'SHIPPED', carrier = %s, tracking_number = %s,

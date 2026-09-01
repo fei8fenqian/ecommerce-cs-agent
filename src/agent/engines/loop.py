@@ -86,6 +86,8 @@ class LoopResult:
     decision_contexts: list[dict[str, Any]] = field(default_factory=list)
     # 仅供服务端 evaluator/出口使用，绝不发送给 LLM。
     response_control: dict[str, Any] = field(default_factory=dict)
+    # 已完成安全投影的客户 UI DTO；不包含 raw Control Plane/Decision Context。
+    customer_presentation: dict[str, Any] = field(default_factory=dict)
 
 
 class AgentLoop:

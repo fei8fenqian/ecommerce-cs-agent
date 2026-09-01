@@ -57,3 +57,6 @@ PROJECT_WALKTHROUGH.md
 # 缓存
 __pycache__/
 *.py[cod]
+
+# 本地支付凭证
+.secrets/

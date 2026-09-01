@@ -123,9 +123,11 @@ class _RecordingRefundFactRegistry(_RefundFactRegistry):
     def __init__(self):
         super().__init__()
         self.arguments: list[tuple[str, dict]] = []
+        self.contexts: list[ToolContext | None] = []
 
     async def execute(self, name, *, tool_context=None, **kwargs):
         self.arguments.append((name, kwargs.copy()))
+        self.contexts.append(tool_context)
         return await super().execute(name, tool_context=tool_context, **kwargs)
 
 
@@ -200,6 +202,43 @@ class _DirectEligibilityRegistry:
         raise AssertionError(f"unexpected tool {name}")
 
 
+class _PendingPaymentRegistry:
+    def __init__(self):
+        self.calls: list[str] = []
+
+    async def execute(self, name, *, tool_context=None, **kwargs):
+        from agent.tools_registry import ToolResult
+
+        self.calls.append(name)
+        if name == "track_order":
+            return ToolResult(
+                name=name,
+                status="success",
+                data={"order_id": "SO-PENDING", "status": "PENDING_PAYMENT", "delivery_state": "NOT_SHIPPED"},
+            )
+        raise AssertionError(f"pending-payment refund path must not call {name}")
+
+
+class _PaymentRegistry:
+    def __init__(self, payment_result: str):
+        self.payment_result = payment_result
+        self.calls: list[tuple[str, dict]] = []
+
+    async def execute(self, name, *, tool_context=None, **kwargs):
+        from agent.tools_registry import ToolResult
+
+        self.calls.append((name, kwargs.copy()))
+        assert name == "check_payment_status"
+        return ToolResult(
+            name=name,
+            status="success",
+            data={
+                "payment_result": self.payment_result,
+                "order": {"order_id": "SO-PAYMENT", "status": "PENDING_PAYMENT"},
+            },
+        )
+
+
 @pytest.mark.asyncio
 async def test_support_workflow_reads_only_safe_customer_scoped_facts_before_agent():
     agent = _FakeAgent()
@@ -230,10 +269,12 @@ async def test_expected_arrival_exposes_unavailable_eta_after_status_is_read():
     )
 
     assert registry.calls == ["track_order", "query_refund_status"]
-    assert result.workflow_progress["goal_status"] == "blocked"
+    assert result.workflow_progress["goal_status"] == "resolved_with_limitation"
+    assert result.workflow_progress["control_state"] == "RESOLVED_WITH_LIMITATION"
     assert result.workflow_progress["reason"] == "capability_unavailable"
     assert result.workflow_progress["unavailable_capabilities"] == ["query_refund_expected_arrival"]
     assert result.workflow_progress["readiness_satisfied"] is False
+    assert "等待商家核验" not in result.answer or "具体到账时间" in result.answer
 
 
 @pytest.mark.asyncio
@@ -269,6 +310,8 @@ async def test_selected_subject_is_bound_to_pre_read_order_tool_arguments():
         ("track_order", {"order_id": "SO1"}),
         ("query_refund_status", {"order_id": "SO1"}),
     ]
+    assert registry.contexts
+    assert all(context.selected_order_id == "SO1" for context in registry.contexts if context is not None)
     assert agent.calls[0]["tool_context"].selected_order_id == "SO1"
 
 
@@ -288,6 +331,41 @@ async def test_direct_refund_eligibility_reads_capability_without_refund_status_
     assert registry.calls == ["track_order", "check_refund_eligibility"]
     assert result.workflow_progress["goal_status"] == ("resolved" if eligible else "resolved_with_explanation")
     assert result.workflow_progress["decision_facts"]["refund_eligibility"] is eligible
+
+
+@pytest.mark.asyncio
+async def test_pending_payment_refund_request_stops_before_refund_lookup_or_eligibility():
+    registry = _PendingPaymentRegistry()
+    workflow = SupportWorkflowAgent(_AnswerAgent("我会替你退款"), registry)
+
+    result = await workflow.run(
+        "我想退这台电脑",
+        support_requests=[{"domain": "refund", "operation": "request"}],
+        tool_context=ToolContext(user_id=7, role="customer"),
+    )
+
+    assert registry.calls == ["track_order"]
+    assert result.workflow_progress["goal_status"] == "resolved_with_explanation"
+    assert result.workflow_progress["resolution_type"] == "SELF_SERVICE_ORDER_CANCEL"
+    assert "没有已支付款项需要退款" in result.answer
+
+
+@pytest.mark.asyncio
+async def test_payment_status_unavailable_is_a_resolved_unknown_fact_not_a_failed_tool():
+    registry = _PaymentRegistry("PAYMENT_STATUS_UNAVAILABLE")
+    workflow = SupportWorkflowAgent(_AnswerAgent("余额或网络有问题"), registry)
+
+    result = await workflow.run(
+        "支付失败怎么回事",
+        support_requests=[{"domain": "payment", "operation": "check_payment_status"}],
+        tool_context=ToolContext(user_id=7, role="customer"),
+    )
+
+    assert registry.calls == [("check_payment_status", {})]
+    assert result.workflow_progress["goal_status"] == "resolved"
+    assert result.workflow_progress["failed_tools"] == []
+    assert "支付渠道当前暂时无法确认" in result.answer
+    assert "余额" not in result.answer
 
 
 def test_refund_eligibility_answer_does_not_promote_customer_claim_to_fact():
@@ -385,7 +463,7 @@ def test_customer_choice_boundary_and_pending_choices_keep_display_order():
     assert result.answer.index("SOREAL_A6") < result.answer.index("SOREAL_A7")
 
 
-def test_declared_unavailable_capability_blocks_even_if_shared_facts_look_complete():
+def test_declared_unavailable_capability_degrades_when_workflow_declares_safe_partial_answer():
     plan = [
         {"tool": "track_order", "available": True},
         {"tool": "query_expected_ship_time", "available": False},
@@ -406,10 +484,10 @@ def test_declared_unavailable_capability_blocks_even_if_shared_facts_look_comple
     }
     progress = SupportWorkflowAgent._evaluate_progress(state, LoopResult(answer=""))
 
-    assert progress["goal_status"] == "blocked"
-    assert progress["control_state"] == "BLOCKED"
+    assert progress["goal_status"] == "resolved_with_limitation"
+    assert progress["control_state"] == "RESOLVED_WITH_LIMITATION"
     assert progress["reason"] == "capability_unavailable"
-    assert progress["next_actor"] == "STAFF"
+    assert progress["next_actor"] == "NONE"
 
 
 @pytest.mark.asyncio
@@ -420,9 +498,10 @@ async def test_refund_request_delivers_self_service_entry_after_eligibility():
 
     with pytest.MonkeyPatch.context() as monkeypatch:
 
-        async def generate_entry(*, customer_user_id: int, order_no: str) -> str:
+        async def generate_entry(*, customer_user_id: int, order_no: str, eligibility_already_verified: bool) -> str:
             assert customer_user_id == 7
             assert order_no == "SO1"
+            assert eligibility_already_verified is True
             return "?page=orders&refund_order=SO1"
 
         monkeypatch.setattr("agent.engines.support_workflow.generate_customer_refund_entry", generate_entry)
@@ -452,6 +531,28 @@ async def test_refund_request_delivers_self_service_entry_after_eligibility():
 
 
 @pytest.mark.asyncio
+async def test_refund_request_generates_entry_from_current_eligibility_fact():
+    registry = _RefundRequestRegistry()
+    workflow = SupportWorkflowAgent(_FakeAgent(), registry)
+    with patch(
+        "agent.engines.support_workflow.generate_customer_refund_entry",
+        new=AsyncMock(return_value="?page=orders&refund_order=SO1"),
+    ) as generate_entry:
+        result = await workflow.run(
+            "我要申请退款",
+            support_requests=[{"domain": "refund", "operation": "request"}],
+            tool_context=SimpleNamespace(user_id=7, role="customer"),
+        )
+
+    assert result.workflow_progress["resolution_type"] == "SELF_SERVICE_HANDOFF"
+    generate_entry.assert_awaited_once_with(
+        customer_user_id=7,
+        order_no="SO1",
+        eligibility_already_verified=True,
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "unsafe_answer",
     [
@@ -466,7 +567,8 @@ async def test_self_service_handoff_replaces_unsafe_llm_answer(unsafe_answer):
 
     with pytest.MonkeyPatch.context() as monkeypatch:
 
-        async def generate_entry(*, customer_user_id: int, order_no: str) -> str:
+        async def generate_entry(*, customer_user_id: int, order_no: str, eligibility_already_verified: bool) -> str:
+            assert eligibility_already_verified is True
             return "?page=orders&refund_order=SO1"
 
         monkeypatch.setattr("agent.engines.support_workflow.generate_customer_refund_entry", generate_entry)
@@ -546,7 +648,7 @@ async def test_refund_request_eligibility_failure_is_blocked_without_fake_entry(
 
     assert result.workflow_progress["goal_status"] == "blocked"
     assert result.workflow_progress["reason"] == "fact_tool_failed"
-    assert result.workflow_progress["next_actor"] == "STAFF"
+    assert result.workflow_progress["next_actor"] == "NONE"
     generate_entry.assert_not_awaited()
     request_refund.assert_not_awaited()
     confirm_refund.assert_not_awaited()
@@ -569,7 +671,7 @@ async def test_refund_request_entry_failure_goes_to_staff_without_customer_wait(
         )
 
     assert result.workflow_progress["goal_status"] == "blocked"
-    assert result.workflow_progress["next_actor"] == "STAFF"
+    assert result.workflow_progress["next_actor"] == "NONE"
     assert result.workflow_progress["reason"] == "capability_unavailable"
     request_refund.assert_not_awaited()
     confirm_refund.assert_not_awaited()
@@ -634,7 +736,7 @@ async def test_support_workflow_builds_plan_and_evaluates_customer_confirmation_
     )
 
     assert result.workflow_progress["goal_status"] == "blocked"
-    assert result.workflow_progress["next_action"] == "ESCALATE_OR_EXPLAIN"
+    assert result.workflow_progress["next_action"] == "EXPLAIN_LIMITATION_OR_HANDOFF"
     assert result.workflow_progress["required_tools"] == ["track_order", "check_after_sales"]
     assert '"action":"read_fact"' in agent.calls[0]["system_prompt_extra"]
 
@@ -719,6 +821,6 @@ def test_support_workflow_enters_confirmation_after_readiness_not_completion():
     result = workflow._evaluate_progress(state, LoopResult(answer="待确认"))
 
     assert result["goal_status"] == "blocked"
-    assert result["next_action"] == "ESCALATE_OR_EXPLAIN"
+    assert result["next_action"] == "EXPLAIN_LIMITATION_OR_HANDOFF"
     assert result["reason"] == "capability_unavailable"
     assert result["readiness_satisfied"] is True

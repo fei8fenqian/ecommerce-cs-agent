@@ -14,7 +14,7 @@ from config import settings
 
 # 测试库跟随当前客服 Agent production head；Harness 仍是独立、未启用分支。
 # 该值必须与 ``alembic heads`` 的 production head 一致，不能停留在合并点。
-EXPECTED_SCHEMA_REVISION = "a9e4c7d2f813"
+EXPECTED_SCHEMA_REVISION = "d2e7a1c9b504"
 REQUIRED_TABLES = {
     "component_products",
     "knowledge_chunks",
@@ -51,7 +51,7 @@ async def _validate_schema(conn: psycopg.AsyncConnection) -> None:
         raise RuntimeError(
             "测试数据库缺少 Alembic 创建的表: "
             + ", ".join(sorted(missing_tables))
-            + "; 请先执行 PG_DBNAME=<test_db> alembic upgrade a9e4c7d2f813。"
+            + "; 请先执行 PG_DBNAME=<test_db> alembic upgrade d2e7a1c9b504。"
         )
 
     cur = await conn.execute("SELECT version_num FROM alembic_version")

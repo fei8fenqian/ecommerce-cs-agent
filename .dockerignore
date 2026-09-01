@@ -53,3 +53,6 @@ venv/
 Dockerfile
 docker-compose.yml
 .dockerignore
+
+# 本地支付凭证
+.secrets/

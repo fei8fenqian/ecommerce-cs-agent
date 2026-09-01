@@ -31,6 +31,11 @@ SUBJECT_BOUND_FACTS = frozenset(
     }
 )
 
+# Internal Case metadata used when a customer explicitly disputes the current
+# subject. It is not a business fact and must never be exposed to the model or
+# customer-facing projections.
+SUBJECT_CONTEXT_RESET_MARKER = "_subject_context_reset"
+
 
 def normalize_decision_contexts(
     contexts: Iterable[Mapping[str, Any]] | None,

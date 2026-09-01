@@ -5,6 +5,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from agent.decision_context import SUBJECT_CONTEXT_RESET_MARKER
 from service.support_case_service import SupportCaseService
 from store.support_case_store import SupportCase
 
@@ -39,6 +40,7 @@ async def test_open_or_resume_creates_case_when_session_has_no_active_case(monke
         return _case()
 
     monkeypatch.setattr("service.support_case_service.get_open_case", no_case)
+    monkeypatch.setattr("service.support_case_service.get_latest_case", no_case)
     monkeypatch.setattr("service.support_case_service.create_open_case", create_case)
 
     result = await SupportCaseService().open_or_resume(
@@ -73,6 +75,47 @@ async def test_open_or_resume_preserves_pending_case_instead_of_overwriting_it(m
 
     assert result.created is False
     assert result.case == active
+
+
+@pytest.mark.asyncio
+async def test_open_or_resume_carries_subject_reset_barrier_across_case_rollover(monkeypatch):
+    latest = SupportCase(
+        **{
+            **_case(status="COMPLETED").__dict__,
+            "selected_subjects": {},
+            "verified_facts": {
+                SUBJECT_CONTEXT_RESET_MARKER: {
+                    "from_subject_id": "SO-A",
+                    "reason": "customer_disputed_subject",
+                }
+            },
+        }
+    )
+    created: dict[str, object] = {}
+
+    async def no_active(**kwargs):
+        return None
+
+    async def create_case(**kwargs):
+        created.update(kwargs)
+        return _case()
+
+    monkeypatch.setattr("service.support_case_service.get_open_case", no_active)
+
+    async def latest_case(**kwargs):
+        return latest
+
+    monkeypatch.setattr("service.support_case_service.get_latest_case", latest_case)
+    monkeypatch.setattr("service.support_case_service.create_open_case", create_case)
+
+    result = await SupportCaseService().open_or_resume(
+        session_id=str(latest.session_id),
+        customer_user_id=latest.customer_user_id,
+        request_stack=[{"domain": "inventory", "operation": "stock"}],
+    )
+
+    assert result.created is True
+    assert created["initial_verified_facts"] == latest.verified_facts
 
 
 @pytest.mark.asyncio
@@ -114,6 +157,87 @@ async def test_resume_customer_response_keeps_pending_and_records_event(monkeypa
     assert captured["status"] == "ACTIVE"
     assert captured["pending"] == case.pending
     assert captured["event_type"] == "CUSTOMER_RESPONSE"
+
+
+@pytest.mark.asyncio
+async def test_supersede_subject_correction_description_clears_pending_without_financial_command(monkeypatch):
+    captured: dict = {}
+
+    async def replace(case, **kwargs):
+        captured.update(kwargs)
+        return case
+
+    monkeypatch.setattr("service.support_case_service.replace_case", replace)
+    case = SupportCase(
+        **{
+            **_case(status="AWAITING_CUSTOMER").__dict__,
+            "pending": {
+                "kind": "subject_correction_description",
+                "transition_from_order_id": "SO-1",
+            },
+            "pending_command": {"status": "MUST_NOT_BE_RESTORED"},
+        }
+    )
+
+    result = await SupportCaseService().supersede_subject_correction_description(case)
+
+    assert result == case
+    assert captured["status"] == "ACTIVE"
+    assert captured["pending"] == {}
+    assert captured["pending_command"] == {}
+    assert captured["event_payload"]["reason"] == "SUBJECT_CORRECTION_SUPERSEDED"
+
+
+@pytest.mark.asyncio
+async def test_supersede_retires_disputed_subject_and_transaction_facts(monkeypatch):
+    captured: dict = {}
+
+    async def replace(case, **kwargs):
+        captured.update(kwargs)
+        return case
+
+    monkeypatch.setattr("service.support_case_service.replace_case", replace)
+    case = SupportCase(
+        **{
+            **_case(status="AWAITING_CUSTOMER").__dict__,
+            "request_stack": [{"domain": "refund", "operation": "status"}],
+            "selected_subjects": {"order_id": "SO-A"},
+            "verified_facts": {
+                "refund_status": "PROCESSING",
+                "refund_amount": 899900,
+                "_decision_contexts": [
+                    {
+                        "subject_type": "order",
+                        "subject_id": "SO-A",
+                        "provenance": "current",
+                        "source": "query_refund_status",
+                        "facts": {"refund_status": "PROCESSING", "refund_amount": 899900},
+                    }
+                ],
+            },
+            "pending": {
+                "kind": "subject_correction_description",
+                "transition_from_order_id": "SO-A",
+            },
+            "pending_command": {"status": "MUST_NOT_BE_RESTORED"},
+        }
+    )
+
+    await SupportCaseService().supersede_subject_correction_description(case)
+
+    assert captured["status"] == "ACTIVE"
+    assert captured["request_stack"] == []
+    assert captured["selected_subjects"] == {}
+    assert captured["pending"] == {}
+    assert captured["pending_command"] == {}
+    verified_facts = captured["verified_facts"]
+    assert "refund_status" not in verified_facts
+    assert "refund_amount" not in verified_facts
+    contexts = verified_facts["_decision_contexts"]
+    assert contexts and contexts[0]["subject_id"] == "SO-A"
+    assert contexts[0]["provenance"] == "historical"
+    assert verified_facts[SUBJECT_CONTEXT_RESET_MARKER]["from_subject_id"] == "SO-A"
+    assert captured["event_payload"]["request_stack_retired"] is True
 
 
 @pytest.mark.asyncio
@@ -179,6 +303,16 @@ async def test_complete_for_ticket_closes_linked_staff_case(monkeypatch):
     assert captured["event_type"] == "CASE_COMPLETED"
 
 
+@pytest.mark.asyncio
+async def test_mark_awaiting_staff_requires_a_real_ticket_id():
+    with pytest.raises(ValueError, match="ticket_id"):
+        await SupportCaseService().mark_awaiting_staff(
+            _case(status="ACTIVE"),
+            reason="CAPABILITY_GAP",
+            handoff_summary={},
+        )
+
+
 def test_prompt_context_exposes_case_state_but_not_internal_audit_fields():
     context = SupportCaseService.to_prompt_context(_case(status="AWAITING_CUSTOMER"))
 
@@ -238,3 +372,86 @@ async def test_record_verified_facts_preserves_subject_and_provenance_boundaries
         ("SO-A", "historical"),
         ("SO-B", "current"),
     }
+
+
+@pytest.mark.asyncio
+async def test_subject_reset_barrier_survives_subjectless_facts_and_completion(monkeypatch):
+    marker = {
+        "from_subject_id": "SO-A",
+        "reason": "customer_disputed_subject",
+    }
+    case = SupportCase(
+        **{
+            **_case().__dict__,
+            "selected_subjects": {},
+            "verified_facts": {SUBJECT_CONTEXT_RESET_MARKER: marker},
+        }
+    )
+    saved: list[SupportCase] = []
+
+    async def replace(current, **kwargs):
+        state = {**current.__dict__, **kwargs}
+        state = {name: state[name] for name in SupportCase.__dataclass_fields__}
+        updated = SupportCase(**state)
+        saved.append(updated)
+        return updated
+
+    monkeypatch.setattr("service.support_case_service.replace_case", replace)
+    service = SupportCaseService()
+
+    after_stock = await service.record_verified_facts(
+        case,
+        facts={"stock_status": "IN_STOCK"},
+    )
+    assert after_stock is not None
+    assert after_stock.verified_facts[SUBJECT_CONTEXT_RESET_MARKER] == marker
+    assert after_stock.verified_facts["stock_status"] == "IN_STOCK"
+
+    after_complete = await service.complete(after_stock, outcome={"completion": "stock_answer"})
+    assert after_complete is not None
+    assert after_complete.status == "COMPLETED"
+    assert after_complete.verified_facts[SUBJECT_CONTEXT_RESET_MARKER] == marker
+
+
+@pytest.mark.asyncio
+async def test_fresh_trusted_new_subject_releases_reset_barrier(monkeypatch):
+    case = SupportCase(
+        **{
+            **_case().__dict__,
+            "selected_subjects": {},
+            "verified_facts": {
+                SUBJECT_CONTEXT_RESET_MARKER: {
+                    "from_subject_id": "SO-A",
+                    "reason": "customer_disputed_subject",
+                }
+            },
+        }
+    )
+    captured: dict[str, object] = {}
+
+    async def replace(current, **kwargs):
+        captured.update(kwargs)
+        return current
+
+    monkeypatch.setattr("service.support_case_service.replace_case", replace)
+
+    await SupportCaseService().record_verified_facts(
+        case,
+        facts={"refund_status": "COMPLETED"},
+        decision_contexts=[
+            {
+                "subject_type": "order",
+                "subject_id": "SO-B",
+                "provenance": "current",
+                "source": "query_refund_status",
+                "facts": {"refund_status": "COMPLETED"},
+            }
+        ],
+    )
+
+    saved = captured["verified_facts"]
+    assert isinstance(saved, dict)
+    assert SUBJECT_CONTEXT_RESET_MARKER not in saved
+    contexts = saved["_decision_contexts"]
+    assert isinstance(contexts, list)
+    assert {(item["subject_id"], item["provenance"]) for item in contexts} == {("SO-B", "current")}

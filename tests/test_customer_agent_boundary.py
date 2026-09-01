@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 
 from agent.customer_response import compose_customer_response
+from agent.decision_context import SUBJECT_CONTEXT_RESET_MARKER
 from agent.engines.loop import AgentLoop, LoopResult
 from agent.llm.intent_router import Intent
 from agent.tools.search_product import _customer_visible_content
@@ -10,6 +11,7 @@ from agent.tools_registry import ToolRegistry
 from api.chat import (
     _append_customer_action_suffix,
     _apply_customer_refund_fact_boundary,
+    _awaiting_staff_response,
     _customer_action_suffix,
 )
 
@@ -21,6 +23,27 @@ def test_customer_prompt_forbids_internal_inventory_facts():
 
     assert "绝不提及仓库名称" in prompt
     assert "精确库存数量" in prompt
+
+
+def test_refund_request_choice_explains_one_order_at_a_time():
+    result = LoopResult(
+        answer="模型原文",
+        workflow_progress={
+            "next_action": "ASK_CHOICE",
+            "pending_choices": [
+                {"order_id": "SO-A", "product_name": "联想拯救者"},
+                {"order_id": "SO-B", "product_name": "联想小新"},
+            ],
+        },
+    )
+
+    compose_customer_response(
+        result,
+        [{"domain": "refund", "operation": "request"}],
+    )
+
+    assert "目前一次只能处理一笔退款" in result.answer
+    assert "处理完成后可以继续处理另一笔" in result.answer
 
 
 def test_customer_product_text_strips_internal_warehouse_details():
@@ -55,11 +78,57 @@ def test_plain_chat_refund_status_is_rendered_from_verified_facts():
     assert "支付宝" not in result.answer
 
 
+def test_payment_provider_unavailable_is_rendered_without_speculating_failure_reason():
+    result = LoopResult(
+        answer="可能是余额、银行卡、花呗额度或网络问题，一般会自动同步。",
+        decision_contexts=[
+            {
+                "subject_type": "order",
+                "subject_id": "SO-PAYMENT",
+                "provenance": "current",
+                "source": "check_payment_status",
+                "facts": {"payment_status": "PAYMENT_STATUS_UNAVAILABLE", "order_status": "PENDING_PAYMENT"},
+            }
+        ],
+    )
+
+    _apply_customer_refund_fact_boundary(
+        Intent(target="agent", domain="payment", operation="check_payment_status"), result
+    )
+
+    assert "支付渠道当前暂时无法确认" in result.answer
+    assert all(marker not in result.answer for marker in ("余额", "银行卡", "花呗", "网络", "自动同步"))
+
+
+def test_pending_payment_refund_path_is_controlled_cancel_handoff():
+    result = LoopResult(
+        answer="我会帮你申请退款。",
+        workflow_progress={"resolution_type": "SELF_SERVICE_ORDER_CANCEL"},
+        decision_contexts=[
+            {
+                "subject_type": "order",
+                "subject_id": "SO-PENDING",
+                "provenance": "current",
+                "source": "track_order",
+                "facts": {"order_identified": True, "order_status": "PENDING_PAYMENT"},
+            }
+        ],
+    )
+
+    _apply_customer_refund_fact_boundary(Intent(target="agent", domain="refund", operation="request"), result)
+
+    assert "没有已支付款项需要退款" in result.answer
+    assert "前往订单页取消" in result.answer
+    assert "帮你申请退款" not in result.answer
+    assert result.response_control["mode"] == "SELF_SERVICE_ORDER_CANCEL"
+
+
 def test_cross_turn_refund_facts_constrain_follow_up_without_new_intent():
     result = LoopResult(answer=("处理中属于正常状态，一般需要 1-7 个工作日完成平台审核，到账后页面会更新。"))
     _apply_customer_refund_fact_boundary(
         Intent(target="agent"),
         result,
+        query="退款现在怎么样？",
         session_facts={"refund_status": "PROCESSING", "refund_amount": 899900},
         session_contexts=[
             {
@@ -75,6 +144,70 @@ def test_cross_turn_refund_facts_constrain_follow_up_without_new_intent():
     assert result.answer == "根据上一轮系统查询，这笔退款目前还在处理中。退款金额为 ¥8999.00。"
     assert "1-7 个工作日" not in result.answer
     assert "平台审核" not in result.answer
+
+
+def _historical_refund_case() -> SimpleNamespace:
+    context = {
+        "subject_type": "order",
+        "subject_id": "SO-OLD-ORDER",
+        "provenance": "current",
+        "source": "query_refund_status",
+        "facts": {"refund_status": "PROCESSING", "refund_amount": 899900},
+    }
+    return SimpleNamespace(
+        status="ACTIVE",
+        request_stack=[{"domain": "refund", "operation": "status"}],
+        selected_subjects={"order_id": "SO-OLD-ORDER"},
+        verified_facts={"_decision_contexts": [context]},
+        pending={},
+    )
+
+
+def test_unrelated_turn_does_not_resurrect_recent_refund_goal_or_facts():
+    for query in ("啊啊啊", "有病是吧", "今天天气不错", "谢谢", "xj3%%%乱码"):
+        result = LoopResult(answer="系统核验结果显示，这笔订单当前符合退款资格。订单当前尚未发货。")
+        _apply_customer_refund_fact_boundary(
+            Intent(target="agent"),
+            result,
+            query=query,
+            recent_case=_historical_refund_case(),
+        )
+
+        assert "退款资格" not in result.answer
+        assert "尚未发货" not in result.answer
+        assert "SO-OLD-ORDER" not in result.answer
+
+
+def test_explicit_refund_follow_up_may_use_historical_fact_with_provenance_label():
+    result = LoopResult(answer="也许很快就会到账。")
+    _apply_customer_refund_fact_boundary(
+        Intent(target="agent"),
+        result,
+        query="退款现在怎么样？",
+        recent_case=_historical_refund_case(),
+    )
+
+    assert result.answer.startswith("根据上一轮系统查询")
+    assert "目前还在处理中" in result.answer
+    assert "8999" in result.answer
+
+
+def test_awaiting_staff_response_does_not_claim_a_ticket_without_ticket_id():
+    case = SimpleNamespace(
+        status="AWAITING_STAFF",
+        pending={"kind": "staff_handoff", "summary": {}},
+        selected_subjects={"order_id": "SO-OLD-ORDER"},
+        request_stack=[{"domain": "refund", "operation": "request"}],
+    )
+
+    result, presentation, ticket_id = _awaiting_staff_response(case)
+
+    assert ticket_id is None
+    assert "已创建人工客服工单" not in result.answer
+    assert "已保留后续处理入口" not in result.answer
+    assert "回复“转人工”" in result.answer
+    assert result.response_control["mode"] == "FACT"
+    assert presentation is None
 
 
 def test_subjectless_legacy_refund_facts_are_not_customer_visible():
@@ -97,6 +230,44 @@ def test_subjectless_legacy_refund_facts_are_not_customer_visible():
     assert "请提供或确认具体订单号" in result.answer
 
 
+def test_superseded_subject_cannot_reenter_renderer_through_session_flat_facts():
+    """新请求不能借旧 session flat metadata 恢复已被客户否定的订单。"""
+    result = LoopResult(answer="这笔退款记录目前显示处理中，金额为 ¥8999.00。")
+    case = SimpleNamespace(
+        status="ACTIVE",
+        request_stack=[],
+        selected_subjects={},
+        verified_facts={
+            SUBJECT_CONTEXT_RESET_MARKER: {
+                "from_subject_id": "SO-A",
+                "reason": "customer_disputed_subject",
+            },
+            "_decision_contexts": [
+                {
+                    "subject_type": "order",
+                    "subject_id": "SO-A",
+                    "provenance": "historical",
+                    "facts": {"refund_status": "PROCESSING", "refund_amount": 899900},
+                }
+            ],
+        },
+        pending={},
+    )
+
+    _apply_customer_refund_fact_boundary(
+        Intent(target="agent"),
+        result,
+        query="换货",
+        recent_case=case,
+        session_facts={"refund_status": "PROCESSING", "refund_amount": 899900},
+        session_contexts=[],
+    )
+
+    assert result.response_control["mode"] == "AWAITING_CUSTOMER"
+    assert "PROCESSING" not in result.answer
+    assert "8999" not in result.answer
+
+
 def test_subjectless_legacy_refund_entry_is_not_customer_visible():
     """旧 flat metadata 中的退款入口也不能绕过 subject binding。"""
     entry = "?page=orders&refund_order=SO-LEGACY"
@@ -111,7 +282,7 @@ def test_subjectless_legacy_refund_entry_is_not_customer_visible():
         result,
     )
 
-    assert result.response_control["mode"] == "STAFF_HANDOFF"
+    assert result.response_control["mode"] == "FACT"
     assert entry not in result.answer
     assert "无法生成可用的官方退款入口" in result.answer
 
@@ -163,8 +334,95 @@ def test_refund_fact_boundary_also_applies_to_blocked_workflow_facts():
 
     assert "系统核验结果显示，这笔订单当前符合退款资格。" in result.answer
     assert "订单当前尚未发货。" in result.answer
-    assert "请由人工客服继续核验。" in result.answer
+    assert "如需人工客服协助，请回复“转人工”。" in result.answer
     assert "全额" not in result.answer
+
+
+def test_blocked_response_names_missing_capability_instead_of_generic_contradiction():
+    result = LoopResult(
+        answer="我会继续处理。",
+        decision_facts={"refund_eligibility": True, "shipping_status": "NOT_SHIPPED"},
+        decision_contexts=[
+            {
+                "subject_type": "order",
+                "subject_id": "SO-TEST-BLOCKED-ENTRY",
+                "provenance": "current",
+                "source": "check_refund_eligibility",
+                "facts": {"refund_eligibility": True, "shipping_status": "NOT_SHIPPED"},
+            }
+        ],
+        workflow_progress={
+            "goal_status": "blocked",
+            "reason": "capability_unavailable",
+            "missing_facts": ["refund_entry"],
+        },
+    )
+
+    _apply_customer_refund_fact_boundary(
+        Intent(target="agent", domain="refund", operation="request"),
+        result,
+    )
+
+    assert result.answer == (
+        "这笔订单当前符合退款资格且尚未发货，但暂时无法生成退款入口。请从订单页稍后重试；如仍无法操作，可转人工。"
+    )
+    assert "当前还无法完成这项业务核验" not in result.answer
+
+
+def test_refund_eta_capability_gap_returns_verified_status_with_limitation_not_staff_handoff():
+    result = LoopResult(
+        answer="模型猜测三到五天到账。",
+        workflow_progress={
+            "goal_status": "resolved_with_limitation",
+            "control_state": "RESOLVED_WITH_LIMITATION",
+            "next_action": "EXPLAIN_LIMITATION",
+            "next_actor": "NONE",
+            "reason": "capability_unavailable",
+            "unavailable_capabilities": ["query_refund_expected_arrival"],
+        },
+        decision_contexts=[
+            {
+                "subject_type": "order",
+                "subject_id": "SO-ETA",
+                "provenance": "current",
+                "source": "query_refund_status",
+                "facts": {"refund_status": "PENDING_MERCHANT_REVIEW"},
+            }
+        ],
+    )
+
+    _apply_customer_refund_fact_boundary(Intent(target="agent", domain="refund", operation="expected_arrival"), result)
+
+    assert "等待商家核验" in result.answer
+    assert "具体到账时间" in result.answer
+    assert "三到五天" not in result.answer
+    assert result.response_control["mode"] == "FACT"
+
+
+def test_refund_procedure_is_deterministic_and_does_not_request_reason():
+    result = LoopResult(answer="请提供订单号和退款原因，我来帮您处理。")
+
+    _apply_customer_refund_fact_boundary(
+        Intent(target="agent", domain="refund", operation="procedure"),
+        result,
+    )
+
+    assert "我的订单" in result.answer
+    assert "退款原因" in result.answer
+    assert "请提供订单号" not in result.answer
+    assert result.response_control["mode"] == "FACT"
+
+
+def test_refund_request_without_subject_does_not_ask_for_reason_in_chat():
+    result = LoopResult(answer="请提供订单号和退款原因，我来帮您处理。")
+
+    _apply_customer_refund_fact_boundary(
+        Intent(target="agent", domain="refund", operation="request"),
+        result,
+    )
+
+    assert "请先选择或提供要处理的订单" in result.answer
+    assert "请提供退款原因" not in result.answer
 
 
 def test_existing_refund_request_uses_deterministic_explanation():

@@ -49,6 +49,31 @@ h1, h2, p { margin-top: 0; } h1 { margin-bottom: 6px; font-size: 28px; } h2 { ma
 .chatgpt-history .bubble.assistant .message-content ul,
 .chatgpt-history .bubble.assistant .message-content ol { margin-bottom: 7px; }
 .chatgpt-history .bubble.assistant .message-content li + li { margin-top: 2px; }
+.customer-presentation { margin-top: 14px; padding: 14px; border: 1px solid #dfe5f2; border-radius: 12px; background: #fff; }
+.customer-presentation h3 { margin: 0 0 7px; color: #273653; font-size: 15px; }
+.presentation-description { margin: 0 0 12px; color: #68758d; font-size: 13px; line-height: 1.55; }
+.presentation-kicker { margin: 0 0 3px; color: #71809a; font-size: 12px; }
+.presentation-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.presentation-heading > div { display: grid; gap: 3px; min-width: 0; }
+.presentation-heading small, .choice-option-copy small { color: #78859a; font-size: 12px; }
+.presentation-status-value { flex: 0 0 auto; padding: 5px 9px; border-radius: 999px; color: #2e5bb7; background: #edf3ff; font-size: 12px; font-weight: 700; }
+.presentation-fields { display: grid; gap: 5px; margin: 12px 0 0; }
+.presentation-fields > div { display: flex; justify-content: space-between; gap: 12px; color: #68758d; font-size: 13px; }
+.presentation-fields dt, .presentation-fields dd { margin: 0; }
+.presentation-fields dd { color: #2c3953; font-weight: 600; text-align: right; }
+.choice-options { display: grid; gap: 8px; }
+.choice-option { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px; border: 1px solid #e4e9f3; border-radius: 10px; background: #fbfcff; }
+.choice-option-copy { display: grid; min-width: 0; gap: 3px; }
+.choice-option-copy strong { overflow: hidden; color: #2c3953; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.choice-option .presentation-fields { margin-top: 2px; }
+.choice-option .presentation-fields > div { display: block; font-size: 12px; }
+.choice-option .presentation-fields dt { display: inline; }
+.choice-option .presentation-fields dd { display: inline; margin-left: 5px; font-weight: 600; }
+.customer-presentation button { flex: 0 0 auto; padding: 8px 11px; font-size: 12px; }
+.presentation-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.presentation-handoff { border-color: #eadfca; background: #fffdf8; }
+.order-card-focused { border-color: #5d82e8; box-shadow: 0 0 0 3px #5d82e822; }
+.order-focus-notice { margin: 12px 0 0; padding: 10px 12px; border-radius: 9px; color: #765d25; background: #fff8e8; font-size: 13px; }
 
 .finance-summary-back { width: auto; margin-bottom: 16px; }
 .finance-summary-page { display: grid; gap: 18px; }
@@ -258,5 +283,5 @@ html, body, #root { height: 100%; overflow: hidden; }
 .session-row { min-height: 48px; padding: 8px 9px; font-size: 14px; font-weight: 400; }.session-row strong, .session-row > span { overflow: hidden; color: inherit; font-size: 14px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }.session-row small { font-size: 12px; }
 .customer-chat-app.sidebar-collapsed { grid-template-columns: 58px minmax(0, 1fr); }.sidebar-collapsed .chat-sidebar { padding: 14px 9px; }.sidebar-collapsed .chat-brand { justify-content: center; }.sidebar-collapsed .chat-brand strong, .sidebar-collapsed .new-chat-button, .sidebar-collapsed .chat-page-nav, .sidebar-collapsed .sidebar-sessions, .sidebar-collapsed .chat-account > span, .sidebar-collapsed .chat-account .text-button { display: none; }.sidebar-collapsed .sidebar-toggle { margin: 0; }.sidebar-collapsed .chat-account { justify-content: center; }
 
-/* 会话删除和消息编辑都保持为悬停时才出现的轻量控制。 */
+/* 会话删除保持为悬停时才出现的轻量控制。 */
 .session-item { display: grid; grid-template-columns: minmax(0, 1fr) 28px; align-items: center; border-radius: 8px; }.session-item:hover, .session-item.active { background: #e9e9e9; }.session-item .session-row { width: 100%; color: inherit; background: transparent; text-decoration: none; }.session-item .session-row:hover, .session-item.active .session-row { background: transparent; }.session-delete, .message-edit-button { color: #888; background: transparent; }.session-delete { display: grid; width: 25px; height: 25px; place-items: center; padding: 0; border-radius: 6px; font-size: 18px; opacity: 0; }.session-item:hover .session-delete, .session-item.active .session-delete { opacity: 1; }.session-delete:hover { color: #b42318; background: #fbeaea; }.message-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 5px; }.message-edit-button { padding: 2px 0; font-size: 12px; opacity: 0; }.bubble.user:hover .message-edit-button { opacity: 1; }.bubble.user.editing .message-content { padding: 0; background: transparent; }.message-edit { min-width: min(420px, 72vw); }.message-edit textarea { min-height: 72px; padding: 9px; border: 1px solid #cfd6eb; border-radius: 10px; color: #252525; background: white; resize: vertical; }.message-actions button { padding: 6px 10px; font-size: 12px; }

@@ -126,11 +126,7 @@ _TICKET_REQUIRED_MARKERS = (
     "赔偿",
     "改地址",
     "修改地址",
-    "取消订单",
     "重复扣款",
-    "支付失败",
-    "付款失败",
-    "订单显示没付",
     "地址填错",
 )
 _REFUND_GUIDANCE_LINK = "[前往我的订单申请退款](?page=orders)"

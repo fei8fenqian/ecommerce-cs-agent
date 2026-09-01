@@ -9,7 +9,12 @@ from fastapi import FastAPI, Request
 
 from api.checkout import checkout_router
 from service.checkout_refund_service import CustomerRefundResult
-from service.checkout_service import CheckoutCancellationUnavailableError, CheckoutSession, PaymentNotCreatedError
+from service.checkout_service import (
+    CheckoutCancellationUnavailableError,
+    CheckoutSession,
+    PaymentNotCreatedError,
+    UnionPayCancellationUnavailableError,
+)
 from store.checkout_store import CustomerCheckoutOrder
 
 
@@ -51,6 +56,7 @@ async def test_customer_checkout_returns_signed_redirect_session():
         product_id="laptop-1",
         quantity=1,
         return_origin="http://127.0.0.1:5173",
+        payment_provider="alipay_sandbox",
     )
 
 
@@ -73,6 +79,42 @@ async def test_customer_can_start_component_checkout():
         product_id="memory-1",
         quantity=1,
         return_origin=None,
+        payment_provider="alipay_sandbox",
+    )
+
+
+@pytest.mark.asyncio
+async def test_customer_can_explicitly_select_unionpay_checkout() -> None:
+    """UnionPay 选择由请求显式携带，并原样投影服务端 checkout session。"""
+    transport = httpx.ASGITransport(app=_app("customer"))
+    session = CheckoutSession(
+        "SO202608240002",
+        449900,
+        "",
+        payment_form_action="https://gateway.test.95516.com/gateway/api/frontTransReq.do",
+        payment_form_fields={"orderId": "PMV2TEST"},
+        payment_provider="unionpay_test",
+    )
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        with patch("api.checkout.create_checkout_session", new=AsyncMock(return_value=session)) as create:
+            response = await client.post(
+                "/api/v1/checkout/orders",
+                json={
+                    "category": "laptops",
+                    "product_id": "laptop-1",
+                    "payment_provider": "unionpay_test",
+                },
+            )
+
+    assert response.status_code == 201
+    assert response.json()["payment_provider"] == "unionpay_test"
+    create.assert_awaited_once_with(
+        customer_user_id=101,
+        category="laptops",
+        product_id="laptop-1",
+        quantity=1,
+        return_origin=None,
+        payment_provider="unionpay_test",
     )
 
 
@@ -155,7 +197,7 @@ async def test_refresh_payment_explains_when_old_order_never_reached_alipay():
             response = await client.post("/api/v1/checkout/orders/SO202608240001/refresh-payment")
 
     assert response.status_code == 409
-    assert "未在支付宝侧创建交易" in response.json()["detail"]
+    assert "尚未创建可查询的支付交易" in response.json()["detail"]
 
 
 @pytest.mark.asyncio
@@ -183,6 +225,49 @@ async def test_cannot_cancel_paid_or_changed_checkout():
             response = await client.post("/api/v1/checkout/orders/SO202608240001/cancel")
 
     assert response.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_unionpay_pending_cancel_is_explicitly_rejected() -> None:
+    """U1 不把银联消费撤销误当作支付宝 close。"""
+    transport = httpx.ASGITransport(app=_app("customer"))
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        with patch(
+            "api.checkout.cancel_checkout_session",
+            new=AsyncMock(side_effect=UnionPayCancellationUnavailableError()),
+        ):
+            response = await client.post("/api/v1/checkout/orders/SO202608240001/cancel")
+
+    assert response.status_code == 409
+    assert "银联测试订单" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_unionpay_refund_request_returns_pending_confirmation() -> None:
+    """UnionPay 退款申请只创建待确认记录，不在申请阶段调用网关。"""
+    transport = httpx.ASGITransport(app=_app("customer"))
+    refund_id = UUID("22222222-2222-4222-8222-222222222222")
+    result = CustomerRefundResult(
+        refund_id=refund_id,
+        order_no="SO202608240001",
+        status="PENDING_CONFIRMATION",
+        amount_cents=449900,
+        currency="CNY",
+        reason="测试",
+        requested_at="2026-08-25T10:00:00+00:00",
+        idempotent_replay=False,
+    )
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        with patch("api.checkout.request_customer_refund", new=AsyncMock(return_value=result)) as request_refund:
+            response = await client.post(
+                "/api/v1/checkout/orders/SO202608240001/refunds",
+                headers={"Idempotency-Key": "unionpay-refund-api-1"},
+                json={"reason": "测试"},
+            )
+
+    assert response.status_code == 201
+    assert response.json()["status"] == "PENDING_CONFIRMATION"
+    request_refund.assert_awaited_once()
 
 
 @pytest.mark.asyncio

@@ -18,12 +18,15 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from agent.customer_presentation import SubjectChoiceInteraction
+from agent.decision_context import SUBJECT_CONTEXT_RESET_MARKER
 from agent.engines.loop import LoopResult
 from agent.llm.intent_router import Intent, SupportRequest
 from agent.llm.resolve import resolve_pronouns
-from agent.tools_registry import ToolResult
+from agent.tools_registry import ToolContext, ToolResult
 from api.chat import (
     ChatRequest,
+    _apply_subject_choice_interaction,
     _await_support_case_customer,
     _build_ticket_issue,
     _claim_chat_run,
@@ -163,6 +166,7 @@ class _MockSupportWorkflow:
         case_context="",
         support_requests=None,
         tool_context=None,
+        selected_subjects=None,
     ):
         self.calls.append(
             {
@@ -173,6 +177,7 @@ class _MockSupportWorkflow:
                 "case_context": case_context,
                 "support_requests": support_requests,
                 "tool_context": tool_context,
+                "selected_subjects": selected_subjects,
             }
         )
         return LoopResult(
@@ -204,6 +209,97 @@ def _support_case_fixture(status: str = "ACTIVE") -> SupportCase:
         updated_at=now,
         completed_at=None,
     )
+
+
+def _awaiting_staff_case(*, ticket_id: str | None = "TK-REFUND-001") -> SupportCase:
+    case = _support_case_fixture(status="AWAITING_STAFF")
+    pending: dict[str, object] = {"kind": "staff_handoff", "reason": "CUSTOMER_CONFIRMED_HUMAN_HANDOFF"}
+    if ticket_id is not None:
+        pending["summary"] = {"ticket_id": ticket_id}
+    return SupportCase(
+        **{
+            **case.__dict__,
+            "request_stack": [{"domain": "refund", "operation": "request"}],
+            "selected_subjects": {"order_id": "SO-Y9000P"},
+            "verified_facts": {
+                "refund_eligibility": True,
+                "shipping_status": "NOT_SHIPPED",
+                "_decision_contexts": [
+                    {
+                        "subject_type": "order",
+                        "subject_id": "SO-Y9000P",
+                        "provenance": "current",
+                        "source": "check_refund_eligibility",
+                        "facts": {"refund_eligibility": True, "shipping_status": "NOT_SHIPPED"},
+                    }
+                ],
+            },
+            "pending": pending,
+        }
+    )
+
+
+def _superseded_correction_cases() -> tuple[SupportCase, SupportCase, SupportCase, SupportCase]:
+    """构造 correction 被新请求取代后的同一 Case 生命周期快照。"""
+    context = {
+        "subject_type": "order",
+        "subject_id": "SO-A",
+        "provenance": "current",
+        "source": "query_refund_status",
+        "facts": {"refund_status": "PROCESSING", "refund_amount": 899900},
+    }
+    case = SupportCase(
+        **{
+            **_support_case_fixture(status="AWAITING_CUSTOMER").__dict__,
+            "request_stack": [{"domain": "refund", "operation": "status"}],
+            "selected_subjects": {"order_id": "SO-A"},
+            "verified_facts": {
+                "refund_status": "PROCESSING",
+                "refund_amount": 899900,
+                "_decision_contexts": [context],
+            },
+            "pending": {
+                "kind": "subject_correction_description",
+                "subject_type": "order",
+                "selection_event": "subject_correction",
+                "transition_from_order_id": "SO-A",
+            },
+        }
+    )
+    retired = SupportCase(
+        **{
+            **case.__dict__,
+            "status": "ACTIVE",
+            "request_stack": [],
+            "selected_subjects": {},
+            "verified_facts": {
+                "_decision_contexts": [{**context, "provenance": "historical"}],
+                SUBJECT_CONTEXT_RESET_MARKER: {
+                    "from_subject_id": "SO-A",
+                    "reason": "customer_disputed_subject",
+                },
+            },
+            "pending": {},
+            "pending_command": {},
+            "version": case.version + 1,
+        }
+    )
+    new_request = SupportCase(
+        **{
+            **retired.__dict__,
+            "request_stack": [{"domain": "after_sales", "operation": "after_sales_transition"}],
+            "version": retired.version + 1,
+        }
+    )
+    awaiting = SupportCase(
+        **{
+            **new_request.__dict__,
+            "status": "AWAITING_CUSTOMER",
+            "pending": {"kind": "customer_clarification"},
+            "version": new_request.version + 1,
+        }
+    )
+    return case, retired, new_request, awaiting
 
 
 @pytest.mark.asyncio
@@ -390,21 +486,231 @@ async def test_api_keeps_case_awaiting_when_pending_choice_is_ambiguous():
     service.resume_customer_response.assert_not_awaited()
 
 
-def test_api_does_not_treat_staff_block_as_customer_turn():
+def _choice_case() -> SupportCase:
+    case = _support_case_fixture(status="AWAITING_CUSTOMER")
+    return SupportCase(
+        **{
+            **case.__dict__,
+            "request_stack": [
+                {
+                    "domain": "refund",
+                    "operation": "status",
+                    "next_step": "LOOKUP",
+                    "required_tools": ["track_order"],
+                    "risk": "read_only",
+                }
+            ],
+            "pending": {
+                "kind": "customer_choice",
+                "subject_type": "order",
+                "choices": [
+                    {"order_id": "SOREAL_A6", "product_name": "戴尔笔记本", "amount_cents": 920000},
+                    {"order_id": "SOREAL_A7", "product_name": "Sony 耳机", "amount_cents": 189900},
+                ],
+            },
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_structured_subject_choice_revalidates_candidate_and_keeps_case():
+    case = _choice_case()
+    selected = SupportCase(
+        **{
+            **case.__dict__,
+            "status": "ACTIVE",
+            "selected_subjects": {"order_id": "SOREAL_A7"},
+            "pending": {},
+            "version": case.version + 1,
+        }
+    )
+    service = SupportCaseService()
+    service.select_customer_subject = AsyncMock(return_value=selected)  # type: ignore[method-assign]
+    registry = SimpleNamespace(
+        execute=AsyncMock(
+            return_value=ToolResult(
+                name="track_order",
+                status="success",
+                data={"order_id": "SOREAL_A7"},
+            )
+        )
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                registry=registry,
+                support_case_service=service,
+            )
+        )
+    )
+
+    result = await _apply_subject_choice_interaction(
+        request,
+        case=case,
+        interaction=SubjectChoiceInteraction(subject_id="SOREAL_A7"),
+        tool_context=ToolContext(user_id=1, role="customer"),
+    )
+
+    assert result is selected
+    registry.execute.assert_awaited_once_with(
+        "track_order",
+        tool_context=ToolContext(user_id=1, role="customer"),
+        order_id="SOREAL_A7",
+    )
+    service.select_customer_subject.assert_awaited_once_with(
+        case,
+        subject={"order_id": "SOREAL_A7", "product_name": "Sony 耳机", "amount_cents": 189900},
+        selection_source="structured_interaction",
+    )
+
+
+@pytest.mark.asyncio
+async def test_structured_subject_choice_rejects_non_candidate_without_execution():
+    case = _choice_case()
+    service = SupportCaseService()
+    registry = SimpleNamespace(execute=AsyncMock())
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                registry=registry,
+                support_case_service=service,
+            )
+        )
+    )
+
+    with pytest.raises(StarletteHTTPException) as error:
+        await _apply_subject_choice_interaction(
+            request,
+            case=case,
+            interaction=SubjectChoiceInteraction(subject_id="SOREAL_OTHER"),
+            tool_context=ToolContext(user_id=1, role="customer"),
+        )
+
+    assert error.value.status_code == 409
+    registry.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_structured_subject_choice_rejects_ownership_or_stale_verification():
+    case = _choice_case()
+    service = SupportCaseService()
+    registry = SimpleNamespace(
+        execute=AsyncMock(
+            return_value=ToolResult(
+                name="track_order",
+                status="success",
+                data={"order_id": "SOREAL_OTHER"},
+            )
+        )
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                registry=registry,
+                support_case_service=service,
+            )
+        )
+    )
+
+    with pytest.raises(StarletteHTTPException) as ownership_error:
+        await _apply_subject_choice_interaction(
+            request,
+            case=case,
+            interaction=SubjectChoiceInteraction(subject_id="SOREAL_A6"),
+            tool_context=ToolContext(user_id=1, role="customer"),
+        )
+    assert ownership_error.value.status_code == 409
+    service.select_customer_subject = AsyncMock(return_value=case)  # type: ignore[method-assign]
+    stale_case = SupportCase(**{**case.__dict__, "status": "ACTIVE"})
+    with pytest.raises(StarletteHTTPException) as stale_error:
+        await _apply_subject_choice_interaction(
+            request,
+            case=stale_case,
+            interaction=SubjectChoiceInteraction(subject_id="SOREAL_A6"),
+            tool_context=ToolContext(user_id=1, role="customer"),
+        )
+    assert stale_error.value.status_code == 409
+    service.select_customer_subject.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_structured_subject_choice_chat_skips_router_and_resumes_case(client):
+    case = _choice_case()
+    selected = SupportCase(
+        **{
+            **case.__dict__,
+            "status": "ACTIVE",
+            "selected_subjects": {"order_id": "SOREAL_A7"},
+            "pending": {},
+            "version": case.version + 1,
+        }
+    )
+    completed = SupportCase(**{**selected.__dict__, "status": "COMPLETED", "version": selected.version + 1})
+    service = SupportCaseService()
+    service.get_active = AsyncMock(return_value=case)  # type: ignore[method-assign]
+    service.get_latest = AsyncMock(return_value=case)  # type: ignore[method-assign]
+    service.select_customer_subject = AsyncMock(return_value=selected)  # type: ignore[method-assign]
+    service.complete = AsyncMock(return_value=completed)  # type: ignore[method-assign]
+    client.app.state.support_case_service = service
+    client.app.state.registry.execute = AsyncMock(
+        return_value=ToolResult(name="track_order", status="success", data={"order_id": "SOREAL_A7"})
+    )
+    client.app.state.intent_router.route = AsyncMock(side_effect=AssertionError("结构化选择不应重新路由"))
+
+    transport = httpx.ASGITransport(app=client.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+        response = await http_client.post(
+            "/api/v1/chat",
+            json={
+                "session_id": "mock-session-id",
+                "interaction": {"type": "subject_choice", "subject_type": "order", "subject_id": "SOREAL_A7"},
+            },
+        )
+
+    assert response.status_code == 200
+    client.app.state.intent_router.route.assert_not_awaited()
+    client.app.state.registry.execute.assert_awaited_once_with(
+        "track_order",
+        tool_context=ToolContext(
+            user_id=1,
+            role="customer",
+            blocked_tools=frozenset({"create_ticket"}),
+            allowed_tools=frozenset(
+                {
+                    "search_product",
+                    "search_knowledge",
+                    "check_stock",
+                    "track_order",
+                    "check_payment_status",
+                    "query_refund_status",
+                    "check_refund_eligibility",
+                    "check_after_sales",
+                    "compare_products",
+                    "search_component",
+                }
+            ),
+        ),
+        order_id="SOREAL_A7",
+    )
+    service.select_customer_subject.assert_awaited_once()
+    assert client.app.state.support_workflow_agent.calls[-1]["selected_subjects"] == {"order_id": "SOREAL_A7"}
+
+
+def test_api_does_not_persist_capability_gap_as_customer_or_staff_turn():
     assert (
         _support_case_needs_customer_turn(
             Intent(target="agent", requests=[SupportRequest(domain="refund", operation="expected_arrival")]),
-            workflow_progress={"goal_status": "blocked", "next_actor": "STAFF"},
+            workflow_progress={"goal_status": "blocked", "next_actor": "NONE"},
         )
         is False
     )
 
 
 @pytest.mark.asyncio
-async def test_api_persists_capability_gap_for_staff_not_customer():
+async def test_api_completes_capability_gap_without_creating_staff_handoff():
     service = SupportCaseService()
     case = _support_case_fixture()
-    service.mark_awaiting_staff = AsyncMock(return_value=case)  # type: ignore[method-assign]
+    service.complete = AsyncMock(return_value=case)  # type: ignore[method-assign]
 
     await _persist_support_case_progress(
         _support_case_request(service),
@@ -417,17 +723,17 @@ async def test_api_persists_capability_gap_for_staff_not_customer():
             answer="当前无法提供可信到账时间。",
             workflow_progress={
                 "goal": "expected_arrival",
-                "goal_status": "blocked",
-                "next_action": "ESCALATE_OR_EXPLAIN",
-                "next_actor": "STAFF",
+                "goal_status": "resolved_with_limitation",
+                "next_action": "EXPLAIN_LIMITATION",
+                "next_actor": "NONE",
                 "reason": "capability_unavailable",
                 "unavailable_capabilities": ["query_refund_expected_arrival"],
             },
         ),
     )
 
-    service.mark_awaiting_staff.assert_awaited_once()
-    assert service.mark_awaiting_staff.await_args.kwargs["reason"] == "capability_unavailable"
+    service.complete.assert_awaited_once()
+    assert service.complete.await_args.kwargs["outcome"]["completion"] == "safe_partial_answer_returned"
 
 
 @pytest.mark.asyncio
@@ -535,6 +841,8 @@ class _MockSessionManager:
         if ctx:
             ctx.messages.append({"role": "user", "content": query})
             ctx.messages.append({"role": "assistant", "content": result.answer})
+            if result.customer_presentation:
+                ctx.messages[-1]["_presentation"] = result.customer_presentation
             if result.last_entities:
                 ctx.last_entities.update(result.last_entities)
 
@@ -544,11 +852,16 @@ class _MockSessionManager:
         owner_user_id: int,
         query: str,
         answer: str,
+        *,
+        presentation=None,
     ) -> None:
         ctx = self._sessions.get(session_id)
         if ctx:
             ctx.messages.append({"role": "user", "content": query})
-            ctx.messages.append({"role": "assistant", "content": answer})
+            assistant = {"role": "assistant", "content": answer}
+            if presentation:
+                assistant["_presentation"] = presentation
+            ctx.messages.append(assistant)
 
     async def truncate_from(
         self,
@@ -595,6 +908,37 @@ def client(monkeypatch):
     return TestClient(app)
 
 
+def _install_superseded_correction_case(client, *, query: str):
+    case, retired, new_request, awaiting = _superseded_correction_cases()
+    service = SupportCaseService()
+    service.get_active = AsyncMock(side_effect=[case, retired])  # type: ignore[method-assign]
+    service.get_latest = AsyncMock(side_effect=[case, retired])  # type: ignore[method-assign]
+    service.supersede_subject_correction_description = AsyncMock(return_value=retired)  # type: ignore[method-assign]
+    service.open_or_resume = AsyncMock(return_value=SimpleNamespace(case=retired))  # type: ignore[method-assign]
+    service.record_requests = AsyncMock(return_value=new_request)  # type: ignore[method-assign]
+    service.await_customer = AsyncMock(return_value=awaiting)  # type: ignore[method-assign]
+    client.app.state.support_case_service = service
+    client.app.state.agent = _MockAgentLoop(answer="这笔退款记录目前显示处理中，金额为 ¥8999.00。")
+    client.app.state.support_workflow_agent = _MockSupportWorkflow(
+        answer="这笔退款记录目前显示处理中，金额为 ¥8999.00。"
+    )
+    request = SupportRequest(domain="after_sales", operation="after_sales_transition")
+    if query == "人工客服":
+        request = SupportRequest(domain="human", operation="human_handoff", risk="staff_approval")
+    client.app.state.intent_router.route = AsyncMock(
+        return_value=Intent(
+            target="agent",
+            query=query,
+            confidence=1.0,
+            domain=request.domain,
+            operation=request.operation,
+            requests=[request],
+            case_update="new_request",
+        )
+    )
+    return service, case, retired, new_request, awaiting
+
+
 # =============================================================================
 # POST /chat
 # =============================================================================
@@ -609,6 +953,41 @@ class TestChatEndpoint:
         assert data["session_id"] == "mock-session-id"
         assert data["total_steps"] == 1
         assert data["total_tokens"] == 50
+
+    @pytest.mark.asyncio
+    async def test_awaiting_staff_case_allows_router_to_handle_new_customer_turn(self, client):
+        """真实人工 Case 不得在 Router 前吞掉客户后续输入。"""
+        case = _awaiting_staff_case()
+        service = SupportCaseService()
+        service.get_active = AsyncMock(return_value=case)  # type: ignore[method-assign]
+        service.get_latest = AsyncMock(return_value=case)  # type: ignore[method-assign]
+        client.app.state.support_case_service = service
+        client.app.state.intent_router.route = AsyncMock(
+            return_value=Intent(target="agent", query="你好", confidence=1.0, speech_act="ACKNOWLEDGEMENT")
+        )
+
+        transport = httpx.ASGITransport(app=client.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+            for query in ("为什么无法核验相关业务信息", "那在之前买的联想小新Pro16呢", "啊啊啊啊", "有病是吧"):
+                response = await http_client.post("/api/v1/chat", json={"query": query})
+                assert response.status_code == 200
+                answer = response.json()["answer"]
+                assert "SO-Y9000P" not in answer
+                assert "退款资格" not in answer
+                assert "尚未发货" not in answer
+
+        assert client.app.state.intent_router.route.await_count == 4
+        assert client.app.state.support_workflow_agent.calls == []
+
+    @pytest.mark.asyncio
+    async def test_async_basic_chat_smoke(self, client):
+        """Async ASGI transport must complete the basic customer chat path."""
+        transport = httpx.ASGITransport(app=client.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+            response = await http_client.post("/api/v1/chat", json={"query": "你好"})
+
+        assert response.status_code == 200
+        assert response.json()["answer"] == "这是测试回答"
 
     @pytest.mark.asyncio
     async def test_plain_chat_replaces_unbound_refund_transaction_claim(self, client):
@@ -689,8 +1068,8 @@ class TestChatEndpoint:
         assert resp2.json()["session_id"] == "my-session"
 
     @pytest.mark.asyncio
-    async def test_edit_message_truncates_then_regenerates(self, client):
-        """编辑历史消息时，只保留其前文并以新问题重新生成。"""
+    async def test_customer_cannot_edit_an_already_sent_message(self, client):
+        """客户消息不可回滚；否则会与 SupportCase 状态失去事务一致性。"""
         transport = httpx.ASGITransport(app=client.app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
             first = await http_client.post(
@@ -707,20 +1086,119 @@ class TestChatEndpoint:
                 },
             )
 
-        assert response.status_code == 200
+        assert first.status_code == 200
+        assert response.status_code == 400
         messages = client.app.state.session._sessions["edit-session"].messages
-        assert messages[0]["content"] == "新问题"
-        assert all(message["content"] != "旧问题" for message in messages)
+        assert messages[0]["content"] == "旧问题"
+        assert all(message["content"] != "新问题" for message in messages)
 
     @pytest.mark.asyncio
-    async def test_edit_without_existing_session_returns_404(self, client):
+    async def test_customer_edit_is_rejected_before_session_lookup(self, client):
         transport = httpx.ASGITransport(app=client.app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
             response = await http_client.post(
                 "/api/v1/chat",
                 json={"query": "新问题", "replace_from_sequence": 0},
             )
-        assert response.status_code == 404
+        assert response.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_new_router_request_supersedes_correction_pending_before_later_bare_text(self, client):
+        case = SupportCase(
+            **{
+                **_support_case_fixture(status="AWAITING_CUSTOMER").__dict__,
+                "selected_subjects": {"order_id": "SO-A"},
+                "pending": {
+                    "kind": "subject_correction_description",
+                    "subject_type": "order",
+                    "selection_event": "subject_correction",
+                    "transition_from_order_id": "SO-A",
+                },
+            }
+        )
+        updated = SupportCase(**{**case.__dict__, "status": "ACTIVE", "pending": {}, "version": case.version + 1})
+        service = SupportCaseService()
+        service.get_active = AsyncMock(side_effect=[case, updated])  # type: ignore[method-assign]
+        service.get_latest = AsyncMock(side_effect=[case, updated])  # type: ignore[method-assign]
+        service.supersede_subject_correction_description = AsyncMock(return_value=updated)  # type: ignore[method-assign]
+        client.app.state.support_case_service = service
+        client.app.state.intent_router.route = AsyncMock(
+            side_effect=[
+                Intent(target="agent", query="换货", confidence=1.0, case_update="new_request"),
+                Intent(target="agent", query="Sony 耳机", confidence=1.0, case_update="none"),
+            ]
+        )
+
+        transport = httpx.ASGITransport(app=client.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+            first = await http_client.post("/api/v1/chat", json={"query": "换货"})
+            second = await http_client.post(
+                "/api/v1/chat",
+                json={"query": "Sony 耳机", "session_id": first.json()["session_id"]},
+            )
+
+        assert first.status_code == 200
+        assert second.status_code == 200
+        service.supersede_subject_correction_description.assert_awaited_once_with(case)
+        assert updated.pending == {}
+
+    @pytest.mark.asyncio
+    async def test_chat_new_request_retires_disputed_subject_before_workflow(self, client, monkeypatch):
+        lookup = AsyncMock()
+        monkeypatch.setattr("api.chat.list_customer_checkout_orders", lookup)
+        service, case, retired, new_request, awaiting = _install_superseded_correction_case(
+            client,
+            query="换货",
+        )
+        first_intent = client.app.state.intent_router.route.return_value
+        client.app.state.intent_router.route.side_effect = [
+            first_intent,
+            Intent(target="agent", query="Sony 耳机", confidence=1.0),
+        ]
+
+        transport = httpx.ASGITransport(app=client.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+            response = await http_client.post("/api/v1/chat", json={"query": "换货"})
+            later = await http_client.post(
+                "/api/v1/chat",
+                json={"query": "Sony 耳机", "session_id": response.json()["session_id"]},
+            )
+
+        assert response.status_code == 200
+        assert later.status_code == 200
+        lookup.assert_not_awaited()
+        service.supersede_subject_correction_description.assert_awaited_once_with(case)
+        service.record_requests.assert_awaited_once()
+        assert service.record_requests.await_args.kwargs["request_stack"][0]["domain"] == "after_sales"
+        assert service.record_requests.await_args.kwargs["request_stack"][0]["operation"] == "after_sales_transition"
+        assert client.app.state.support_workflow_agent.calls[-1]["selected_subjects"] is None
+        assert "处理中" not in response.json()["answer"]
+        assert "8999" not in response.json()["answer"]
+        assert "处理中" not in later.json()["answer"]
+        assert "8999" not in later.json()["answer"]
+        assert client.app.state.intent_router.route.await_count == 2
+        assert retired.selected_subjects == {}
+        assert awaiting.selected_subjects == {}
+
+    @pytest.mark.asyncio
+    async def test_chat_stream_human_request_retires_disputed_subject_before_execution(self, client, monkeypatch):
+        lookup = AsyncMock()
+        monkeypatch.setattr("api.chat.list_customer_checkout_orders", lookup)
+        service, case, _, _, _ = _install_superseded_correction_case(
+            client,
+            query="人工客服",
+        )
+
+        transport = httpx.ASGITransport(app=client.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+            response = await http_client.post("/api/v1/chat/stream", json={"query": "人工客服"})
+
+        assert response.status_code == 200
+        lookup.assert_not_awaited()
+        service.supersede_subject_correction_description.assert_awaited_once_with(case)
+        assert client.app.state.support_workflow_agent.calls[-1]["selected_subjects"] is None
+        assert "处理中" not in response.text
+        assert "8999" not in response.text
 
     @pytest.mark.asyncio
     async def test_short_confirmation_defaults_to_stock_lookup(self, client):
@@ -744,6 +1222,7 @@ class TestChatEndpoint:
             )
         )
         client.app.state.intent_router.route = route
+        expected_history = session._sessions["follow-up-session"].history
         transport = httpx.ASGITransport(app=client.app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
             response = await http_client.post(
@@ -754,7 +1233,7 @@ class TestChatEndpoint:
         assert response.status_code == 200
         route.assert_awaited_once_with(
             "查询 微星魔影15 的实时库存",
-            history=session._sessions["follow-up-session"].history,
+            history=expected_history,
             knowledge_context="",
         )
 
@@ -866,6 +1345,7 @@ class TestChatEndpoint:
 
         service = SupportCaseService()
         service.get_active = AsyncMock(return_value=active_case)  # type: ignore[method-assign]
+        service.get_latest = AsyncMock(return_value=active_case)  # type: ignore[method-assign]
         resumed_case = SupportCase(**{**active_case.__dict__, "status": "ACTIVE", "version": 3})
         service.resume_customer_response = AsyncMock(return_value=resumed_case)  # type: ignore[method-assign]
         service.mark_awaiting_staff = AsyncMock(return_value=resumed_case)  # type: ignore[method-assign]
@@ -883,7 +1363,14 @@ class TestChatEndpoint:
         assert "TK-DEMO-001" in response.json()["answer"]
         client.app.state.registry.execute.assert_awaited_once()
         service.mark_awaiting_staff.assert_awaited_once()
+
         enqueue.assert_awaited_once()
+
+    def test_standalone_human_request_is_a_real_handoff_request(self):
+        assert _is_confirmed_human_handoff(None, "转人工") is True
+        assert _is_confirmed_human_handoff(None, "我要找人工") is True
+        # 复合退款请求仍保留现有先给自助入口的策略。
+        assert _is_confirmed_human_handoff(None, "我要退款，请转人工") is False
 
     def test_read_only_support_case_can_complete_without_a_customer_turn(self):
         assert (
@@ -966,6 +1453,35 @@ class TestChatEndpoint:
 # POST /chat/stream
 # =============================================================================
 class TestChatStreamEndpoint:
+    @pytest.mark.asyncio
+    async def test_awaiting_staff_case_stream_allows_router_to_handle_new_customer_turn(self, client):
+        """流式出口与普通出口都不能在 Router 前吞掉人工 Case 后续输入。"""
+        case = _awaiting_staff_case()
+        service = SupportCaseService()
+        service.get_active = AsyncMock(return_value=case)  # type: ignore[method-assign]
+        service.get_latest = AsyncMock(return_value=case)  # type: ignore[method-assign]
+        client.app.state.support_case_service = service
+        client.app.state.intent_router.route = AsyncMock(
+            return_value=Intent(target="agent", query="你好", confidence=1.0, speech_act="ACKNOWLEDGEMENT")
+        )
+
+        transport = httpx.ASGITransport(app=client.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+            response = await http_client.post(
+                "/api/v1/chat/stream",
+                json={"query": "那在之前买的联想小新Pro16呢"},
+            )
+
+        assert response.status_code == 200
+        events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
+        visible = "".join(str(event.get("content") or "") for event in events if event.get("event") == "token")
+        assert "SO-Y9000P" not in visible
+        assert "退款资格" not in visible
+        assert "尚未发货" not in visible
+        assert events[-1]["event"] == "done"
+        client.app.state.intent_router.route.assert_awaited_once()
+        assert client.app.state.support_workflow_agent.calls == []
+
     @pytest.mark.asyncio
     async def test_stream_refund_follow_up_never_emits_unverified_facts(self, client):
         """跨轮退款上下文必须在任何 customer-visible token 发出前经过同一事实边界。"""
@@ -1170,6 +1686,7 @@ class TestChatStreamEndpoint:
             )
         )
         client.app.state.intent_router.route = route
+        expected_history = session._sessions["stream-follow-up"].history
 
         transport = httpx.ASGITransport(app=client.app, raise_app_exceptions=False)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
@@ -1181,7 +1698,8 @@ class TestChatStreamEndpoint:
         assert response.status_code == 200
         route.assert_awaited_once_with(
             "查询 微星魔影15 的实时库存",
-            history=session._sessions["stream-follow-up"].history,
+            history=expected_history,
+            knowledge_context="",
         )
 
     @pytest.mark.asyncio

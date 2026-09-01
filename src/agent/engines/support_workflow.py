@@ -19,6 +19,7 @@ from agent.support_control import (
     confirmation_required,
     extract_decision_context,
     extract_decision_facts,
+    partial_completion_satisfied,
     readiness_satisfied,
     validate_execution_plan,
 )
@@ -106,7 +107,17 @@ class SupportWorkflowAgent:
             if plan_validation.get("unavailable_capabilities"):
                 plan_prompt += (
                     "\n以下能力当前不可用。不得用其他字段、支付方式、知识库规则或常识推断缺失事实；"
-                    "只能明确说明该事实当前无法核验，并按阻塞结果回答。"
+                    "只能明确说明该事实当前无法核验。若已拿到足以回答当前状态的可信事实，"
+                    "请先说明这些事实，再说明具体限制；不要把能力缺口说成已经转人工。"
+                )
+            if any(
+                str(item.get("domain") or "") == "refund" and str(item.get("operation") or "") == "request"
+                for item in state.get("support_requests", [])
+                if isinstance(item, dict)
+            ):
+                plan_prompt += (
+                    "\n退款申请原因由客户在订单页正式提交时填写；当前聊天阶段不要索要退款原因，"
+                    "也不要把客户尚未提交的原因当作资格核验事实。"
                 )
         prompt_parts = [state.get("system_prompt_extra", "").strip(), case_prompt, plan_prompt]
         return {
@@ -140,9 +151,12 @@ class SupportWorkflowAgent:
         bound_order_id = self._selected_order_id(state.get("selected_subjects"))
         explicit_order_id = SupportWorkflowAgent._explicit_order_id(state.get("query", ""))
         order_id_for_query = bound_order_id or explicit_order_id
+        skip_paid_refund_reads = False
         for name in requested_tools:
+            if skip_paid_refund_reads and name == "query_refund_status":
+                continue
             tool_arguments: dict[str, Any] = {}
-            if order_id_for_query and name in {"track_order", "query_refund_status"}:
+            if order_id_for_query and name in {"track_order", "query_refund_status", "check_payment_status"}:
                 tool_arguments["order_id"] = order_id_for_query
             result = await self.registry.execute(
                 name,
@@ -168,6 +182,20 @@ class SupportWorkflowAgent:
                 # later query subjectless and then lose its facts during binding.
                 if not order_id_for_query and name == "track_order":
                     order_id_for_query = self._unique_order_id(bounded)
+                # 对尚未付款的订单，退款申请/资格的正确客户结果是“没有已支付
+                # 款项需要退款，可前往订单取消”。不再读取不存在的退款记录或
+                # 进入已付款订单的退款资格路径。
+                if (
+                    name == "track_order"
+                    and decision_facts.get("order_status") == "PENDING_PAYMENT"
+                    and any(
+                        str(item.get("domain") or "") == "refund"
+                        and str(item.get("operation") or "") in {"request", "eligibility"}
+                        for item in state.get("support_requests", [])
+                        if isinstance(item, dict)
+                    )
+                ):
+                    skip_paid_refund_reads = True
             else:
                 # 查询失败也属于可信流程事实，避免模型凭空说“已查到”。
                 facts[name] = {"status": "error", "error": result.error[:300]}
@@ -183,6 +211,7 @@ class SupportWorkflowAgent:
         if (
             "check_refund_eligibility" in planned_tools
             and selected_order_id
+            and decision_facts.get("order_status") != "PENDING_PAYMENT"
             and ("query_refund_status" not in planned_tools or decision_facts.get("refund_status") == "NOT_FOUND")
         ):
             result = await self.registry.execute(
@@ -213,6 +242,7 @@ class SupportWorkflowAgent:
         if (
             "generate_refund_entry" in planned_tools
             and selected_order_id
+            and decision_facts.get("order_status") != "PENDING_PAYMENT"
             and decision_facts.get("refund_status") == "NOT_FOUND"
             and decision_facts.get("refund_eligibility") is True
         ):
@@ -221,6 +251,7 @@ class SupportWorkflowAgent:
                 entry = await generate_customer_refund_entry(
                     customer_user_id=customer_user_id,
                     order_no=selected_order_id,
+                    eligibility_already_verified=True,
                 )
                 if isinstance(entry, str) and re.fullmatch(r"\?page=orders&refund_order=SO[A-Z0-9_-]+", entry):
                     data = {"order_id": selected_order_id, "refund_entry": entry}
@@ -529,14 +560,15 @@ class SupportWorkflowAgent:
         requires_customer = confirmation_required(requests)
         needs_clarification = clarification_required(requests)
         is_complete = completion_satisfied(requests, decision_facts)
+        is_partial = partial_completion_satisfied(requests, decision_facts)
         is_ready = readiness_satisfied(requests, decision_facts)
         if unsupported_workflows:
             # Router 的语义已通过白名单，但 Control Plane 没有对应 SOP 时，
             # 不能让空计划伪装成完成；必须把覆盖缺口暴露给 Case/客户边界。
             goal_status = "blocked"
-            next_action = "ESCALATE_OR_EXPLAIN"
+            next_action = "EXPLAIN_LIMITATION_OR_HANDOFF"
             reason = "workflow_unsupported"
-            next_actor = "STAFF"
+            next_actor = "NONE"
         elif needs_clarification:
             goal_status = "awaiting_customer"
             next_action = "ASK_CLARIFICATION"
@@ -555,29 +587,48 @@ class SupportWorkflowAgent:
             next_action = "ASK_CUSTOMER_TO_CHECK_ORDER"
             reason = "order_not_found_or_not_owned"
             next_actor = "CUSTOMER"
-        elif runtime_unavailable_tools:
-            goal_status = "blocked"
-            next_action = "ESCALATE_OR_EXPLAIN"
-            reason = "capability_unavailable"
-            next_actor = "STAFF"
-        elif failed_tools:
-            goal_status = "blocked"
-            next_action = "RETRY_OR_ESCALATE"
-            reason = "fact_tool_failed"
-            next_actor = "STAFF"
-        elif unavailable_capabilities:
-            # A workflow-declared capability is part of the execution contract.
-            # It must block completion even when a narrower set of observed facts
-            # happens to satisfy the shared completion predicate.
-            goal_status = "blocked"
-            next_action = "ESCALATE_OR_EXPLAIN"
-            reason = "capability_unavailable"
-            next_actor = "STAFF"
+        elif runtime_unavailable_tools or failed_tools or unavailable_capabilities:
+            # A missing read capability is not itself a human handoff.  When a
+            # Workflow explicitly declares a safe partial predicate, return the
+            # verified facts plus a limitation and let the conversation continue.
+            # Otherwise block the requested operation, but only offer—not create—
+            # human escalation.  AWAITING_STAFF is reserved for a real ticket.
+            gap_reason = "fact_tool_failed" if failed_tools else "capability_unavailable"
+            if is_partial:
+                goal_status = "resolved_with_limitation"
+                next_action = "EXPLAIN_LIMITATION"
+                reason = gap_reason
+                next_actor = "NONE"
+            else:
+                goal_status = "blocked"
+                next_action = "EXPLAIN_LIMITATION_OR_HANDOFF"
+                reason = gap_reason
+                next_actor = "NONE"
         elif is_complete:
             # Completion 以独立的业务事实谓词为准，而不是以计划中的每个能力是否
             # 都执行过为准。典型例子是 refund.request：如果已经查到既有退款记录，
             # 就应解释该退款状态，不能继续要求资格查询或生成新的申请入口。
-            if (
+            pending_payment_refund = decision_facts.get("order_status") == "PENDING_PAYMENT" and any(
+                str(request.get("domain") or "") == "refund"
+                and str(request.get("operation") or "") in {"request", "eligibility"}
+                for request in requests
+            )
+            pending_order_cancel = (
+                any(
+                    str(request.get("domain") or "") == "order" and str(request.get("operation") or "") == "cancel"
+                    for request in requests
+                )
+                and decision_facts.get("order_status") == "PENDING_PAYMENT"
+            )
+            if pending_payment_refund:
+                goal_status = "resolved_with_explanation"
+                next_action = "SELF_SERVICE_ORDER_CANCEL"
+                reason = "pending_payment_has_no_refund"
+            elif pending_order_cancel:
+                goal_status = "resolved"
+                next_action = "SELF_SERVICE_ORDER_CANCEL"
+                reason = "pending_order_cancel_handoff"
+            elif (
                 decision_facts.get("exchange_eligibility") is False
                 or decision_facts.get("price_protection_eligibility") is False
                 or decision_facts.get("refund_eligibility") is False
@@ -602,7 +653,7 @@ class SupportWorkflowAgent:
             goal_status = "unresolved"
             next_action = "LOOKUP"
             reason = "required_fact_missing"
-            next_actor = "SYSTEM" if int(state.get("replan_count", 0)) == 0 else "STAFF"
+            next_actor = "SYSTEM" if int(state.get("replan_count", 0)) == 0 else "NONE"
         elif requires_customer and is_ready:
             goal_status = "awaiting_confirmation"
             next_action = "AWAITING_CONFIRMATION"
@@ -612,12 +663,12 @@ class SupportWorkflowAgent:
             goal_status = "unresolved"
             next_action = "LOOKUP_OR_EXPLAIN_LIMIT"
             reason = "completion_criteria_not_satisfied"
-            next_actor = "SYSTEM" if int(state.get("replan_count", 0)) == 0 else "STAFF"
+            next_actor = "SYSTEM" if int(state.get("replan_count", 0)) == 0 else "NONE"
         elif "[ESCALATE]" in result.answer:
             goal_status = "blocked"
-            next_action = "ESCALATE"
+            next_action = "EXPLAIN_LIMITATION_OR_HANDOFF"
             reason = "model_requested_escalation"
-            next_actor = "STAFF"
+            next_actor = "NONE"
         else:
             goal_status = "resolved"
             next_action = "ANSWER"
@@ -631,6 +682,7 @@ class SupportWorkflowAgent:
             "awaiting_confirmation": "AWAITING_CONFIRMATION",
             "resolved": "RESOLVED",
             "resolved_with_explanation": "RESOLVED",
+            "resolved_with_limitation": "RESOLVED_WITH_LIMITATION",
         }.get(goal_status, "READY_TO_EXECUTE")
 
         return {
@@ -665,7 +717,27 @@ class SupportWorkflowAgent:
             "pending_choices": SupportWorkflowAgent._pending_order_choices(facts),
             "actions_taken": actions_taken[:16],
             "resolution_type": (
-                "SELF_SERVICE_HANDOFF"
+                "SELF_SERVICE_ORDER_CANCEL"
+                if is_complete
+                and (
+                    (
+                        decision_facts.get("order_status") == "PENDING_PAYMENT"
+                        and any(
+                            str(request.get("domain") or "") == "order"
+                            and str(request.get("operation") or "") == "cancel"
+                            for request in requests
+                        )
+                    )
+                    or (
+                        decision_facts.get("order_status") == "PENDING_PAYMENT"
+                        and any(
+                            str(request.get("domain") or "") == "refund"
+                            and str(request.get("operation") or "") in {"request", "eligibility"}
+                            for request in requests
+                        )
+                    )
+                )
+                else "SELF_SERVICE_HANDOFF"
                 if is_complete
                 and any(
                     str(request.get("domain") or "") == "refund" and str(request.get("operation") or "") == "request"
@@ -689,6 +761,13 @@ class SupportWorkflowAgent:
         tool_context: ToolContext | None = None,
     ) -> LoopResult:
         """执行一次复杂客服图；Case 在下一轮通过服务层恢复。"""
+        selected = self._selected_order_id(selected_subjects or {})
+        if selected and isinstance(tool_context, ToolContext):
+            # Case subject is authoritative for every read in this workflow,
+            # including the deterministic pre-read phase.  Do not wait until
+            # AgentLoop to add the binding: Registry must enforce the same
+            # order mismatch guard for _read_facts as it does for model calls.
+            tool_context = replace(tool_context, selected_order_id=selected)
         state: SupportWorkflowState = {
             "query": query,
             "context": context,

@@ -20,6 +20,8 @@ from service.customer_support_policy import CustomerSupportAction, decide_custom
         ("退款失败", CustomerSupportAction.CREATE_TICKET),
         ("退款金额不对", CustomerSupportAction.CREATE_TICKET),
         ("支付重复扣款了", CustomerSupportAction.CREATE_TICKET),
+        ("支付失败怎么回事", CustomerSupportAction.ASK_FOR_CLARIFICATION),
+        ("付款失败，帮我看看", CustomerSupportAction.ASK_FOR_CLARIFICATION),
         ("电脑坏了，怎么办", CustomerSupportAction.OFFER_WARRANTY_TROUBLESHOOTING),
         ("我的设备开不了机，帮我看看", CustomerSupportAction.OFFER_WARRANTY_TROUBLESHOOTING),
         ("电脑冒烟了", CustomerSupportAction.CREATE_TICKET),

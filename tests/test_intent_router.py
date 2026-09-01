@@ -51,12 +51,27 @@ class TestIntent:
         assert intent.state == "unknown"
         assert intent.required_tools == []
         assert intent.requests == []
+        assert intent.subject_relation == "unknown"
 
 
 # =============================================================================
 # IntentRouter.route 正常场景
 # =============================================================================
 class TestRouteNormal:
+    @pytest.mark.asyncio
+    async def test_router_keeps_semantic_subject_relation_without_accepting_an_order_id(self):
+        router = _router(
+            '{"query":"什么时候到账","target":"agent","speech_act":"INFORMATION_QUERY",'
+            '"domain":"refund","operation":"expected_arrival","requests":[{"domain":"refund",'
+            '"operation":"expected_arrival","next_step":"LOOKUP","risk":"read_only"}],'
+            '"subject_relation":"same","confidence":0.9}'
+        )
+
+        intent = await router.route("什么时候到账", case_context='{"recent_verified_subject":{"subject_id":"SO-A"}}')
+
+        assert intent.subject_relation == "same"
+        assert intent.support_requests[0].subject_refs == []
+
     @pytest.mark.asyncio
     async def test_desktop_build_bypasses_classifier_and_uses_plan_execute(self):
         router = _router("not valid JSON")
@@ -67,6 +82,16 @@ class TestRouteNormal:
         assert intent.scenario == "build_pc"
         assert intent.query == "我有 8000 块预算，想配一台能玩 3A 游戏的台式电脑"
         assert intent.confidence == 1.0
+
+    @pytest.mark.asyncio
+    async def test_pending_order_cancel_is_distinct_from_refund_cancel(self):
+        router = _router("not valid JSON")
+
+        order_cancel = await router.route("这笔订单不买了，帮我取消订单")
+        refund_cancel = await router.route("帮我取消退款申请")
+
+        assert (order_cancel.domain, order_cancel.operation) == ("order", "cancel")
+        assert (refund_cancel.domain, refund_cancel.operation) == ("refund", "cancel")
 
     @pytest.mark.asyncio
     async def test_troubleshooting_routes_to_knowledge_rag_not_planning_graph(self):

@@ -99,7 +99,7 @@ class CheckPaymentStatus(BaseTool):
                     status="success",
                     data={
                         "payment_checked": True,
-                        "payment_result": "支付成功",
+                        "payment_result": "PAID",
                         "order": current_order,
                     },
                 )
@@ -117,14 +117,42 @@ class CheckPaymentStatus(BaseTool):
                 status="success",
                 data={
                     "payment_checked": True,
-                    "payment_result": "支付成功" if paid else "订单尚未支付",
+                    "payment_result": "PAID" if paid else "PENDING",
                     "order": refreshed[0],
                 },
             )
         except PaymentNotCreatedError:
-            return ToolResult(name=self.name, status="error", error="该订单尚未打开支付宝付款页，请从订单页继续付款")
+            # “还没有支付交易”是可信的查询结论，不是工具失败；由受控响应边界
+            # 告诉客户从订单页继续付款，不能让模型补写失败原因。
+            return ToolResult(
+                name=self.name,
+                status="success",
+                data={
+                    "payment_checked": True,
+                    "payment_result": "PAYMENT_NOT_CREATED",
+                    "order": current_order or {"order_id": selected_order_id, "status": "PENDING_PAYMENT"},
+                },
+            )
         except PaymentStatusUnavailableError:
-            return ToolResult(name=self.name, status="error", error="支付宝暂时无法确认支付状态，请稍后重试")
+            # ConnectError、5xx 与网关错误均是 UNKNOWN/UNAVAILABLE；绝不把它们
+            # 降级为“支付失败”，更不能让 Agent 猜余额、银行卡或花呗原因。
+            return ToolResult(
+                name=self.name,
+                status="success",
+                data={
+                    "payment_checked": False,
+                    "payment_result": "PAYMENT_STATUS_UNAVAILABLE",
+                    "order": current_order or {"order_id": selected_order_id, "status": "PENDING_PAYMENT"},
+                },
+            )
         except Exception:
             logger.error("支付状态查询失败")
-            return ToolResult(name=self.name, status="error", error="支付状态查询失败")
+            return ToolResult(
+                name=self.name,
+                status="success",
+                data={
+                    "payment_checked": False,
+                    "payment_result": "PAYMENT_STATUS_UNAVAILABLE",
+                    "order": current_order or {"order_id": selected_order_id, "status": "PENDING_PAYMENT"},
+                },
+            )

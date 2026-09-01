@@ -33,9 +33,12 @@ SupportCaseEventType = Literal[
     "CASE_CANCELLED",
 ]
 
-OPEN_CASE_STATUSES = {"ACTIVE", "AWAITING_CUSTOMER", "AWAITING_STAFF"}
+OPEN_CASE_STATUSES = {"ACTIVE", "AWAITING_CUSTOMER"}
+# Staff-owned cases remain open for ticket audit, but they are not an active
+# customer-chat workflow and must not occupy the session's one automatic Case.
+STAFF_CASE_STATUSES = {"AWAITING_STAFF"}
 TERMINAL_CASE_STATUSES = {"COMPLETED", "FAILED", "CANCELLED"}
-_ALL_CASE_STATUSES = OPEN_CASE_STATUSES | TERMINAL_CASE_STATUSES
+_ALL_CASE_STATUSES = OPEN_CASE_STATUSES | STAFF_CASE_STATUSES | TERMINAL_CASE_STATUSES
 _ALL_EVENT_TYPES = {
     "CASE_CREATED",
     "REQUESTS_UPDATED",
@@ -119,7 +122,7 @@ async def get_open_case(*, session_id: UUID, customer_user_id: int) -> SupportCa
             FROM public.support_cases
             WHERE session_id = %s
               AND customer_user_id = %s
-              AND status IN ('ACTIVE', 'AWAITING_CUSTOMER', 'AWAITING_STAFF')
+              AND status IN ('ACTIVE', 'AWAITING_CUSTOMER')
             ORDER BY updated_at DESC, id DESC
             LIMIT 1
             """,
@@ -178,11 +181,31 @@ async def create_open_case(
     session_id: UUID,
     customer_user_id: int,
     request_stack: list[dict[str, Any]],
-) -> SupportCase:
-    """创建或返回同一会话已有的活动 Case。
+    selected_subjects: dict[str, Any] | None = None,
+    event_payload: dict[str, Any] | None = None,
+    require_new: bool = False,
+    initial_status: SupportCaseStatus = "ACTIVE",
+    initial_verified_facts: dict[str, Any] | None = None,
+    initial_pending: dict[str, Any] | None = None,
+    initial_pending_command: dict[str, Any] | None = None,
+    initial_event_type: SupportCaseEventType | None = None,
+) -> SupportCase | None:
+    """原子创建或返回同一会话已有的活动 Case。
 
-    部分唯一索引确保并发的两次聊天请求不会生成两条同时活动的 Case。
+    部分唯一索引确保并发的两次聊天请求不会生成两条同时活动的 Case。需要非 ACTIVE
+    初始状态的调用方必须使用 ``require_new=True``，这样状态、pending 和首个审计事件
+    会在同一个事务中提交，避免出现没有 pending 的裸 derived Case。
     """
+    if initial_status not in OPEN_CASE_STATUSES:
+        raise ValueError("new support case must start in an open state")
+    if initial_status != "ACTIVE" and not require_new:
+        raise ValueError("non-active initial case requires require_new")
+    event_type = initial_event_type or (
+        "AWAITING_CUSTOMER" if initial_status == "AWAITING_CUSTOMER" else "CASE_CREATED"
+    )
+    if event_type not in _ALL_EVENT_TYPES:
+        raise ValueError(f"invalid initial support case event type: {event_type}")
+
     connection = await get_connection()
     try:
         async with connection.transaction():
@@ -192,25 +215,38 @@ async def create_open_case(
                 FROM public.support_cases
                 WHERE session_id = %s
                   AND customer_user_id = %s
-                  AND status IN ('ACTIVE', 'AWAITING_CUSTOMER', 'AWAITING_STAFF')
+                  AND status IN ('ACTIVE', 'AWAITING_CUSTOMER')
                 FOR UPDATE
                 """,
                 (session_id, customer_user_id),
             )
             existing = await cursor.fetchone()
             if existing is not None:
+                if require_new:
+                    return None
                 return _case_from_row(existing)
 
             case_id = uuid4()
             cursor = await connection.execute(
                 f"""
                 INSERT INTO public.support_cases (
-                    id, session_id, customer_user_id, request_stack
-                ) VALUES (%s, %s, %s, %s)
+                    id, session_id, customer_user_id, status, request_stack, selected_subjects,
+                    verified_facts, pending, pending_command
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT DO NOTHING
                 RETURNING {_CASE_COLUMNS}
                 """,
-                (case_id, session_id, customer_user_id, Jsonb(request_stack)),
+                (
+                    case_id,
+                    session_id,
+                    customer_user_id,
+                    initial_status,
+                    Jsonb(request_stack),
+                    Jsonb(selected_subjects or {}),
+                    Jsonb(initial_verified_facts or {}),
+                    Jsonb(initial_pending or {}),
+                    Jsonb(initial_pending_command or {}),
+                ),
             )
             created = await cursor.fetchone()
             if created is None:
@@ -222,7 +258,7 @@ async def create_open_case(
                     FROM public.support_cases
                     WHERE session_id = %s
                       AND customer_user_id = %s
-                      AND status IN ('ACTIVE', 'AWAITING_CUSTOMER', 'AWAITING_STAFF')
+                      AND status IN ('ACTIVE', 'AWAITING_CUSTOMER')
                     ORDER BY updated_at DESC, id DESC
                     LIMIT 1
                     """,
@@ -231,14 +267,20 @@ async def create_open_case(
                 existing_after_conflict = await cursor.fetchone()
                 if existing_after_conflict is None:
                     raise RuntimeError("support case creation failed")
+                if require_new:
+                    return None
                 return _case_from_row(existing_after_conflict)
             case = _case_from_row(created)
             await connection.execute(
                 """
                 INSERT INTO public.support_case_events(case_id, event_type, payload)
-                VALUES (%s, 'CASE_CREATED', %s)
+                VALUES (%s, %s, %s)
                 """,
-                (case.case_id, Jsonb({"request_count": len(request_stack)})),
+                (
+                    case.case_id,
+                    event_type,
+                    Jsonb(event_payload or {"request_count": len(request_stack)}),
+                ),
             )
             return case
     finally:

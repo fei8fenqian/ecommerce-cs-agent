@@ -46,6 +46,12 @@ class WorkflowDefinition:
     completion_criteria: Callable[[dict[str, Any]], bool]
     readiness_criteria: Callable[[dict[str, Any]], bool] | None = None
     write_confirmation_required: bool = False
+    # A capability gap does not always mean that every customer-visible answer
+    # is unsafe.  This predicate is deliberately narrower than full completion:
+    # it permits a verified partial answer while the missing capability remains
+    # visible as a limitation.  It never authorizes a write or fabricates the
+    # missing transaction fact.
+    partial_completion_criteria: Callable[[dict[str, Any]], bool] | None = None
 
 
 def _has_status(facts: dict[str, Any], key: str) -> bool:
@@ -62,12 +68,20 @@ def _shipment_complete(facts: dict[str, Any]) -> bool:
     )
 
 
+def _shipment_partial_complete(facts: dict[str, Any]) -> bool:
+    return _has_status(facts, "order_identified") and _has_status(facts, "shipping_status")
+
+
 def _after_sales_complete(facts: dict[str, Any]) -> bool:
     return _has_status(facts, "service_order_identified") and _has_status(facts, "service_order_status")
 
 
 def _pickup_complete(facts: dict[str, Any]) -> bool:
     return _after_sales_complete(facts) and _has_status(facts, "pickup_status")
+
+
+def _after_sales_partial_complete(facts: dict[str, Any]) -> bool:
+    return _after_sales_complete(facts)
 
 
 def _transition_complete(facts: dict[str, Any]) -> bool:
@@ -115,6 +129,10 @@ def _refund_destination_complete(facts: dict[str, Any]) -> bool:
 
 
 def _refund_eligibility_complete(facts: dict[str, Any]) -> bool:
+    if _pending_payment_order(facts):
+        # 尚未付款时不存在已支付款项的退款资格；这是可解释的已知业务结论，
+        # 不应再进入已付款订单的退款 SOP。
+        return _has_status(facts, "order_identified")
     return _has_status(facts, "order_identified") and _has_status(facts, "refund_eligibility")
 
 
@@ -127,6 +145,8 @@ def _refund_request_ready(facts: dict[str, Any]) -> bool:
 
 
 def _refund_request_complete(facts: dict[str, Any]) -> bool:
+    if _pending_payment_order(facts):
+        return _has_status(facts, "order_identified")
     if _refund_complete(facts) and facts.get("refund_status") != "NOT_FOUND":
         # 当前订单已经有退款记录；不能再次创建，客服应转为说明现有退款状态。
         return True
@@ -136,6 +156,26 @@ def _refund_request_complete(facts: dict[str, Any]) -> bool:
     # 退款由客户在官方自助页提交。入口交付完成的是客服 Goal，不是退款已创建或
     # 资金已成功退回；后续状态必须再由 query_refund_status 读取真实业务事实。
     return _refund_request_ready(facts) and _has_status(facts, "refund_entry")
+
+
+def _pending_payment_order(facts: dict[str, Any]) -> bool:
+    return facts.get("order_status") == "PENDING_PAYMENT" and _has_status(facts, "order_identified")
+
+
+def _payment_status_complete(facts: dict[str, Any]) -> bool:
+    return _has_status(facts, "order_identified") and facts.get("payment_status") in {
+        "PAID",
+        "PENDING",
+        "NOT_PAID",
+        "PAYMENT_NOT_CREATED",
+        "PAYMENT_STATUS_UNAVAILABLE",
+    }
+
+
+def _order_cancel_complete(facts: dict[str, Any]) -> bool:
+    # 聊天只提供经过核验的自助入口，不代替客户取消订单。订单状态已经查到时，
+    # 无论是否仍可取消，都能给出确定性说明。
+    return _has_status(facts, "order_identified") and _has_status(facts, "order_status")
 
 
 def _refund_cancel_ready(facts: dict[str, Any]) -> bool:
@@ -178,6 +218,11 @@ def _refund_ready(facts: dict[str, Any]) -> bool:
 
 def _always_if_fact(fact: str) -> Callable[[dict[str, Any]], bool]:
     return lambda facts: _has_status(facts, fact)
+
+
+def _always_complete(_: dict[str, Any]) -> bool:
+    """Deterministic informational workflow with no business fact lookup."""
+    return True
 
 
 # 这是当前客服 Control Plane 的小型 Capability Registry。它描述业务能力的
@@ -325,6 +370,21 @@ def is_capability_available(name: str) -> bool:
 
 
 _WORKFLOWS = {
+    "payment.check_payment_status": WorkflowDefinition(
+        "payment.check_payment_status",
+        (FactRequirement("payment_status", "check_payment_status"),),
+        ("payment_status",),
+        _payment_status_complete,
+    ),
+    "order.cancel": WorkflowDefinition(
+        "order.cancel",
+        (
+            FactRequirement("order_identified", "track_order"),
+            FactRequirement("order_status", "track_order", ("order_identified",)),
+        ),
+        ("order_identified", "order_status"),
+        _order_cancel_complete,
+    ),
     "delivery.track_order": WorkflowDefinition(
         "delivery.track_order",
         (
@@ -335,6 +395,7 @@ _WORKFLOWS = {
         ),
         ("order_identified", "order_status", "shipping_status", "expected_ship_time"),
         _shipment_complete,
+        partial_completion_criteria=_shipment_partial_complete,
     ),
     "after_sales.check_after_sales": WorkflowDefinition(
         "after_sales.check_after_sales",
@@ -369,6 +430,7 @@ _WORKFLOWS = {
         ),
         ("service_order_identified", "service_order_status", "pickup_status"),
         _pickup_complete,
+        partial_completion_criteria=_after_sales_partial_complete,
     ),
     "inventory.check_stock": WorkflowDefinition(
         "inventory.check_stock",
@@ -385,6 +447,12 @@ _WORKFLOWS = {
         ("order_identified", "refund_status"),
         _refund_complete,
         readiness_criteria=_refund_ready,
+    ),
+    "refund.procedure": WorkflowDefinition(
+        "refund.procedure",
+        (),
+        (),
+        _always_complete,
     ),
     "refund.refund_detail": WorkflowDefinition(
         "refund.refund_detail",
@@ -410,6 +478,7 @@ _WORKFLOWS = {
         ),
         ("order_identified", "refund_status", "expected_arrival_time"),
         _refund_expected_arrival_complete,
+        partial_completion_criteria=_refund_complete,
     ),
     "refund.processing_time": WorkflowDefinition(
         "refund.processing_time",
@@ -420,6 +489,7 @@ _WORKFLOWS = {
         ),
         ("order_identified", "refund_status", "refund_processing_sla"),
         _refund_processing_time_complete,
+        partial_completion_criteria=_refund_complete,
     ),
     "refund.anomaly": WorkflowDefinition(
         "refund.anomaly",
@@ -430,6 +500,7 @@ _WORKFLOWS = {
         ),
         ("order_identified", "refund_status", "refund_failure_reason"),
         _refund_anomaly_complete,
+        partial_completion_criteria=_refund_complete,
     ),
     "refund.destination": WorkflowDefinition(
         "refund.destination",
@@ -440,6 +511,7 @@ _WORKFLOWS = {
         ),
         ("order_identified", "refund_status", "refund_destination"),
         _refund_destination_complete,
+        partial_completion_criteria=_refund_complete,
     ),
     "refund.eligibility": WorkflowDefinition(
         "refund.eligibility",
@@ -470,6 +542,7 @@ _WORKFLOWS = {
         ),
         ("order_identified", "refund_status", "refund_cancel_eligibility"),
         _refund_cancel_complete,
+        partial_completion_criteria=_refund_complete,
     ),
     "return.refund_dependency": WorkflowDefinition(
         "return.refund_dependency",
@@ -548,6 +621,26 @@ def completion_satisfied(requests: list[dict[str, Any]], facts: dict[str, Any]) 
             return False
         workflows.append(workflow)
     return all(workflow.completion_criteria(facts) for workflow in workflows)
+
+
+def partial_completion_satisfied(requests: list[dict[str, Any]], facts: dict[str, Any]) -> bool:
+    """Return whether every request has a safe, explicitly declared partial answer.
+
+    A partial answer is a presentation/degradation rule, never a substitute for
+    the Workflow's full completion criteria.  Workflows without an explicit
+    predicate remain hard-blocked when a required capability is unavailable.
+    """
+    if not requests or clarification_required(requests):
+        return False
+    predicates: list[Callable[[dict[str, Any]], bool]] = []
+    for request in requests:
+        if _is_conversation_noop(request):
+            continue
+        workflow = resolve_workflow(request)
+        if workflow is None or workflow.partial_completion_criteria is None:
+            return False
+        predicates.append(workflow.partial_completion_criteria)
+    return bool(predicates) and all(predicate(facts) for predicate in predicates)
 
 
 def readiness_satisfied(requests: list[dict[str, Any]], facts: dict[str, Any]) -> bool:
@@ -780,10 +873,12 @@ def extract_decision_facts(capability: str, data: dict[str, Any]) -> dict[str, A
     if capability == "check_payment_status":
         payment_facts: dict[str, Any] = {}
         payment_result = str(data.get("payment_result") or "")
-        if payment_result == "支付成功":
+        if payment_result in {"支付成功", "PAID"}:
             payment_facts["payment_status"] = "PAID"
-        elif payment_result:
+        elif payment_result in {"订单尚未支付", "PENDING", "NOT_PAID"}:
             payment_facts["payment_status"] = "PENDING"
+        elif payment_result in {"PAYMENT_NOT_CREATED", "PAYMENT_STATUS_UNAVAILABLE"}:
+            payment_facts["payment_status"] = payment_result
         order = data.get("order")
         if isinstance(order, dict):
             if order.get("order_id") not in (None, ""):

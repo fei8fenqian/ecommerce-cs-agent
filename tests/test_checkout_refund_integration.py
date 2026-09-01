@@ -6,6 +6,8 @@
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from datetime import datetime
+from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
 import psycopg
@@ -19,15 +21,19 @@ from agent.tools.track_order import TrackOrder
 from agent.tools_registry import ToolContext, ToolRegistry
 from config import settings
 from infra.db_pool import close_pool, init_pool
+from infra.unionpay_test import UNIONPAY_TIMEZONE, UnionPayQueryResult, UnionPayRefundResult
+from service.checkout_refund_service import confirm_customer_refund
 from store.checkout_refund_store import (
     create_customer_refund_request,
     get_customer_checkout_refund,
     mark_checkout_refund_succeeded,
     start_customer_refund_confirmation,
+    start_finance_refund_approval,
 )
+from store.checkout_store import mark_fulfillment_shipped
 
 TARGET_DATABASE = "ecommerce_agent_refund_test"
-EXPECTED_REVISION = "a9e4c7d2f813"
+EXPECTED_REVISION = "c6f4a9e2b817"
 pytestmark = pytest.mark.skipif(
     settings.pg_dbname != TARGET_DATABASE,
     reason=f"checkout refund integration requires {TARGET_DATABASE}",
@@ -170,6 +176,17 @@ async def test_refund_request_confirmation_and_success_are_atomic_and_idempotent
     assert replay.refund_id == created.refund_id
     assert replay.merchant_refund_no == "RFSYN-0001"
 
+    lost_response_retry = await create_customer_refund_request(
+        refund_id=uuid4(),
+        customer_user_id=refund_state.customer_user_id,
+        order_no=refund_state.order_no,
+        merchant_refund_no="RFSYN-should-not-exist-either",
+        request_idempotency_key="request-synthetic-new-browser-key",
+        reason="lost response retry",
+    )
+    assert lost_response_retry is not None
+    assert lost_response_retry.refund_id == created.refund_id
+
     first_confirmation = await start_customer_refund_confirmation(
         customer_user_id=refund_state.customer_user_id,
         refund_id=created.refund_id,
@@ -247,3 +264,171 @@ async def test_support_workflow_reads_real_processing_refund_and_resolves_withou
     assert result.workflow_progress["decision_facts"]["refund_status"] == "PROCESSING"
     assert result.workflow_progress["missing_facts"] == []
     assert "预计到账时间" in result.answer
+
+
+@pytest.mark.asyncio
+async def test_unionpay_refund_persists_processing_time_and_converges_real_postgres(
+    refund_state: RefundIntegrationState,
+) -> None:
+    """真实 Store 状态机：仅银联 HTTP 被 mock，资金绑定仍由真实表验证。"""
+    connection = await psycopg.AsyncConnection.connect(_dsn())
+    try:
+        await connection.execute(
+            """
+            UPDATE public.payment_transactions
+            SET provider = 'unionpay_test', provider_trade_no = 'UP-ORIGINAL-QUERY-1',
+                provider_txn_time = '20260901080000'
+            WHERE id = %s
+            """,
+            (refund_state.payment_transaction_id,),
+        )
+        await connection.commit()
+    finally:
+        await connection.close()
+
+    created = await create_customer_refund_request(
+        refund_id=uuid4(),
+        customer_user_id=refund_state.customer_user_id,
+        order_no=refund_state.order_no,
+        merchant_refund_no="RFSTABLEUNIONPAY001",
+        request_idempotency_key="unionpay-real-store-request-0001",
+        reason="合成银联退款",
+    )
+    assert created is not None
+    assert created.status == "PENDING_CONFIRMATION"
+    assert created.processing_at is None
+
+    client = AsyncMock()
+
+    async def refund_transaction(**kwargs: object) -> UnionPayRefundResult:
+        return UnionPayRefundResult(
+            signature_verified=True,
+            resp_code="00",
+            order_id=str(kwargs["order_id"]),
+            txn_time=str(kwargs["txn_time"]),
+            txn_amt=str(kwargs["txn_amt"]),
+            orig_qry_id=str(kwargs["orig_qry_id"]),
+        )
+
+    async def query_transaction(*, order_id: str, txn_time: str) -> UnionPayQueryResult:
+        return UnionPayQueryResult(
+            signature_verified=True,
+            resp_code="00",
+            orig_resp_code="00",
+            query_id="UP-REFUND-QUERY-1",
+            txn_amt="529900",
+            order_id=order_id,
+            txn_time=txn_time,
+            orig_qry_id="UP-ORIGINAL-QUERY-1",
+        )
+
+    client.refund_transaction.side_effect = refund_transaction
+    client.query_transaction.side_effect = query_transaction
+    with patch("service.checkout_refund_service.UnionPayTestClient.from_settings", return_value=client):
+        result = await confirm_customer_refund(
+            customer_user_id=refund_state.customer_user_id,
+            refund_id=created.refund_id,
+            confirmation_idempotency_key="unionpay-real-store-confirm-0001",
+        )
+
+    assert result.status == "SUCCEEDED"
+    persisted = await get_customer_checkout_refund(refund_state.customer_user_id, created.refund_id)
+    assert persisted is not None and persisted.processing_at is not None
+    expected_txn_time = (
+        datetime.fromisoformat(persisted.processing_at).astimezone(UNIONPAY_TIMEZONE).strftime("%Y%m%d%H%M%S")
+    )
+    assert client.refund_transaction.await_args is not None
+    assert client.refund_transaction.await_args.kwargs["txn_time"] == expected_txn_time
+    assert client.refund_transaction.await_args.kwargs["orig_qry_id"] == "UP-ORIGINAL-QUERY-1"
+    assert client.query_transaction.await_args is not None
+    assert client.query_transaction.await_args.kwargs["txn_time"] == expected_txn_time
+
+    connection = await psycopg.AsyncConnection.connect(_dsn())
+    try:
+        order_cursor = await connection.execute(
+            "SELECT status FROM public.sales_orders WHERE id = %s", (refund_state.sales_order_id,)
+        )
+        refund_cursor = await connection.execute(
+            "SELECT status, processing_at FROM public.checkout_refunds WHERE id = %s", (created.refund_id,)
+        )
+        assert await order_cursor.fetchone() == ("REFUNDED",)
+        status_row = await refund_cursor.fetchone()
+        assert status_row is not None and status_row[0] == "SUCCEEDED" and status_row[1] is not None
+    finally:
+        await connection.close()
+
+
+@pytest.mark.asyncio
+async def test_active_or_finished_refund_blocks_operator_shipping(
+    refund_state: RefundIntegrationState,
+) -> None:
+    """列表过滤之外，实际发货写边界也必须拒绝退款中的/完成订单。"""
+    created = await create_customer_refund_request(
+        refund_id=uuid4(),
+        customer_user_id=refund_state.customer_user_id,
+        order_no=refund_state.order_no,
+        merchant_refund_no="RFRACEPENDING001",
+        request_idempotency_key="race-pending-request-0001",
+        reason="并发边界测试",
+    )
+    assert created is not None
+    assert (
+        await mark_fulfillment_shipped(
+            order_no=refund_state.order_no, carrier="测试物流", tracking_number="RACE-PENDING"
+        )
+        is None
+    )
+
+    started = await start_customer_refund_confirmation(
+        customer_user_id=refund_state.customer_user_id,
+        refund_id=created.refund_id,
+        confirmation_idempotency_key="race-processing-confirm-0001",
+    )
+    assert started is not None and started.refund.status == "PROCESSING"
+    assert (
+        await mark_fulfillment_shipped(
+            order_no=refund_state.order_no, carrier="测试物流", tracking_number="RACE-PROCESSING"
+        )
+        is None
+    )
+
+    succeeded = await mark_checkout_refund_succeeded(refund_id=created.refund_id, provider_refund_reference="RACE-REF")
+    assert succeeded is not None
+    assert (
+        await mark_fulfillment_shipped(
+            order_no=refund_state.order_no, carrier="测试物流", tracking_number="RACE-FINISHED"
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_finance_confirmation_locks_current_fulfillment_and_persists_submission_time(
+    refund_state: RefundIntegrationState,
+) -> None:
+    """财务路径与客户确认使用同一订单/支付/履约提交边界。"""
+    created = await create_customer_refund_request(
+        refund_id=uuid4(),
+        customer_user_id=refund_state.customer_user_id,
+        order_no=refund_state.order_no,
+        merchant_refund_no="RFFINANCETIME001",
+        request_idempotency_key="finance-processing-time-request-0001",
+        reason="高金额合成退款",
+        status="PENDING_FINANCE_APPROVAL",
+    )
+    assert created is not None
+    assert (
+        await mark_fulfillment_shipped(
+            order_no=refund_state.order_no, carrier="测试物流", tracking_number="RACE-FINANCE"
+        )
+        is None
+    )
+    started = await start_finance_refund_approval(
+        finance_user_id=refund_state.customer_user_id,
+        refund_id=created.refund_id,
+        decision_idempotency_key="finance-processing-time-approve-0001",
+        decision_note="合成审批",
+    )
+    assert started is not None and started.should_submit_to_provider
+    assert started.refund.status == "PROCESSING"
+    assert started.refund.processing_at is not None

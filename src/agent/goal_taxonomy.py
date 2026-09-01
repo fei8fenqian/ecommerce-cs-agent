@@ -43,6 +43,7 @@ GOAL_DEFINITIONS: tuple[GoalDefinition, ...] = (
     _goal("product", "device_troubleshooting", "设备故障排查"),
     _goal("product", "product_compatibility", "商品或配件兼容性"),
     _goal("order", "track_order", "查询订单状态", "delivery.track_order"),
+    _goal("order", "cancel", "取消当前本人待支付商城订单", "order.cancel"),
     _goal("order", "execute", "兼容旧订单执行链"),
     _goal("delivery", "track_order", "查询配送或发货状态", "delivery.track_order"),
     _goal("delivery", "delivery_instruction", "修改配送指示"),
@@ -59,7 +60,7 @@ GOAL_DEFINITIONS: tuple[GoalDefinition, ...] = (
     ),
     _goal("after_sales", "exchange", "换货处理"),
     _goal("warranty", "repair", "报修或保修"),
-    _goal("payment", "check_payment_status", "查询支付状态"),
+    _goal("payment", "check_payment_status", "查询支付状态", "payment.check_payment_status"),
     # Refund status-family definitions must remain distinct because their SOP/completion
     # criteria are distinct, even when they share an order/refund read chain.
     _goal(
@@ -101,7 +102,12 @@ GOAL_DEFINITIONS: tuple[GoalDefinition, ...] = (
     _goal("refund", "cancel", "撤销或取消已申请的退款", "refund.cancel"),
     _goal("refund", "amount", "退款金额、部分退款、少退或金额不一致", "refund.refund_detail"),
     _goal("refund", "eligibility", "当前订单是否符合退款资格", "refund.eligibility"),
-    _goal("refund", "procedure", "询问如何申请、在哪里申请、操作步骤或一般退款流程"),
+    _goal(
+        "refund",
+        "procedure",
+        "询问如何申请、在哪里申请、操作步骤或一般退款流程",
+        "refund.procedure",
+    ),
     _goal("refund", "clarify", "退款话题存在但当前目标不明确"),
     _goal(
         "return",
@@ -197,3 +203,9 @@ REFUND_GOAL_ROUTING_GUIDANCE = """退款 Goal 必须按以下互斥语义选择�
   不能仅因历史出现过“退货/仓库”就把当前明确的普通退款问题改成该 Goal。
 - price_protection.refund_status：价保退款/价保处理进度。
 after_sales.refund_status、after_sales.refund_request 等不是合法 Goal，绝不输出。"""
+
+ORDER_PAYMENT_ROUTING_GUIDANCE = """订单与支付 Goal 必须保持以下边界：
+- order.cancel：取消当前客户自己的待支付商城订单；只表示取消订单，不是撤销退款。
+- refund.cancel：撤销已经存在的退款申请；绝不能因为“取消”一词改成 order.cancel。
+- payment.check_payment_status：查询当前订单支付状态或支付状态是否能被支付渠道核验；
+  支付渠道不可用时不能猜测支付失败原因。"""

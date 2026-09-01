@@ -305,6 +305,12 @@ class SessionManager:
             assistant_message["_decision_contexts"] = json.loads(
                 json.dumps(result.decision_contexts, ensure_ascii=False)
             )
+        if result.customer_presentation:
+            # 这是已经完成 customer-safe projection 的公开 UI DTO；不能把 raw
+            # response_control 或 decision context 写进这个字段。
+            assistant_message["_presentation"] = json.loads(
+                json.dumps(result.customer_presentation, ensure_ascii=False)
+            )
         new_messages.append(assistant_message)
 
         entities = dict(ctx.last_entities)
@@ -332,15 +338,20 @@ class SessionManager:
         owner_user_id: int,
         query: str,
         answer: str,
+        *,
+        presentation: dict[str, Any] | None = None,
     ) -> None:
-        """只保存 user 和 assistant 两条消息。"""
+        """只保存 user 和 assistant 两条消息及可选 customer-safe presentation。"""
         ctx = await self.get(session_id, owner_user_id)
         if ctx is None:
             return
 
+        assistant_message: dict[str, Any] = {"role": "assistant", "content": answer}
+        if presentation:
+            assistant_message["_presentation"] = json.loads(json.dumps(presentation, ensure_ascii=False))
         new_messages = [
             {"role": "user", "content": query},
-            {"role": "assistant", "content": answer},
+            assistant_message,
         ]
         title = query[:50] if not ctx.title else None
 
