@@ -199,10 +199,14 @@ def _choice_items(result: object, case: object | None) -> list[Mapping[str, Any]
     pending = _field(case, "pending", {})
     case_choices = _field(pending, "choices", []) if isinstance(pending, Mapping) else []
     if isinstance(case_choices, list) and case_choices:
-        return [item for item in case_choices if isinstance(item, Mapping)][:3]
+        # The Case snapshot is already bounded by the server-side subject
+        # discovery projection.  Do not silently drop the fourth candidate:
+        # ordinal selection and the displayed frame must describe the same
+        # candidate set.  Keep a defensive cap for malformed/legacy records.
+        return [item for item in case_choices if isinstance(item, Mapping)][:30]
     progress = _field(result, "workflow_progress", {})
     choices = _field(progress, "pending_choices", [])
-    return [item for item in choices if isinstance(item, Mapping)][:3]
+    return [item for item in choices if isinstance(item, Mapping)][:30]
 
 
 def _choice_presentation(result: object, case: object | None) -> dict[str, Any] | None:

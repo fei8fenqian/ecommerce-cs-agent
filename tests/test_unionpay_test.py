@@ -465,8 +465,6 @@ async def test_refund_request_uses_back_trans_protocol_and_verifies_response(cer
         "merId": client.mer_id,
         "orderId": refund_order_id,
         "txnTime": txn_time,
-        "txnAmt": "100",
-        "origQryId": original_query_id,
         "respCode": "00",
         "signPubKeyCert": base64.b64encode(material.certificate.public_bytes(serialization.Encoding.DER)).decode(
             "ascii"

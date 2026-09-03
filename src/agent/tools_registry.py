@@ -104,6 +104,11 @@ class ToolContext:
     # 当前 Support Case 已经确定的订单 subject。只由服务端注入，Registry 会把它绑定到
     # 订单读取工具，拒绝模型改查另一笔订单。
     selected_order_id: str | None = None
+    # Customer-support operator calls may discover orders with track_order,
+    # but cannot turn an order id observed in that result into a subject by
+    # directly querying it.  The workflow's controlled subject resolver must
+    # bind it first.
+    require_bound_subject: bool = False
 
 
 # =============================================================================
@@ -242,6 +247,13 @@ class ToolRegistry:
                 status="error",
                 error="当前流程未授予调用该工具的权限",
             )
+        if (
+            tool_context is not None
+            and tool_context.require_bound_subject
+            and not tool_context.selected_order_id
+            and name in _SUBJECT_BOUND_TOOL_NAMES - {"track_order"}
+        ):
+            return ToolResult(name=name, status="error", error="subject_not_bound")
         if (
             tool_context is not None
             and tool_context.selected_order_id

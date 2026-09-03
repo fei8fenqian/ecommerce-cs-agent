@@ -308,6 +308,24 @@ async def test_only_finance_can_approve_refund() -> None:
 
 
 @pytest.mark.asyncio
+async def test_finance_can_reconcile_processing_refund_without_approving_again() -> None:
+    refund_id = "11111111-1111-4111-8111-111111111112"
+    result = CustomerRefundResult(
+        refund_id=UUID(refund_id), order_no="SO202609020001", status="PROCESSING",
+        amount_cents=300000, currency="CNY", reason="测试退款",
+        requested_at="2026-09-02T00:00:00+00:00", idempotent_replay=True,
+    )
+    transport = httpx.ASGITransport(app=_app("finance"))
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        with patch("api.checkout.refresh_finance_refund_status", new=AsyncMock(return_value=result)) as refresh:
+            response = await client.post(f"/api/v1/checkout/finance/refunds/{refund_id}/refresh")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "PROCESSING"
+    refresh.assert_awaited_once_with(refund_id=UUID(refund_id))
+
+
+@pytest.mark.asyncio
 async def test_finance_can_reject_refund_without_gateway_call() -> None:
     """驳回命令返回确定性结果，支付网关调用由服务层保证为零。"""
     refund_id = "22222222-2222-4222-8222-222222222222"

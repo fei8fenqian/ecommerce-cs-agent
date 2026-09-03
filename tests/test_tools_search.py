@@ -136,6 +136,34 @@ class TestSearchComponentMeta:
 # =============================================================================
 class TestSearchComponentExecute:
     @pytest.mark.asyncio
+    async def test_component_result_preserves_canonical_identity(self, monkeypatch):
+        async def fake_search(*args, **kwargs):
+            return [
+                {
+                    "id": "cooler-1",
+                    "product_id": "cooler-1",
+                    "product_name": "Peerless Assassin 120",
+                    "display_title": "利民 Peerless Assassin 120",
+                    "category": "cooling_product",
+                    "price": 189,
+                    "content": "高性能风冷散热器",
+                    "score": 0.99,
+                    "normalized": {"brand": "利民"},
+                }
+            ]
+
+        monkeypatch.setattr("agent.tools.search_component.hybrid_search", fake_search)
+        result = await SearchComponent().execute(query="高性能散热器", component="cooler")
+
+        assert result.is_success
+        item = result.data["results"][0]
+        assert item["product_id"] == "cooler-1"
+        assert item["product_name"] == "Peerless Assassin 120"
+        assert item["display_title"] == "利民 Peerless Assassin 120"
+        assert item["product_category"] == "components"
+        assert item["component_category"] == "cooling_product"
+
+    @pytest.mark.asyncio
     async def test_search_cpu(self, _pool):
         """搜索 CPU"""
         tool = SearchComponent()

@@ -19,7 +19,7 @@ class SessionRecord(TypedDict):
     created_at: datetime
     last_active_at: datetime
     message_count: int
-    last_entities: dict[str, str]
+    last_entities: dict[str, Any]
 
 
 class SessionMessage(TypedDict):
@@ -238,7 +238,7 @@ async def append_messages(
     owner_user_id: int,
     messages: list[dict[str, Any]],
     title: str | None = None,
-    last_entities: dict[str, str] | None = None,
+    last_entities: dict[str, Any] | None = None,
 ) -> None:
     """向当前用户的会话追加消息，并自动分配 sequence_no。"""
     if not messages:

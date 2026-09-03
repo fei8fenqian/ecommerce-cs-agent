@@ -10,6 +10,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from agent.product_identity import catalog_brand_aliases, catalog_brand_keys
+
 _ORDINALS = {
     "1": 1,
     "一": 1,
@@ -30,13 +32,22 @@ _SUBJECT_IDENTITY_COMPARATIVE_MARKERS = ("贵一点", "贵的", "金额高", "�
 # a brand such as ``Sony`` cannot be mistaken for an order identifier.
 _SUBJECT_ORDER_ID = re.compile(r"SO(?:[A-Z0-9]*\d[A-Z0-9_-]*|[-_][A-Z0-9_-]+)", re.IGNORECASE)
 _SUBJECT_MODEL = re.compile(r"(?=[a-z0-9_-]*\d)[a-z][a-z0-9_-]*$", re.IGNORECASE)
-_SUBJECT_BRANDS = (
-    "苹果|华为|小米|荣耀|三星|索尼|戴尔|联想|惠普|华硕|宏碁|微软|sony|apple|iphone|dell|lenovo|asus|"
-    "acer|huawei|xiaomi|samsung|bose|macbook"
+_SUBJECT_BRANDS = "|".join(
+    re.escape(alias)
+    for alias in (*catalog_brand_aliases(), "iphone", "macbook")
 )
 _SUBJECT_CATEGORIES = (
     "电脑|笔记本|手机|耳机|平板|相机|显示器|键盘|鼠标|手表|路由器|处理器|显卡|电视|主机|打印机|硬盘|内存"
 )
+_COMPONENT_CATEGORY_ALIASES: dict[str, tuple[str, ...]] = {
+    "solid_state_drive": ("ssd", "固态", "固态硬盘", "固态盘"),
+    "memory": ("ram", "内存", "内存条"),
+    "cooling_product": ("散热器", "cpu散热器", "风冷", "cooler"),
+}
+_CATALOG_CATEGORY_ALIASES: dict[str, tuple[str, ...]] = {
+    "laptops": ("电脑", "笔记本", "笔记本电脑"),
+    "phones": ("手机",),
+}
 _SUBJECT_TRAILING_ATTRIBUTES = re.compile(r"(?:黑色|白色|银色|灰色|金色|蓝色|红色|粉色|绿色|紫色|深空灰|星光色)+$")
 
 
@@ -79,15 +90,90 @@ def _product_tokens(product: str) -> list[str]:
     return [token for token in tokens if token not in {"笔记本", "手机", "电脑", "订单"}]
 
 
+def _model_tokens(value: str) -> set[str]:
+    """Return compact model tokens such as ``iphone16`` or ``kc3000``.
+
+    A bare brand is intentionally not a model token.  This prevents the
+    common ``iphone`` fragment from matching both iPhone 16 and iPhone 17,
+    while keeping model forms that differ only by spaces or hyphens stable.
+    """
+
+    raw = value.casefold()
+    separated = {
+        re.sub(r"[^a-z0-9]", "", token)
+        for token in re.findall(r"[a-z]+[\s_-]*\d+", raw)
+    }
+    if separated:
+        return {token for token in separated if len(token) >= 2}
+    normalized = _normalize(value)
+    return {
+        token
+        for token in re.findall(r"[a-z]+\d[a-z0-9_-]*|\d+[a-z][a-z0-9_-]*", normalized)
+        if len(token) >= 2
+    }
+
+
+def _choice_identity_values(choice: dict[str, Any]) -> list[str]:
+    items = choice.get("items")
+    values: list[str] = [] if isinstance(items, list) and items else [_product_name(choice)]
+    for key, aliases in (
+        ("catalog_category", _CATALOG_CATEGORY_ALIASES),
+        ("component_category", _COMPONENT_CATEGORY_ALIASES),
+    ):
+        category = choice.get(key)
+        if isinstance(category, str):
+            values.extend(aliases.get(category, (category,)))
+    for key in ("catalog_product_id", "product_id"):
+        value = choice.get(key)
+        if isinstance(value, str):
+            values.append(value)
+    if isinstance(items, list):
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("product_name")
+            if isinstance(name, str):
+                values.append(name)
+            category = item.get("catalog_category")
+            if isinstance(category, str):
+                values.extend(_CATALOG_CATEGORY_ALIASES.get(category, (category,)))
+            component_category = item.get("component_category")
+            if isinstance(component_category, str):
+                values.extend(_COMPONENT_CATEGORY_ALIASES.get(component_category, (component_category,)))
+            product_id = item.get("catalog_product_id")
+            if isinstance(product_id, str):
+                values.append(product_id)
+    return values
+
+
 def _matching_choices(query: str, choices: list[dict[str, Any]]) -> list[dict[str, Any]]:
     normalized_query = _normalize(query)
+    query_models = _model_tokens(query)
+    query_has_model_number = bool(query_models)
+    query_brand_keys = catalog_brand_keys(query)
     matches: list[dict[str, Any]] = []
     for choice in choices:
-        product = _normalize(_product_name(choice))
-        if product and product in normalized_query:
+        identities = _choice_identity_values(choice)
+        if any((product := _normalize(value)) and product in normalized_query for value in identities):
             matches.append(choice)
             continue
-        tokens = _product_tokens(_product_name(choice))
+        identity_models = {model for value in identities for model in _model_tokens(value)}
+        if query_models and query_models.intersection(identity_models):
+            matches.append(choice)
+            continue
+        # When the customer supplied a model number, a generic brand token is
+        # not sufficient evidence.  ``iphone16`` must not match iPhone 17.
+        if query_has_model_number:
+            continue
+        identity_brand_keys = frozenset(
+            brand_key
+            for value in identities
+            for brand_key in catalog_brand_keys(value)
+        )
+        if query_brand_keys and query_brand_keys.intersection(identity_brand_keys):
+            matches.append(choice)
+            continue
+        tokens = [token for value in identities for token in _product_tokens(value)]
         if tokens and any(token in normalized_query for token in tokens):
             matches.append(choice)
     return matches
@@ -129,7 +215,12 @@ def match_pending_subject_choices(raw_query: str, choices: object) -> list[dict[
     return []
 
 
-def match_subject_identity_choices(raw_query: str, choices: object) -> list[dict[str, Any]]:
+def match_subject_identity_choices(
+    raw_query: str,
+    choices: object,
+    *,
+    trusted_exclusion_applied: bool = False,
+) -> list[dict[str, Any]]:
     """只按订单号或商品身份匹配 correction 描述。
 
     这是 ``subject_correction_description`` 专用的 discovery helper。它不解释
@@ -140,9 +231,9 @@ def match_subject_identity_choices(raw_query: str, choices: object) -> list[dict
     if not valid:
         return []
     query = _normalize(raw_query)
-    if any(
-        marker in query for marker in (*_SUBJECT_IDENTITY_EXCLUSION_MARKERS, *_SUBJECT_IDENTITY_COMPARATIVE_MARKERS)
-    ):
+    if any(marker in query for marker in _SUBJECT_IDENTITY_COMPARATIVE_MARKERS):
+        return []
+    if not trusted_exclusion_applied and any(marker in query for marker in _SUBJECT_IDENTITY_EXCLUSION_MARKERS):
         return []
 
     exact = [choice for choice in valid if _order_id(choice).lower() in query]
@@ -208,7 +299,10 @@ def looks_like_pending_subject_choice(raw_query: str, choices: object) -> bool:
         return True
     if any(marker in query for marker in ("不是", "不要", "排除", "除了")) and _matching_choices(raw_query, valid):
         return True
-    return len(_matching_choices(raw_query, valid)) == 1
+    # A semantic resolver may narrow an ambiguous natural-language reply to a
+    # subset.  Treat any candidate-bearing description as a reply to this
+    # choice frame, without selecting an order here.
+    return bool(_matching_choices(raw_query, valid))
 
 
 def resolve_pending_subject_choice(

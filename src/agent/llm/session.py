@@ -11,6 +11,7 @@ from typing import Any
 
 import tiktoken
 
+from agent.product_identity import canonical_product_identity, dedupe_product_candidates
 from config import settings
 from store.session_store import (
     SessionMessage,
@@ -56,7 +57,7 @@ class SessionContext:
     title: str = ""
     messages: list[dict[str, Any]] = field(default_factory=list)
     message_sequence_numbers: list[int] = field(default_factory=list)
-    last_entities: dict[str, str] = field(default_factory=dict)
+    last_entities: dict[str, Any] = field(default_factory=dict)
     created_at: float = 0.0
     last_active: float = 0.0
 
@@ -311,10 +312,15 @@ class SessionManager:
             assistant_message["_presentation"] = json.loads(
                 json.dumps(result.customer_presentation, ensure_ascii=False)
             )
+        if result.answer_trace:
+            # Internal observability only; _model_safe_messages removes it
+            # before any later model call and the API never returns this field.
+            assistant_message["_answer_trace"] = json.loads(
+                json.dumps(result.answer_trace, ensure_ascii=False)
+            )
         new_messages.append(assistant_message)
 
-        entities = dict(ctx.last_entities)
-        entities.update(result.last_entities)
+        entities = self._merge_entities(ctx.last_entities, result.last_entities)
         title = query[:50] if not ctx.title else None
 
         await append_session_messages(
@@ -331,6 +337,47 @@ class SessionManager:
         if title is not None:
             ctx.title = title
         ctx.last_active = time.time()
+
+    @staticmethod
+    def _merge_entities(existing: dict[str, Any], incoming: object) -> dict[str, Any]:
+        """Merge session entities with a lifecycle for the product namespace.
+
+        A selected product may coexist with the current server-owned candidate
+        set so later preference turns can refine the choice.  A fresh candidate
+        observation retires the previous selection.  Other namespaces retain
+        the old additive behavior.
+        """
+        result = dict(existing)
+        if not isinstance(incoming, dict):
+            return result
+        product_keys = {"product", "product_id", "product_name", "product_category", "component_category"}
+        candidates = incoming.get("product_candidates")
+        selected = canonical_product_identity(incoming)
+        if isinstance(candidates, list):
+            normalized_candidates = dedupe_product_candidates(
+                [item for item in candidates if isinstance(item, dict)]
+            )
+            if normalized_candidates and selected is None:
+                # A fresh catalog observation replaces the old selection and
+                # becomes the current server-owned comparison set.
+                for key in product_keys:
+                    result.pop(key, None)
+                result["product_candidates"] = normalized_candidates[:12]
+        if selected is not None:
+            # Promotion validates one member of the current candidate set; it
+            # does not make that evidence stale.  Keeping both lets a later
+            # preference turn select another candidate without re-querying or
+            # reconstructing identity from model prose.
+            for key in product_keys:
+                result.pop(key, None)
+            result.update({key: value for key, value in incoming.items() if key in product_keys})
+
+        for key, value in incoming.items():
+            if key in product_keys or key == "product_candidates":
+                continue
+            if isinstance(key, str):
+                result[key] = value
+        return result
 
     async def add_turn_simple(
         self,

@@ -1,5 +1,7 @@
 """面向 Web 商品目录的只读查询，不承担成交、库存扣减或价格快照职责。"""
 
+import re
+import unicodedata
 from typing import Any, Literal, Mapping
 
 from infra.db_pool import get_connection, put_connection
@@ -65,6 +67,24 @@ _SPEC_LABELS = {
 _DETAIL_IGNORED_FIELDS = {"id", "url", "text", "source_url", "name", "brand", "price", "product_name", "category"}
 
 
+def _catalog_query_tokens(query: str) -> list[str]:
+    """Normalize customer catalog input into bounded, duplicate-free tokens."""
+    normalized = unicodedata.normalize("NFKC", query).casefold().strip()
+    tokens = re.findall(r"[a-z0-9]+|[\u3400-\u9fff]+", normalized)
+    return list(dict.fromkeys(token for token in tokens if token))[:8]
+
+
+def _catalog_search_clause(tokens: list[str], *, brand_column: str = "brand") -> tuple[str, tuple[str, ...]]:
+    """Build AND token matching over whitespace-insensitive product/brand text."""
+    if not tokens:
+        return "", ()
+    normalized_name = "regexp_replace(lower(product_name), '\\s+', '', 'g')"
+    normalized_brand = f"regexp_replace(lower({brand_column}), '\\s+', '', 'g')"
+    clauses = [f"({normalized_name} LIKE %s OR {normalized_brand} LIKE %s)" for _ in tokens]
+    params = tuple(value for token in tokens for value in (f"%{token}%", f"%{token}%"))
+    return " AND " + " AND ".join(clauses), params
+
+
 def _image_url(product_id: str, metadata: Any) -> str | None:
     """优先使用元数据图片；旧数据则从源数据索引补齐公开缩略图。"""
     if not isinstance(metadata, dict):
@@ -109,19 +129,19 @@ async def list_products(
     # 两张历史商品表的公共字段相同，但 phone_products 没有 product_type。
     # 目录展示层使用稳定别名，而不是为了一个展示字段改动历史入库表。
     product_type_column = "product_type" if category == "laptops" else "'手机'"
-    normalized_query = query.strip()
+    tokens = _catalog_query_tokens(query)
+    search_sql, search_params = _catalog_search_clause(tokens)
     sql = f"""
         SELECT id, product_name, brand, price, description, {product_type_column} AS product_type,
                status, stock, warehouse, metadata
         FROM {table}
-        WHERE (%s = '' OR product_name ILIKE %s OR brand ILIKE %s)
+        WHERE TRUE {search_sql}
         ORDER BY product_name ASC
         LIMIT %s
     """
-    pattern = f"%{normalized_query}%"
     connection = await get_connection()
     try:
-        cursor = await connection.execute(sql, (normalized_query, pattern, pattern, limit))
+        cursor = await connection.execute(sql, (*search_params, limit))
         products: list[dict[str, Any]] = []
         async for row in cursor:
             (
@@ -178,7 +198,7 @@ async def list_product_page(
     """
     table = _PRODUCT_TABLES[category]
     offset = (page - 1) * page_size
-    normalized_query = query.strip()
+    tokens = _catalog_query_tokens(query)
     normalized_brand = brand.strip()
     normalized_component_category = component_category.strip()
 
@@ -195,16 +215,14 @@ async def list_product_page(
         component_clause = ""
         component_params = ()
 
+    search_sql, search_params = _catalog_search_clause(tokens, brand_column=brand_column)
     where_sql = f"""
-        WHERE (%s = '' OR product_name ILIKE %s OR {brand_column} ILIKE %s)
+        WHERE TRUE {search_sql}
           AND (%s = '' OR {brand_column} = %s)
           {component_clause}
     """
-    pattern = f"%{normalized_query}%"
     filter_params: tuple[str, ...] = (
-        normalized_query,
-        pattern,
-        pattern,
+        *search_params,
         normalized_brand,
         normalized_brand,
         *component_params,

@@ -55,6 +55,7 @@ p, finance, /api/v1/checkout/finance/anomalies, GET
 p, finance, /api/v1/checkout/finance/anomalies/summary, POST
 p, finance, /api/v1/checkout/finance/refunds/*/approve, POST
 p, finance, /api/v1/checkout/finance/refunds/*/reject, POST
+p, finance, /api/v1/checkout/finance/refunds/*/refresh, POST
 
 # ========== admin (internal) ==========
 p, admin, *, .*

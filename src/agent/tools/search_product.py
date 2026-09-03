@@ -66,6 +66,23 @@ class SearchProduct(BaseTool):
                     content = _customer_visible_content(content)
                 results.append(
                     {
+                        # These fields are canonical catalog identity from the
+                        # server-owned retrieval result, not model-provided IDs.
+                        "id": c.get("product_id") or c.get("id"),
+                        "product_id": c.get("product_id") or c.get("id"),
+                        "product_name": c.get("product_name") or c.get("title"),
+                        "display_title": c.get("display_title") or c.get("title"),
+                        "product_category": c.get("category")
+                        if c.get("category") in {"laptops", "phones"}
+                        else ("laptops" if table == "laptop_products" else "phones"),
+                        # Keep the trusted catalog price in the observation so
+                        # a later candidate-preference turn can compare only
+                        # products actually returned by the server.  The model
+                        # still never supplies or promotes a product id.
+                        "price": c.get("price"),
+                        "comparison_metadata": c.get("comparison_metadata")
+                        if isinstance(c.get("comparison_metadata"), dict)
+                        else {},
                         "title": c.get("title"),
                         "content": content[:200] + ("..." if len(content) > 200 else ""),
                         "score": c.get("score"),

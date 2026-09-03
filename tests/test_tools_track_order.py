@@ -125,6 +125,7 @@ class TestCheckoutOrderNormalization:
         )
 
         assert result["status"] == "REFUNDED"
+        assert result["order_status"] == "REFUNDED"
         assert result["tracking"] == {"company": None, "number": None}
         assert result["fulfillment_status"] == "NOT_APPLICABLE"
         assert result["refund"]["status"] == "SUCCEEDED"
@@ -180,7 +181,7 @@ class TestTrackOrderExecute:
             result = await TrackOrder().execute(tool_context=ToolContext(user_id=101, role="customer"))
 
         assert result.is_success is True
-        assert result.data["selection_required"] is True
+        assert result.data["selection_required"] is False
         assert result.data["orders"][0]["delivery_state"] == "NOT_SHIPPED"
         assert result.data["orders"][1]["delivery_state"] == "IN_TRANSIT"
 

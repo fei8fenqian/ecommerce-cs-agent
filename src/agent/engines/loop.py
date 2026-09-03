@@ -1,12 +1,15 @@
 import asyncio
 import json
 import logging
+import re
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 
 from agent.decision_context import merge_decision_contexts
-from agent.llm.llm_client import LLMClient, ToolCall
+from agent.llm.llm_client import LLMClient, LLMResponse, ToolCall
+from agent.product_identity import canonical_product_identity, dedupe_product_candidates, product_match_names
 from agent.tools_registry import ToolContext, ToolRegistry
 from config import settings
 from exceptions import AgentLoopError, DependencyUnavailableError, LLMError
@@ -14,6 +17,24 @@ from exceptions import AgentLoopError, DependencyUnavailableError, LLMError
 logger = logging.getLogger(__name__)
 
 _UNRESOLVED_ANSWER = "抱歉，我暂时无法可靠处理这个问题，请补充具体情况或稍后重试。"
+_PROTOCOL_RETRY_INSTRUCTION = (
+    "上一次模型输出包含内部工具调用协议文本，不能作为客户回答。请重新处理当前请求："
+    "需要调用工具时只能使用正式 structured tool_calls；不需要工具时只输出客户可见的自然语言。"
+    "不要在 content 中输出 DSML、tool_calls、invoke 或其他内部工具协议标记。"
+)
+
+
+def _contains_internal_tool_protocol(content: object) -> bool:
+    """Detect provider/tool protocol markup without interpreting or executing it."""
+    if not isinstance(content, str) or not content:
+        return False
+    normalized = unicodedata.normalize("NFKC", content).casefold()
+    if "dsml" in normalized and ("tool_calls" in normalized or "invoke" in normalized):
+        return True
+    return bool(
+        re.search(r"<\s*(?:tool_calls?|invoke)\b", normalized)
+        or re.search(r"<\s*\|+\s*(?:tool_calls?|invoke)\b", normalized)
+    )
 
 
 DEFAULT_SYSTEM_PROMPT = """你是"极客数码"的 3C 数码全域 AI 客服助手。请遵守以下规则：
@@ -73,7 +94,7 @@ class LoopResult:
     total_steps: int = 0
     total_tokens: int = 0
     total_latency_ms: float = 0.0
-    last_entities: dict[str, str] = field(default_factory=dict)
+    last_entities: dict[str, Any] = field(default_factory=dict)
     # 复杂客服工作流在 AgentLoop 前已读取的、仅来自受控工具的业务事实。普通
     # AgentLoop 保持为空；API 层会把它写回持久化 Support Case。
     verified_facts: dict[str, Any] = field(default_factory=dict)
@@ -88,6 +109,9 @@ class LoopResult:
     response_control: dict[str, Any] = field(default_factory=dict)
     # 已完成安全投影的客户 UI DTO；不包含 raw Control Plane/Decision Context。
     customer_presentation: dict[str, Any] = field(default_factory=dict)
+    # Internal diagnostics only; never exposed as customer copy.
+    answer_source: str = "OPERATOR"
+    answer_trace: dict[str, Any] = field(default_factory=dict)
 
 
 class AgentLoop:
@@ -151,8 +175,10 @@ class AgentLoop:
         recent_tools: list[str] = []
 
         answer = ""
+        verified_facts: dict[str, Any] = {}
         decision_facts: dict[str, Any] = {}
         decision_contexts: list[dict[str, Any]] = []
+        protocol_retry_used = False
 
         for step in range(1, self.max_steps + 1):
             step_start = time.perf_counter()
@@ -165,6 +191,26 @@ class AgentLoop:
                 temperature=settings.temperature,
                 max_tokens=settings.max_tokens,
             )
+            if (
+                not response.has_tool_calls
+                and _contains_internal_tool_protocol(response.content)
+            ):
+                logger.warning("rejected internal tool protocol from model content")
+                if tools and not protocol_retry_used:
+                    protocol_retry_used = True
+                    response = await self.llm.chat(
+                        [*messages, {"role": "system", "content": _PROTOCOL_RETRY_INSTRUCTION}],
+                        tools=tools,
+                        temperature=settings.temperature,
+                        max_tokens=settings.max_tokens,
+                    )
+                if not response.has_tool_calls and _contains_internal_tool_protocol(response.content):
+                    response = LLMResponse(
+                        content=_UNRESOLVED_ANSWER,
+                        model=response.model,
+                        usage=response.usage,
+                        finish_reason=response.finish_reason,
+                    )
             step_latency = (time.perf_counter() - step_start) * 1000
             total_tokens += response.usage.total_tokens
 
@@ -201,6 +247,11 @@ class AgentLoop:
                     tool_context=tool_context,
                     **tool_call.arguments,
                 )
+                verified_facts[tool_call.name] = (
+                    {"status": "success", "data": dict(tool_result.data)}
+                    if tool_result.is_success
+                    else {"status": tool_result.status, "error": tool_result.error[:300]}
+                )
                 if tool_result.is_success:
                     decision_facts.update(tool_result.decision_facts)
                     decision_contexts = merge_decision_contexts(
@@ -234,18 +285,14 @@ class AgentLoop:
             messages.append({"role": "user", "content": "请根据以上信息回答用户问题。"})
             final_response = await self.llm.chat(messages)
             answer = final_response.content or _UNRESOLVED_ANSWER
+            if _contains_internal_tool_protocol(answer):
+                logger.warning("rejected internal tool protocol from final model content")
+                answer = _UNRESOLVED_ANSWER
             total_tokens += final_response.usage.total_tokens
 
-        # 提取本轮涉及的业务实体（用于下一轮指代消解）
-        last_entities: dict[str, str] = {}
-        for sr in step_results:
-            if sr.tool_calls:
-                for tool_call in sr.tool_calls:
-                    args = tool_call.arguments
-                    if "product_name" in args:
-                        last_entities["product"] = str(args["product_name"])
-                    if "order_id" in args:
-                        last_entities["order"] = str(args["order_id"])
+        # 只从服务器拥有的 Tool observation 投影可复用实体。模型的 tool-call
+        # arguments 可能只是搜索词或未经授权的 order_id，不能成为下一轮的权威实体。
+        last_entities = self._last_product_entities_from_observations(verified_facts, answer)
 
         total_latency = (time.perf_counter() - t_start) * 1000
         return LoopResult(
@@ -255,6 +302,7 @@ class AgentLoop:
             total_tokens=total_tokens,
             total_latency_ms=total_latency,
             last_entities=last_entities,
+            verified_facts=verified_facts,
             decision_facts=decision_facts,
             decision_contexts=decision_contexts,
         )
@@ -300,37 +348,60 @@ class AgentLoop:
             length_continuations = 0
             max_length_continuations = 1
             final_answer_parts: list[str] = []
+            verified_facts: dict[str, Any] = {}
             decision_facts: dict[str, Any] = {}
             decision_contexts: list[dict[str, Any]] = []
+            protocol_retry_used = False
 
             yield {"event": "start"}
 
             for step in range(1, self.max_steps + 1):
-                content_buf = ""
-                has_tool_calls = False
-                tool_calls: list[ToolCall] = []
-                was_truncated = False
+                stream_tools = self.registry.to_openai_schemas(tool_context) if length_continuations == 0 else None
+                retry_messages = messages
+                while True:
+                    content_buf = ""
+                    has_tool_calls = False
+                    tool_calls: list[ToolCall] = []
+                    was_truncated = False
 
-                async for chunk in self.llm.chat_stream(
-                    messages,
-                    # 已经开始回答后仅请求续写，不允许模型在续写阶段再发起工具调用。
-                    tools=self.registry.to_openai_schemas(tool_context) if length_continuations == 0 else None,
-                    temperature=settings.temperature,
-                    max_tokens=settings.max_tokens,
-                ):
-                    if chunk["type"] == "content":
-                        content_buf += chunk["content"]
-                        yield {"event": "token", "content": chunk["content"]}
+                    async for chunk in self.llm.chat_stream(
+                        retry_messages,
+                        # 已经开始回答后仅请求续写，不允许模型在续写阶段再发起工具调用。
+                        tools=stream_tools,
+                        temperature=settings.temperature,
+                        max_tokens=settings.max_tokens,
+                    ):
+                        if chunk["type"] == "content":
+                            # Tool-capable turns are buffered until the provider
+                            # protocol boundary is validated.  This prevents a
+                            # textual tool-call encoding from reaching the
+                            # browser before we know whether structured
+                            # ``tool_calls`` were returned.
+                            content_buf += chunk["content"]
 
-                    elif chunk["type"] == "tool_calls":
-                        has_tool_calls = True
-                        tool_calls = chunk["tool_calls"]
+                        elif chunk["type"] == "tool_calls":
+                            has_tool_calls = True
+                            tool_calls = chunk["tool_calls"]
 
-                    elif chunk["type"] == "finish" and chunk.get("reason") == "length":
-                        was_truncated = True
+                        elif chunk["type"] == "finish" and chunk.get("reason") == "length":
+                            was_truncated = True
+
+                    if not has_tool_calls and _contains_internal_tool_protocol(content_buf):
+                        logger.warning("rejected internal tool protocol from streamed model content")
+                        if stream_tools and not protocol_retry_used:
+                            protocol_retry_used = True
+                            retry_messages = [
+                                *messages,
+                                {"role": "system", "content": _PROTOCOL_RETRY_INSTRUCTION},
+                            ]
+                            continue
+                        content_buf = _UNRESOLVED_ANSWER
+                    break
 
                 # 没有工具调用 → 最终回答
                 if not has_tool_calls:
+                    if content_buf:
+                        yield {"event": "token", "content": content_buf}
                     messages.append({"role": "assistant", "content": content_buf})
                     final_answer_parts.append(content_buf)
                     if was_truncated and content_buf and length_continuations < max_length_continuations:
@@ -346,8 +417,13 @@ class AgentLoop:
                         "event": "done",
                         "answer": "".join(final_answer_parts),
                         "total_steps": step,
+                        "verified_facts": verified_facts,
                         "decision_facts": decision_facts,
                         "decision_contexts": decision_contexts,
+                        "last_entities": self._last_product_entities_from_observations(
+                            verified_facts,
+                            "".join(final_answer_parts),
+                        ),
                     }
                     return
 
@@ -378,6 +454,11 @@ class AgentLoop:
                         tool_context=tool_context,
                         **tool_call.arguments,
                     )
+                    verified_facts[tool_call.name] = (
+                        {"status": "success", "data": dict(tool_result.data)}
+                        if tool_result.is_success
+                        else {"status": tool_result.status, "error": tool_result.error[:300]}
+                    )
                     if tool_result.is_success:
                         decision_facts.update(tool_result.decision_facts)
                         decision_contexts = merge_decision_contexts(
@@ -406,12 +487,20 @@ class AgentLoop:
             answer = ""
             for continuation in range(max_length_continuations + 1):
                 was_truncated = False
+                content_buf = ""
                 async for chunk in self.llm.chat_stream(messages, tools=None):
                     if chunk["type"] == "content":
-                        yield {"event": "token", "content": chunk["content"]}
-                        answer += chunk["content"]
+                        content_buf += chunk["content"]
                     elif chunk["type"] == "finish" and chunk.get("reason") == "length":
                         was_truncated = True
+
+                if _contains_internal_tool_protocol(content_buf):
+                    logger.warning("rejected internal tool protocol from streamed final content")
+                    content_buf = _UNRESOLVED_ANSWER
+                    was_truncated = False
+                if content_buf:
+                    yield {"event": "token", "content": content_buf}
+                    answer += content_buf
 
                 if not was_truncated or not answer or continuation == max_length_continuations:
                     break
@@ -427,8 +516,10 @@ class AgentLoop:
                 "event": "done",
                 "answer": answer or _UNRESOLVED_ANSWER,
                 "total_steps": self.max_steps,
+                "verified_facts": verified_facts,
                 "decision_facts": decision_facts,
                 "decision_contexts": decision_contexts,
+                "last_entities": self._last_product_entities_from_observations(verified_facts, answer),
             }
 
         except asyncio.CancelledError:
@@ -456,6 +547,76 @@ class AgentLoop:
         if tool_context is not None and tool_context.role == "customer":
             return self.system_prompt + _CUSTOMER_PROMPT_APPEND
         return self.system_prompt + _INTERNAL_PROMPT_APPEND
+
+    @staticmethod
+    def _product_entities_from_observations(
+        verified_facts: dict[str, Any],
+        answer: str,
+    ) -> dict[str, str]:
+        """Project canonical product identity from trusted search observations.
+
+        Tool arguments contain the user's query, not necessarily the product the
+        model recommended.  Only identity fields returned by the server-owned
+        search tools are eligible here.  When several products were returned,
+        select one only if exactly one candidate is mentioned in the final
+        answer; otherwise leave the product unbound instead of guessing.
+        """
+        candidates = AgentLoop._product_candidates_from_observations(verified_facts)
+        if not candidates:
+            return {}
+
+        normalized_answer = re.sub(r"\s+", "", answer).casefold()
+        mentioned = []
+        for candidate in candidates:
+            if any(
+                re.sub(r"\s+", "", name).casefold() in normalized_answer
+                for name in product_match_names(candidate)
+            ):
+                mentioned.append(candidate)
+        selected = mentioned[0] if len(mentioned) == 1 else candidates[0] if len(candidates) == 1 else None
+        if selected is None:
+            return {}
+        identity = canonical_product_identity(selected)
+        if identity is None:
+            return {}
+        # Keep the historical flat entity contract for pronoun resolution; the
+        # richer product_name is retained inside product_candidates below.
+        return {
+            key: value
+            for key, value in identity.items()
+            if key != "product_name"
+        }
+
+    @staticmethod
+    def _product_candidates_from_observations(
+        verified_facts: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Project all canonical catalog candidates from trusted observations."""
+        rows: list[dict[str, Any]] = []
+        for tool_name in ("search_component", "search_product"):
+            record = verified_facts.get(tool_name)
+            if not isinstance(record, dict) or record.get("status") != "success":
+                continue
+            data = record.get("data")
+            result_rows = data.get("results") if isinstance(data, dict) else None
+            if not isinstance(result_rows, list):
+                continue
+            for row in result_rows:
+                if isinstance(row, dict):
+                    rows.append(row)
+        return dedupe_product_candidates(rows)
+
+    @staticmethod
+    def _last_product_entities_from_observations(
+        verified_facts: dict[str, Any],
+        answer: str,
+    ) -> dict[str, Any]:
+        """Persist a selected product or a bounded server-owned candidate set."""
+        entities: dict[str, Any] = AgentLoop._product_entities_from_observations(verified_facts, answer)
+        candidates = AgentLoop._product_candidates_from_observations(verified_facts)
+        if len(candidates) > 1 and not entities:
+            entities["product_candidates"] = candidates[:12]
+        return entities
 
     def _assistant_message(self, tool_calls: list[ToolCall]) -> dict[str, Any]:
         """构建带 tool_calls 的 assistant 消息"""

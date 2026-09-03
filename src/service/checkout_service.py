@@ -77,6 +77,19 @@ class UnionPayCancellationUnavailableError(CheckoutCancellationUnavailableError)
     """U1 尚未实现银联待支付订单的取消语义。"""
 
 
+def is_checkout_cancel_supported(*, provider: PaymentProviderName, order_status: str) -> bool:
+    """当前结算服务实际提供的客户在线取消能力。"""
+    return order_status == "PENDING_PAYMENT" and provider == "alipay_sandbox"
+
+
+class UnionPayResumePendingError(CheckoutUnavailableError):
+    """银联待支付交易已经存在，不能在未核验前重复打开收银台。"""
+
+
+class UnionPayResumePaidError(CheckoutUnavailableError):
+    """继续支付前的银联查询已将本地订单收敛为已支付。"""
+
+
 @dataclass(frozen=True)
 class UnionPayFrontReturnOutcome:
     """前台回跳处理后的安全结果；支付成功只能来自 queryTrans。"""
@@ -383,6 +396,14 @@ async def resume_checkout_session(
     pending = await get_customer_pending_payment(customer_user_id, order_no)
     if pending is None:
         raise CheckoutUnavailableError("payment is not resumable")
+    if pending.provider == "unionpay_test":
+        # A UnionPay orderId/txnTime identifies one provider transaction.  Do
+        # not generate another front form until queryTrans has proved that a
+        # new attempt is safe; the current protocol layer has no such proof.
+        paid = await refresh_customer_payment_status(customer_user_id=customer_user_id, order_no=order_no)
+        if paid:
+            raise UnionPayResumePaidError("payment has already succeeded")
+        raise UnionPayResumePendingError("payment outcome is still pending")
     return await _build_payment_checkout_session(
         payment_provider=pending.provider,
         order_no=order_no,
@@ -403,9 +424,9 @@ async def cancel_checkout_session(*, customer_user_id: int, order_no: str) -> No
     pending = await get_customer_pending_checkout(customer_user_id, order_no)
     if pending is None:
         raise CheckoutCancellationUnavailableError("checkout is not cancellable")
-    if pending.provider == "unionpay_test":
-        raise UnionPayCancellationUnavailableError("UnionPay pending payment cancellation is not supported in U1")
-    if pending.provider != "alipay_sandbox":
+    if not is_checkout_cancel_supported(provider=pending.provider, order_status="PENDING_PAYMENT"):
+        if pending.provider == "unionpay_test":
+            raise UnionPayCancellationUnavailableError("UnionPay pending payment cancellation is not supported in U1")
         raise CheckoutCancellationUnavailableError("payment provider cancellation is not supported")
 
     # 先主动收敛支付宝事实：支付成功或已被关闭时，不能再盲目调用关闭接口。

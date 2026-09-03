@@ -39,10 +39,18 @@ GOAL_DEFINITIONS: tuple[GoalDefinition, ...] = (
     _goal("general", "clarify", "当前目标无法安全确定，需要澄清"),
     _goal("product", "answer", "商品知识、价格或政策问答"),
     _goal("product", "search_product", "查找商品目录"),
+    # Buying a selected product is a customer goal, not an order-creation
+    # capability.  The customer chat may provide a canonical product page,
+    # while checkout remains an explicit frontend/service boundary.
+    _goal("product", "purchase", "购买已选商品"),
     _goal("product", "build_pc", "装机/配件方案"),
     _goal("product", "device_troubleshooting", "设备故障排查"),
     _goal("product", "product_compatibility", "商品或配件兼容性"),
-    _goal("order", "track_order", "查询订单状态", "delivery.track_order"),
+    _goal("order", "list", "查询当前客户有哪些订单", "order.list"),
+    _goal("order", "status", "查询某一笔订单当前状态", "order.status"),
+    # Kept for persisted/older router output.  It is an order-status query,
+    # not a delivery ETA query.
+    _goal("order", "track_order", "查询订单状态", "order.status"),
     _goal("order", "cancel", "取消当前本人待支付商城订单", "order.cancel"),
     _goal("order", "execute", "兼容旧订单执行链"),
     _goal("delivery", "track_order", "查询配送或发货状态", "delivery.track_order"),

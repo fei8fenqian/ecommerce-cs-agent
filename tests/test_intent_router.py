@@ -15,8 +15,10 @@ class _MockLLM:
     def __init__(self, content: str):
         self._content = content
         self.model = "mock"
+        self.calls = 0
 
     async def chat(self, messages, *, tools=None, temperature=0.0, max_tokens=2048):
+        self.calls += 1
         self.last_messages = messages
         return LLMResponse(
             content=self._content,
@@ -73,8 +75,29 @@ class TestRouteNormal:
         assert intent.support_requests[0].subject_refs == []
 
     @pytest.mark.asyncio
-    async def test_desktop_build_bypasses_classifier_and_uses_plan_execute(self):
-        router = _router("not valid JSON")
+    async def test_router_keeps_explain_previous_scope_without_granting_subject_or_fact(self):
+        router = _router(
+            '{"query":"什么意思","target":"agent","speech_act":"INFORMATION_QUERY",'
+            '"domain":"refund","operation":"expected_arrival","requests":[{"domain":"refund",'
+            '"operation":"expected_arrival","next_step":"LOOKUP","risk":"read_only"}],'
+            '"subject_relation":"same","fact_scope":"explain_previous","confidence":0.9}'
+        )
+
+        intent = await router.route("什么意思", case_context='{"recent_verified_subject":{"subject_id":"SO-A"}}')
+
+        assert intent.fact_scope == "explain_previous"
+        assert intent.subject_relation == "same"
+        prompt = router.llm.last_messages[0]["content"]
+        assert "必须按“上一轮系统查询”表述" not in prompt
+        assert "措辞不限" in prompt
+
+    @pytest.mark.asyncio
+    async def test_desktop_build_uses_router_semantics_for_plan_execute(self):
+        router = _router(
+            '{"target":"plan_execute","scenario":"build_pc","domain":"product",'
+            '"operation":"build_pc","speech_act":"ACTION_REQUEST",'
+            '"requests":[{"domain":"product","operation":"build_pc"}],"confidence":1.0}'
+        )
 
         intent = await router.route("我有 8000 块预算，想配一台能玩 3A 游戏的台式电脑")
 
@@ -82,13 +105,18 @@ class TestRouteNormal:
         assert intent.scenario == "build_pc"
         assert intent.query == "我有 8000 块预算，想配一台能玩 3A 游戏的台式电脑"
         assert intent.confidence == 1.0
+        assert intent.route_source == "llm"
 
     @pytest.mark.asyncio
     async def test_pending_order_cancel_is_distinct_from_refund_cancel(self):
-        router = _router("not valid JSON")
-
-        order_cancel = await router.route("这笔订单不买了，帮我取消订单")
-        refund_cancel = await router.route("帮我取消退款申请")
+        order_cancel = await _router(
+            '{"target":"agent","domain":"order","operation":"cancel",'
+            '"speech_act":"ACTION_REQUEST","confidence":0.95}'
+        ).route("这笔订单不买了，帮我取消订单")
+        refund_cancel = await _router(
+            '{"target":"agent","domain":"refund","operation":"cancel",'
+            '"speech_act":"ACTION_REQUEST","confidence":0.95}'
+        ).route("帮我取消退款申请")
 
         assert (order_cancel.domain, order_cancel.operation) == ("order", "cancel")
         assert (refund_cancel.domain, refund_cancel.operation) == ("refund", "cancel")
@@ -123,6 +151,51 @@ class TestRouteNormal:
         assert intent.target == "agent"
 
     @pytest.mark.asyncio
+    async def test_raw_query_remains_semantic_authority_and_rewrite_is_retrieval_only(self):
+        router = _router(
+            '{"query":"金士顿 NV2 1TB 固态硬盘","target":"agent",'
+            '"domain":"product","operation":"search_product",'
+            '"speech_act":"INFORMATION_QUERY","confidence":0.95}'
+        )
+
+        intent = await router.route(
+            "刚退款的 SSD 太小了，推荐一个同价位的",
+            semantic_hints='{"recent_order_item_1":{"product":"Acer N3500","unit_amount_cents":19900}}',
+        )
+
+        assert intent.raw_query == "刚退款的 SSD 太小了，推荐一个同价位的"
+        assert intent.retrieval_query == "金士顿 NV2 1TB 固态硬盘"
+        assert intent.query == intent.retrieval_query
+        prompt = router.llm.last_messages[-1]["content"]
+        assert "当前用户问题：\n刚退款的 SSD 太小了，推荐一个同价位的" in prompt
+        assert "recent_order_item_1" in prompt
+
+    @pytest.mark.asyncio
+    async def test_router_schema_failure_retries_once_then_clarifies_without_keyword_router(self):
+        router = _router("not valid JSON")
+
+        intent = await router.route("我想退款刚买的 SSD")
+
+        assert router.llm.calls == 2
+        assert intent.route_source == "fallback"
+        assert intent.speech_act == "CLARIFICATION_NEEDED"
+        assert intent.domain == "general"
+        assert intent.operation == "clarify"
+        assert intent.support_requests == []
+
+    @pytest.mark.asyncio
+    async def test_product_purchase_is_a_goal_without_inventory_tool(self):
+        router = _router(
+            '{"target":"agent","domain":"product","operation":"purchase",'
+            '"speech_act":"ACTION_REQUEST","confidence":0.95}'
+        )
+
+        intent = await router.route("我想买")
+
+        assert (intent.domain, intent.operation) == ("product", "purchase")
+        assert intent.support_requests[0].operation == "purchase"
+
+    @pytest.mark.asyncio
     async def test_agent_target(self):
         router = _router('{"target": "agent", "table": "", "confidence": 0.92}')
         intent = await router.route("拯救者还有货吗")
@@ -130,19 +203,28 @@ class TestRouteNormal:
         assert intent.table == ""  # agent 强制置空
 
     @pytest.mark.asyncio
-    async def test_inventory_query_bypasses_classifier_and_uses_agent(self):
-        router = _router("not valid JSON")
+    async def test_inventory_query_uses_router_semantics_and_uses_agent(self):
+        router = _router(
+            '{"target":"agent","domain":"inventory","operation":"check_stock",'
+            '"speech_act":"INFORMATION_QUERY","next_step":"LOOKUP",'
+            '"required_tools":["check_stock"],"confidence":1.0}'
+        )
         intent = await router.route("查询 惠普锐Pro 的实时库存")
         assert intent.target == "agent"
         assert intent.query == "查询 惠普锐Pro 的实时库存"
         assert intent.confidence == 1.0
+        assert intent.route_source == "llm"
         assert intent.domain == "inventory"
         assert intent.operation == "check_stock"
         assert intent.required_tools == ["check_stock"]
 
     @pytest.mark.asyncio
     async def test_delivery_query_gets_read_only_track_order_route(self):
-        router = _router("not valid JSON")
+        router = _router(
+            '{"target":"agent","domain":"delivery","operation":"track_order",'
+            '"speech_act":"INFORMATION_QUERY","next_step":"LOOKUP",'
+            '"required_tools":["track_order"],"confidence":0.95}'
+        )
 
         intent = await router.route("客服，我昨天下的订单为什么现在还没发货")
 
@@ -153,8 +235,27 @@ class TestRouteNormal:
         assert intent.required_tools == ["track_order"]
 
     @pytest.mark.asyncio
+    async def test_order_list_is_not_misrouted_to_delivery_or_subject_choice(self):
+        router = _router(
+            '{"target":"agent","domain":"order","operation":"list",'
+            '"speech_act":"INFORMATION_QUERY","next_step":"LOOKUP",'
+            '"required_tools":["track_order"],"confidence":0.95}'
+        )
+
+        intent = await router.route("我现在有哪些订单？")
+
+        assert intent.target == "agent"
+        assert intent.domain == "order"
+        assert intent.operation == "list"
+        assert intent.required_tools == ["track_order"]
+
+    @pytest.mark.asyncio
     async def test_partial_fulfillment_gets_order_and_stock_read_only_route(self):
-        router = _router("not valid JSON")
+        router = _router(
+            '{"target":"agent","domain":"order_fulfillment","operation":"partial_fulfillment",'
+            '"speech_act":"INFORMATION_QUERY","state":"needs_customer_choice",'
+            '"next_step":"ASK_CHOICE","required_tools":["track_order","check_stock"],"confidence":0.95}'
+        )
 
         intent = await router.route("一件商品缺货，另一件有货，帮我看看怎么处理")
 
@@ -166,7 +267,11 @@ class TestRouteNormal:
 
     @pytest.mark.asyncio
     async def test_after_sales_progress_gets_read_only_status_route(self):
-        router = _router("not valid JSON")
+        router = _router(
+            '{"target":"agent","domain":"after_sales","operation":"check_after_sales",'
+            '"speech_act":"INFORMATION_QUERY","next_step":"LOOKUP",'
+            '"required_tools":["check_after_sales"],"confidence":0.95}'
+        )
 
         intent = await router.route("我已经提交售后了，帮我查一下进度")
 
@@ -197,7 +302,10 @@ class TestRouteNormal:
 
     @pytest.mark.asyncio
     async def test_delivery_area_policy_with_router_failure_stays_conservative(self):
-        router = _router("not valid JSON")
+        router = _router(
+            '{"target":"agent","domain":"general","operation":"clarify",'
+            '"speech_act":"CLARIFICATION_NEEDED","next_step":"ASK_CLARIFICATION","confidence":0.95}'
+        )
 
         intent = await router.route("这个订单能送到村里吗")
 
@@ -301,7 +409,10 @@ class TestRouteNormal:
 
     @pytest.mark.asyncio
     async def test_explicit_refund_becomes_fact_first_support_workflow_not_ticket(self):
-        router = _router('{"target": "ticket", "table": "", "confidence": 0.88}')
+        router = _router(
+            '{"target":"agent","domain":"refund","operation":"request",'
+            '"speech_act":"ACTION_REQUEST","confidence":0.88}'
+        )
         intent = await router.route("我要退款")
         assert intent.target == "agent"
         assert intent.operation == "request"
@@ -310,7 +421,10 @@ class TestRouteNormal:
 
     @pytest.mark.asyncio
     async def test_explicit_human_request_is_clarified_before_staff_handoff(self):
-        router = _router("not valid JSON")
+        router = _router(
+            '{"target":"agent","domain":"human","operation":"human_handoff",'
+            '"speech_act":"ACTION_REQUEST","next_step":"ASK_CLARIFICATION","confidence":0.95}'
+        )
         intent = await router.route("退款的事转人工")
 
         assert intent.target == "agent"
@@ -378,11 +492,14 @@ class TestRouteNormal:
 
     @pytest.mark.asyncio
     async def test_refund_hint_human_handoff_uses_canonical_human_goal(self):
-        router = _router("not valid JSON")
+        router = _router(
+            '{"target":"agent","domain":"human","operation":"human_handoff",'
+            '"speech_act":"ACTION_REQUEST","next_step":"ASK_CLARIFICATION","confidence":0.95}'
+        )
 
         intent = await router.route("退款这件事我要找人工客服")
 
-        assert intent.route_source == "deterministic_hint"
+        assert intent.route_source == "llm"
         assert intent.domain == "human"
         assert intent.operation == "human_handoff"
         assert [(request.domain, request.operation) for request in intent.support_requests] == [
@@ -407,17 +524,23 @@ class TestRouteNormal:
 
     @pytest.mark.asyncio
     async def test_refund_fast_path_keeps_explicit_return_refund_query(self):
-        router = _router("not valid JSON")
+        router = _router(
+            '{"target":"agent","domain":"return","operation":"refund_dependency",'
+            '"speech_act":"INFORMATION_QUERY","confidence":0.95}'
+        )
 
         intent = await router.route("拒收后什么时候退款？")
 
-        assert intent.route_source == "deterministic_hint"
+        assert intent.route_source == "llm"
         assert intent.domain == "return"
         assert intent.operation == "refund_dependency"
 
     @pytest.mark.asyncio
     async def test_refund_progress_is_a_read_only_status_lookup_not_a_new_refund(self):
-        router = _router("not valid JSON")
+        router = _router(
+            '{"target":"agent","domain":"refund","operation":"expected_arrival",'
+            '"speech_act":"INFORMATION_QUERY","next_step":"LOOKUP","confidence":0.95}'
+        )
         intent = await router.route("我已经退了，钱怎么还没到账")
 
         assert intent.target == "agent"
@@ -426,16 +549,19 @@ class TestRouteNormal:
         assert intent.use_workflow is True
 
     @pytest.mark.asyncio
-    async def test_explicit_after_sale_request_bypasses_classifier(self):
+    async def test_explicit_refund_request_uses_router_semantics(self):
         """明确退款进入受控事实核验流程，不能因模型波动直接建单。"""
-        router = _router("not valid JSON")
+        router = _router(
+            '{"target":"agent","domain":"refund","operation":"request",'
+            '"speech_act":"ACTION_REQUEST","confidence":0.95}'
+        )
 
         intent = await router.route("我要申请退款")
 
         assert intent.target == "agent"
         assert intent.operation == "request"
         assert intent.query == "我要申请退款"
-        assert intent.confidence == 0.98
+        assert intent.confidence == 0.95
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -444,11 +570,14 @@ class TestRouteNormal:
     )
     async def test_explicit_refund_request_keeps_action_speech_act(self, query):
         """Goal 不能反推 speech act，但当前明确动作必须保留为动作请求。"""
-        router = _router("not valid JSON")
+        router = _router(
+            '{"target":"agent","domain":"refund","operation":"request",'
+            '"speech_act":"ACTION_REQUEST","confidence":0.98}'
+        )
 
         intent = await router.route(query)
 
-        assert intent.route_source == "deterministic_hint"
+        assert intent.route_source == "llm"
         assert intent.speech_act == "ACTION_REQUEST"
         assert [(request.domain, request.operation) for request in intent.support_requests] == [("refund", "request")]
 
@@ -490,7 +619,10 @@ class TestRouteNormal:
 
     @pytest.mark.asyncio
     async def test_history_only_resolves_short_context_without_polluting_explicit_current_goal(self):
-        router = _router("not valid JSON")
+        router = _router(
+            '{"target":"agent","domain":"refund","operation":"expected_arrival",'
+            '"speech_act":"INFORMATION_QUERY","confidence":0.95}'
+        )
 
         intent = await router.route(
             "另外一笔退款什么时候到账",
@@ -502,7 +634,10 @@ class TestRouteNormal:
 
     @pytest.mark.asyncio
     async def test_weak_arrival_question_uses_recent_return_context(self):
-        router = _router("not valid JSON")
+        router = _router(
+            '{"target":"agent","domain":"return","operation":"refund_dependency",'
+            '"speech_act":"INFORMATION_QUERY","confidence":0.95}'
+        )
 
         intent = await router.route(
             "退款什么时候到账",
@@ -514,7 +649,10 @@ class TestRouteNormal:
 
     @pytest.mark.asyncio
     async def test_weak_refund_status_followup_uses_recent_return_context(self):
-        router = _router("not valid JSON")
+        router = _router(
+            '{"target":"agent","domain":"return","operation":"refund_dependency",'
+            '"speech_act":"INFORMATION_QUERY","confidence":0.95}'
+        )
 
         intent = await router.route(
             "什么时候退款",
@@ -526,7 +664,10 @@ class TestRouteNormal:
 
     @pytest.mark.asyncio
     async def test_weak_refund_status_followup_uses_recent_price_protection_context(self):
-        router = _router("not valid JSON")
+        router = _router(
+            '{"target":"agent","domain":"price_protection","operation":"refund_status",'
+            '"speech_act":"INFORMATION_QUERY","confidence":0.95}'
+        )
 
         intent = await router.route(
             "什么时候到账",
@@ -538,7 +679,10 @@ class TestRouteNormal:
 
     @pytest.mark.asyncio
     async def test_current_refund_destination_is_not_changed_by_price_protection_history(self):
-        router = _router("not valid JSON")
+        router = _router(
+            '{"target":"agent","domain":"refund","operation":"destination",'
+            '"speech_act":"INFORMATION_QUERY","confidence":0.95}'
+        )
 
         intent = await router.route(
             "在京东白条里面退款?",
@@ -559,12 +703,16 @@ class TestRouteNormal:
         assert intent.support_requests == []
 
     @pytest.mark.asyncio
-    async def test_refund_clarification_is_safe_deterministic_noop(self):
-        router = _router("not valid JSON")
+    async def test_refund_clarification_is_safe_router_noop(self):
+        router = _router(
+            '{"target":"agent","speech_act":"CLARIFICATION_NEEDED",'
+            '"domain":"refund","operation":"clarify","next_step":"ASK_CLARIFICATION",'
+            '"requests":[],"confidence":0.95}'
+        )
 
         intent = await router.route("我不小心申请了退款")
 
-        assert intent.route_source == "deterministic_hint"
+        assert intent.route_source == "llm"
         assert intent.speech_act == "CLARIFICATION_NEEDED"
         assert intent.support_requests == []
 
@@ -604,7 +752,10 @@ class TestRouteNormal:
 
     @pytest.mark.asyncio
     async def test_refund_destination_is_not_collapsed_into_status(self):
-        router = _router("not valid JSON")
+        router = _router(
+            '{"target":"agent","domain":"refund","operation":"destination",'
+            '"speech_act":"INFORMATION_QUERY","confidence":0.95}'
+        )
 
         intent = await router.route("退款成功后会退到哪里，原路退回吗")
 
@@ -615,7 +766,10 @@ class TestRouteNormal:
 
     @pytest.mark.asyncio
     async def test_return_refund_dependency_is_cross_domain_route(self):
-        router = _router("not valid JSON")
+        router = _router(
+            '{"target":"agent","domain":"return","operation":"refund_dependency",'
+            '"speech_act":"INFORMATION_QUERY","confidence":0.95}'
+        )
 
         intent = await router.route("拒收后什么时候退款")
 
@@ -627,11 +781,14 @@ class TestRouteNormal:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("query", ["退货后什么时候退款", "商品回仓后多久退款"])
     async def test_return_dependency_requires_refund_progression_relation(self, query):
-        router = _router("not valid JSON")
+        router = _router(
+            '{"target":"agent","domain":"return","operation":"refund_dependency",'
+            '"speech_act":"INFORMATION_QUERY","confidence":0.95}'
+        )
 
         intent = await router.route(query)
 
-        assert intent.route_source == "deterministic_hint"
+        assert intent.route_source == "llm"
         assert (intent.domain, intent.operation) == ("return", "refund_dependency")
 
     @pytest.mark.asyncio
@@ -649,16 +806,22 @@ class TestRouteNormal:
 
     @pytest.mark.asyncio
     async def test_return_refund_entry_problem_beats_return_dependency_fast_path(self):
-        router = _router("not valid JSON")
+        router = _router(
+            '{"target":"agent","domain":"refund","operation":"request",'
+            '"speech_act":"INFORMATION_QUERY","confidence":0.95}'
+        )
 
         intent = await router.route("拒收后找不到退款申请入口怎么办")
 
-        assert intent.route_source == "deterministic_hint"
+        assert intent.route_source == "llm"
         assert (intent.domain, intent.operation) == ("refund", "request")
 
     @pytest.mark.asyncio
     async def test_hypothetical_return_history_does_not_create_active_return_context(self):
-        router = _router("not valid JSON")
+        router = _router(
+            '{"target":"agent","domain":"refund","operation":"expected_arrival",'
+            '"speech_act":"INFORMATION_QUERY","confidence":0.95}'
+        )
 
         intent = await router.route(
             "退款多久能到账",
@@ -669,7 +832,10 @@ class TestRouteNormal:
 
     @pytest.mark.asyncio
     async def test_completed_return_history_can_resolve_weak_refund_followup(self):
-        router = _router("not valid JSON")
+        router = _router(
+            '{"target":"agent","domain":"return","operation":"refund_dependency",'
+            '"speech_act":"INFORMATION_QUERY","confidence":0.95}'
+        )
 
         intent = await router.route(
             "什么时候退款",
@@ -680,7 +846,11 @@ class TestRouteNormal:
 
     @pytest.mark.asyncio
     async def test_refund_statement_without_goal_does_not_create_support_request(self):
-        router = _router("not valid JSON")
+        router = _router(
+            '{"target":"agent","speech_act":"STATEMENT","domain":"refund",'
+            '"operation":"status","requests":[],"customer_claims":["refund_submitted"],'
+            '"next_step":"ANSWER","confidence":0.95}'
+        )
 
         intent = await router.route("嗯，我已经申请退款了")
 
@@ -688,12 +858,20 @@ class TestRouteNormal:
         assert intent.speech_act == "STATEMENT"
         assert intent.requests == []
         assert intent.support_requests == []
+        assert [(request.domain, request.operation) for request in intent.verification_requests] == [
+            ("refund", "status")
+        ]
+        assert intent.use_workflow is True
         assert intent.next_step == "ANSWER"
         assert intent.required_tools == []
 
     @pytest.mark.asyncio
     async def test_accidental_refund_application_requires_clarification_without_request(self):
-        router = _router("not valid JSON")
+        router = _router(
+            '{"target":"agent","speech_act":"CLARIFICATION_NEEDED",'
+            '"domain":"general","operation":"clarify","next_step":"ASK_CLARIFICATION",'
+            '"requests":[],"confidence":0.95}'
+        )
 
         intent = await router.route("我不小心申请了退款")
 
@@ -714,14 +892,17 @@ class TestRouteNormal:
 
     @pytest.mark.asyncio
     async def test_customer_can_confirm_human_help_after_self_service_guidance(self):
-        router = _router("not valid JSON")
+        router = _router(
+            '{"target":"agent","domain":"human","operation":"human_handoff",'
+            '"speech_act":"ACTION_REQUEST","next_step":"ASK_CLARIFICATION","confidence":0.95}'
+        )
 
         intent = await router.route("需要人工")
 
         assert intent.target == "agent"
         assert intent.operation == "human_handoff"
         assert intent.next_step == "ASK_CLARIFICATION"
-        assert intent.confidence == 0.98
+        assert intent.confidence == 0.95
 
     @pytest.mark.asyncio
     async def test_refund_policy_question_does_not_create_ticket(self):

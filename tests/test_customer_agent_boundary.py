@@ -2,6 +2,8 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from agent.customer_response import compose_customer_response
 from agent.decision_context import SUBJECT_CONTEXT_RESET_MARKER
 from agent.engines.loop import AgentLoop, LoopResult
@@ -53,6 +55,109 @@ def test_customer_product_text_strips_internal_warehouse_details():
     assert "华南仓" not in content
     assert "库存" not in content
     assert "售价 4999 元" in content
+
+
+def test_limited_delivery_operator_prose_keeps_verified_status_without_inventing_eta():
+    result = LoopResult(
+        answer="这笔订单当前尚未发货；系统暂时没有可核验的预计送达时间。",
+        workflow_progress={
+            "goal_status": "resolved_with_limitation",
+            "unavailable_capabilities": ["query_expected_ship_time"],
+        },
+        decision_contexts=[
+            {
+                "subject_type": "order",
+                "subject_id": "SO-DELIVERY",
+                "provenance": "current",
+                "source": "track_order",
+                "facts": {"order_identified": True, "order_status": "PAID", "shipping_status": "NOT_SHIPPED"},
+            }
+        ],
+    )
+
+    compose_customer_response(
+        result,
+        [{"domain": "delivery", "operation": "track_order"}],
+    )
+
+    assert result.answer.startswith("这笔订单当前尚未发货")
+    assert result.response_control["mode"] == "FACT"
+
+
+def test_limited_delivery_operator_prose_rejects_unverified_arrival_promise():
+    result = LoopResult(
+        answer="这笔订单当前尚未发货，预计明天送达。",
+        workflow_progress={
+            "goal_status": "resolved_with_limitation",
+            "unavailable_capabilities": ["query_expected_ship_time"],
+        },
+        decision_contexts=[
+            {
+                "subject_type": "order",
+                "subject_id": "SO-DELIVERY",
+                "provenance": "current",
+                "source": "track_order",
+                "facts": {"order_identified": True, "order_status": "PAID", "shipping_status": "NOT_SHIPPED"},
+            }
+        ],
+    )
+
+    compose_customer_response(
+        result,
+        [{"domain": "delivery", "operation": "track_order"}],
+    )
+
+    assert "预计明天送达" not in result.answer
+    assert "预计发货或预计送达时间" in result.answer
+
+
+def test_limited_delivery_operator_prose_allows_verified_shipped_claim_without_eta():
+    result = LoopResult(
+        answer="这笔订单已经发货，但目前没有可核验的预计送达时间。",
+        workflow_progress={
+            "goal_status": "resolved_with_limitation",
+            "unavailable_capabilities": ["query_expected_ship_time"],
+        },
+        decision_contexts=[
+            {
+                "subject_type": "order",
+                "subject_id": "SO-SHIPPED",
+                "provenance": "current",
+                "source": "track_order",
+                "facts": {"order_identified": True, "shipping_status": "SHIPPED"},
+            }
+        ],
+    )
+
+    compose_customer_response(result, [{"domain": "delivery", "operation": "track_order"}])
+
+    assert result.answer == "这笔订单已经发货，但目前没有可核验的预计送达时间。"
+    assert result.response_control["mode"] == "FACT"
+
+
+def test_limited_delivery_operator_prose_rejects_shipping_claim_conflicting_with_verified_status():
+    result = LoopResult(
+        answer="这笔订单已经发货，但目前没有可核验的预计送达时间。",
+        workflow_progress={
+            "goal_status": "resolved_with_limitation",
+            "unavailable_capabilities": ["query_expected_ship_time"],
+        },
+        decision_contexts=[
+            {
+                "subject_type": "order",
+                "subject_id": "SO-NOT-SHIPPED",
+                "provenance": "current",
+                "source": "track_order",
+                "facts": {"order_identified": True, "shipping_status": "NOT_SHIPPED"},
+            }
+        ],
+    )
+
+    compose_customer_response(result, [{"domain": "delivery", "operation": "track_order"}])
+
+    assert "已经发货" not in result.answer
+    assert "尚未发货" in result.answer
+    assert "预计发货或预计送达时间" in result.answer
 
 
 def test_plain_chat_refund_status_is_rendered_from_verified_facts():
@@ -110,7 +215,11 @@ def test_pending_payment_refund_path_is_controlled_cancel_handoff():
                 "subject_id": "SO-PENDING",
                 "provenance": "current",
                 "source": "track_order",
-                "facts": {"order_identified": True, "order_status": "PENDING_PAYMENT"},
+                "facts": {
+                    "order_identified": True,
+                    "order_status": "PENDING_PAYMENT",
+                    "order_cancel_supported": True,
+                },
             }
         ],
     )
@@ -178,8 +287,28 @@ def test_unrelated_turn_does_not_resurrect_recent_refund_goal_or_facts():
         assert "SO-OLD-ORDER" not in result.answer
 
 
-def test_explicit_refund_follow_up_may_use_historical_fact_with_provenance_label():
-    result = LoopResult(answer="也许很快就会到账。")
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "根据刚才查询结果，这笔退款当时处于处理中。具体到账时间仍无法确认。",
+        "根据前面的查询结果，这笔退款当时处于处理中。具体到账时间仍无法确认。",
+    ],
+)
+def test_explicit_refund_follow_up_accepts_natural_historical_provenance_language(answer):
+    result = LoopResult(answer=answer)
+    _apply_customer_refund_fact_boundary(
+        Intent(target="agent"),
+        result,
+        query="退款现在怎么样？",
+        recent_case=_historical_refund_case(),
+    )
+
+    assert result.answer == answer
+    assert result.response_control["fact_provenance"]["refund_status"] == "historical"
+
+
+def test_historical_refund_prose_without_previous_query_frame_is_rewritten_safely():
+    result = LoopResult(answer="这笔退款目前还在处理中。")
     _apply_customer_refund_fact_boundary(
         Intent(target="agent"),
         result,
@@ -188,8 +317,48 @@ def test_explicit_refund_follow_up_may_use_historical_fact_with_provenance_label
     )
 
     assert result.answer.startswith("根据上一轮系统查询")
-    assert "目前还在处理中" in result.answer
-    assert "8999" in result.answer
+    assert result.answer != "这笔退款目前还在处理中。"
+
+
+def test_historical_merchant_review_explanation_accepts_natural_previous_result_frame():
+    result = LoopResult(
+        answer="之前查询到的是等待商家核验。这个状态表示商家还需要完成审核。",
+        response_control={"mode": "FACT", "subject_id": "SO-HISTORICAL"},
+    )
+    compose_customer_response(
+        result,
+        [{"domain": "refund", "operation": "expected_arrival"}],
+        historical_contexts=[
+            {
+                "subject_type": "order",
+                "subject_id": "SO-HISTORICAL",
+                "provenance": "historical",
+                "source": "query_refund_status",
+                "facts": {"refund_status": "PENDING_MERCHANT_REVIEW"},
+            }
+        ],
+    )
+
+    assert result.answer == "之前查询到的是等待商家核验。这个状态表示商家还需要完成审核。"
+
+
+def test_current_refund_prose_with_current_fact_is_allowed():
+    result = LoopResult(
+        answer="这笔退款目前正在处理中。",
+        response_control={"mode": "FACT", "subject_id": "SO-CURRENT"},
+        decision_contexts=[
+            {
+                "subject_type": "order",
+                "subject_id": "SO-CURRENT",
+                "provenance": "current",
+                "source": "query_refund_status",
+                "facts": {"refund_status": "PROCESSING"},
+            }
+        ],
+    )
+    compose_customer_response(result, [{"domain": "refund", "operation": "status"}])
+
+    assert result.answer == "这笔退款目前正在处理中。"
 
 
 def test_awaiting_staff_response_does_not_claim_a_ticket_without_ticket_id():
@@ -334,7 +503,7 @@ def test_refund_fact_boundary_also_applies_to_blocked_workflow_facts():
 
     assert "系统核验结果显示，这笔订单当前符合退款资格。" in result.answer
     assert "订单当前尚未发货。" in result.answer
-    assert "如需人工客服协助，请回复“转人工”。" in result.answer
+    assert "如需人工客服协助，请回复“转人工”。" not in result.answer
     assert "全额" not in result.answer
 
 
@@ -363,10 +532,130 @@ def test_blocked_response_names_missing_capability_instead_of_generic_contradict
         result,
     )
 
-    assert result.answer == (
-        "这笔订单当前符合退款资格且尚未发货，但暂时无法生成退款入口。请从订单页稍后重试；如仍无法操作，可转人工。"
-    )
+    assert result.answer == "这笔订单当前符合退款资格且尚未发货，但暂时无法生成退款入口，请从订单页稍后重试。"
     assert "当前还无法完成这项业务核验" not in result.answer
+
+
+def test_safe_operator_limitation_is_preserved_when_read_fact_failed():
+    result = LoopResult(
+        answer="我已经定位到这笔 iPhone 16 订单，但退款资格核验失败，所以目前不能可靠确认是否符合条件。",
+        decision_contexts=[
+            {
+                "subject_type": "order",
+                "subject_id": "SO-IPHONE16",
+                "provenance": "current",
+                "source": "track_order",
+                "facts": {"order_identified": True},
+            }
+        ],
+        workflow_progress={
+            "goal_status": "blocked",
+            "control_state": "BLOCKED",
+            "reason": "fact_tool_failed",
+            "missing_facts": ["refund_eligibility"],
+            "selected_subject_label": "iPhone 16",
+        },
+    )
+
+    compose_customer_response(
+        result,
+        [{"domain": "refund", "operation": "request"}],
+    )
+
+    assert "退款资格核验失败" in result.answer
+    assert result.answer_source == "OPERATOR_VALIDATED"
+
+
+def test_unsafe_operator_refund_claim_uses_subject_preserving_fallback():
+    result = LoopResult(
+        answer="这笔肯定可以退款。",
+        decision_contexts=[
+            {
+                "subject_type": "order",
+                "subject_id": "SO-IPHONE16",
+                "provenance": "current",
+                "source": "track_order",
+                "facts": {"order_identified": True},
+            }
+        ],
+        workflow_progress={
+            "goal_status": "blocked",
+            "control_state": "BLOCKED",
+            "reason": "fact_tool_failed",
+            "missing_facts": ["refund_eligibility"],
+            "selected_subject_label": "iPhone 16",
+        },
+    )
+
+    compose_customer_response(
+        result,
+        [{"domain": "refund", "operation": "request"}],
+    )
+
+    assert "肯定可以退款" not in result.answer
+    assert "iPhone 16" in result.answer
+    assert result.answer_source == "DETERMINISTIC_FALLBACK"
+
+
+def test_safe_self_service_operator_prose_keeps_controlled_presentation_mode():
+    result = LoopResult(
+        answer="可以，这笔订单符合退款资格，我把官方订单入口放在下面。",
+        decision_contexts=[
+            {
+                "subject_type": "order",
+                "subject_id": "SO-REFUND",
+                "provenance": "current",
+                "source": "generate_refund_entry",
+                "facts": {
+                    "order_identified": True,
+                    "refund_eligibility": True,
+                    "refund_entry": "?page=orders&refund_order=SO-REFUND",
+                },
+            }
+        ],
+        workflow_progress={"goal_status": "resolved", "resolution_type": "SELF_SERVICE_HANDOFF"},
+    )
+
+    compose_customer_response(
+        result,
+        [{"domain": "refund", "operation": "request"}],
+    )
+
+    assert result.answer.startswith("可以，这笔订单符合退款资格")
+    assert result.response_control["mode"] == "SELF_SERVICE_HANDOFF"
+
+
+def test_stale_operator_unknown_is_rejected_after_refund_eligibility_is_verified():
+    result = LoopResult(
+        answer=(
+            "我已经定位到你说的 iPhone 16，但目前无法可靠核验这笔订单的退款资格，"
+            "所以现在不能确定是否满足退款条件。"
+        ),
+        decision_contexts=[
+            {
+                "subject_type": "order",
+                "subject_id": "SO-IPHONE16",
+                "provenance": "current",
+                "source": "generate_refund_entry",
+                "facts": {
+                    "order_identified": True,
+                    "refund_status": "NOT_FOUND",
+                    "refund_eligibility": True,
+                    "refund_entry": "?page=orders&refund_order=SO-IPHONE16",
+                },
+            }
+        ],
+        workflow_progress={"goal_status": "resolved", "resolution_type": "SELF_SERVICE_HANDOFF"},
+    )
+
+    compose_customer_response(
+        result,
+        [{"domain": "refund", "operation": "request"}],
+    )
+
+    assert "无法可靠核验" not in result.answer
+    assert "退款资格已核验通过" in result.answer
+    assert result.response_control["mode"] == "SELF_SERVICE_HANDOFF"
 
 
 def test_refund_eta_capability_gap_returns_verified_status_with_limitation_not_staff_handoff():
@@ -482,8 +771,41 @@ def test_eligibility_boundary_does_not_claim_full_refund():
 def test_customer_action_links_point_to_first_party_pages():
     """购买、订单和售后诉求必须获得稳定的站内下一步。"""
     assert "?page=catalog" in _customer_action_suffix("rag", "laptop_products", "我想买这台")
-    assert "?page=orders" in _customer_action_suffix("agent", "", "帮我查物流")
+    assert "?page=orders" in _customer_action_suffix(
+        "agent", "", "任意措辞", intent_domain="delivery", intent_operation="track_order"
+    )
     assert "?page=tickets" in _customer_action_suffix("ticket", "", "我要退款")
+
+
+def test_known_catalog_entity_links_directly_to_its_detail_and_fallback_keeps_category():
+    direct = _customer_action_suffix(
+        "rag",
+        "phone_products",
+        "推荐这款手机",
+        product_name="iPhone 15",
+        product_id="PHONE-15",
+        product_category="phones",
+    )
+    fallback = _customer_action_suffix(
+        "rag",
+        "phone_products",
+        "推荐手机",
+        product_name="iPhone 15",
+        product_category="phones",
+    )
+
+    assert "?page=product&category=phones&product=PHONE-15" in direct
+    assert "?page=catalog&category=phones" in fallback
+
+    component = _customer_action_suffix(
+        "rag",
+        "component_products",
+        "推荐散热器",
+        product_name="利民 Peerless Assassin 120",
+        product_category="components",
+        component_category="cooling_product",
+    )
+    assert "?page=catalog&category=components&component_category=cooling_product" in component
 
 
 def test_raw_refund_words_do_not_append_generic_refund_application_link():
@@ -648,3 +970,42 @@ def test_unbound_compact_transaction_rows_are_replaced_by_shared_boundary():
     assert "SOREAL_A6" not in result.answer
     assert "处理中" not in result.answer
     assert "已完成" not in result.answer
+
+
+def test_known_refund_goal_with_unknown_subject_preserves_safe_subject_clarification():
+    result = LoopResult(
+        answer="我还没定位到你说的那件商品对应哪笔订单。请告诉我品牌或型号，或者从相关订单里选一笔。",
+        workflow_progress={
+            "goal_status": "awaiting_customer",
+            "next_action": "ASK_CLARIFICATION",
+            "next_actor": "CUSTOMER",
+            "reason": "subject_resolution_unknown",
+            "missing_facts": ["order_identified"],
+        },
+    )
+
+    compose_customer_response(result, [{"domain": "refund", "operation": "request"}])
+
+    assert "品牌或型号" in result.answer
+    assert "查询退款状态、申请退款" not in result.answer
+    assert result.answer_source == "OPERATOR_VALIDATED"
+    assert result.response_control["mode"] == "ASK_CLARIFICATION"
+
+
+def test_unknown_refund_subject_rejects_clarification_that_invents_eligibility():
+    result = LoopResult(
+        answer="这笔肯定符合退款资格，请告诉我是哪一单。",
+        workflow_progress={
+            "goal_status": "awaiting_customer",
+            "next_action": "ASK_CLARIFICATION",
+            "next_actor": "CUSTOMER",
+            "reason": "subject_resolution_unknown",
+            "missing_facts": ["order_identified"],
+        },
+    )
+
+    compose_customer_response(result, [{"domain": "refund", "operation": "request"}])
+
+    assert "肯定符合退款资格" not in result.answer
+    assert result.answer == "请补充或确认需要处理的订单信息。"
+    assert result.response_control["reason"] == "subject_resolution_unknown"

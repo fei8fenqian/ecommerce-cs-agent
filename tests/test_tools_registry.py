@@ -121,6 +121,21 @@ class _MismatchedRefundTool(BaseTool):
         )
 
 
+@pytest.mark.asyncio
+async def test_customer_operator_cannot_query_model_selected_order_before_binding():
+    registry = ToolRegistry()
+    registry.register(_OrderEchoTool())
+
+    result = await registry.execute(
+        "query_refund_status",
+        order_id="SO-MODEL-CHOICE",
+        tool_context=ToolContext(user_id=1, role="customer", require_bound_subject=True),
+    )
+
+    assert result.status == "error"
+    assert result.error == "subject_not_bound"
+
+
 # =============================================================================
 # ToolResult 单元测试
 # =============================================================================

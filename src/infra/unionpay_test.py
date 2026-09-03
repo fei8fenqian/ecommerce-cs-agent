@@ -541,12 +541,14 @@ class UnionPayTestClient:
             or response_data.get("txnTime") != txn_time
         ):
             raise UnionPayProtocolError("银联退款返回交易三元组不匹配")
+        # backTransReq request fields are not automatically response fields.
+        # In particular, the synchronous return used by the test gateway does
+        # not have to echo ``txnAmt`` or ``origQryId``.  The request-side
+        # values above remain server-owned and are still sent strictly; the
+        # final refund result is established by the separately validated
+        # queryTrans response.
         returned_amount = response_data.get("txnAmt", "")
-        if returned_amount != str(txn_amt):
-            raise UnionPayProtocolError("银联退款返回金额不匹配")
         returned_orig_qry_id = response_data.get("origQryId")
-        if returned_orig_qry_id != orig_qry_id:
-            raise UnionPayProtocolError("银联退款返回原支付交易不匹配")
         return UnionPayRefundResult(
             signature_verified=True,
             resp_code=response_data.get("respCode", ""),

@@ -153,6 +153,100 @@ class TestStepResult:
 # AgentLoop.run — 正常场景
 # =============================================================================
 class TestAgentLoopRun:
+    def test_product_identity_is_projected_from_trusted_search_observation(self):
+        facts = {
+            "search_component": {
+                "status": "success",
+                "data": {
+                    "results": [
+                        {
+                            "product_id": "cooler-1",
+                            "product_name": "Peerless Assassin 120",
+                            "display_title": "利民 Peerless Assassin 120",
+                            "product_category": "components",
+                            "component_category": "cooling_product",
+                        },
+                        {
+                            "product_id": "cooler-2",
+                            "product_name": "AK400",
+                            "display_title": "九州风神 AK400",
+                            "product_category": "components",
+                        },
+                    ]
+                },
+            }
+        }
+
+        assert AgentLoop._product_entities_from_observations(
+            facts,
+            "推荐利民 Peerless Assassin 120，这款适合高性能散热。",
+        ) == {
+            "product": "利民 Peerless Assassin 120",
+            "product_id": "cooler-1",
+            "product_category": "components",
+            "component_category": "cooling_product",
+        }
+
+    def test_product_identity_does_not_guess_ambiguous_search_results(self):
+        facts = {
+            "search_component": {
+                "status": "success",
+                "data": {
+                    "results": [
+                        {"product_id": "cooler-1", "product_name": "A", "product_category": "components"},
+                        {"product_id": "cooler-2", "product_name": "B", "product_category": "components"},
+                    ]
+                },
+            }
+        }
+
+        assert AgentLoop._product_entities_from_observations(facts, "这里有两款可选。") == {}
+
+    def test_product_candidates_are_preserved_for_a_later_server_side_selection(self):
+        facts = {
+            "search_component": {
+                "status": "success",
+                "data": {
+                    "results": [
+                        {
+                            "product_id": "cooler-1",
+                            "product_name": "玄冰500",
+                            "display_title": "九州风神玄冰500",
+                            "product_category": "components",
+                            "component_category": "cooling_product",
+                        },
+                        {
+                            "product_id": "cooler-2",
+                            "product_name": "AK400",
+                            "display_title": "九州风神 AK400",
+                            "product_category": "components",
+                            "component_category": "cooling_product",
+                        },
+                    ]
+                },
+            }
+        }
+
+        entities = AgentLoop._last_product_entities_from_observations(facts, "这里有两款散热器。")
+
+        assert "product" not in entities
+        assert entities["product_candidates"] == [
+            {
+                "product": "九州风神玄冰500",
+                "product_id": "cooler-1",
+                "product_category": "components",
+                "product_name": "玄冰500",
+                "component_category": "cooling_product",
+            },
+            {
+                "product": "九州风神 AK400",
+                "product_id": "cooler-2",
+                "product_category": "components",
+                "product_name": "AK400",
+                "component_category": "cooling_product",
+            },
+        ]
+
     @pytest.mark.asyncio
     async def test_no_tools_direct_answer(self):
         """LLM 不调工具，直接返回答案 → 1 步结束"""
@@ -646,3 +740,116 @@ class TestAgentLoopRunStream:
                 answer += event["content"]
 
         assert answer == "安全回答"
+
+@pytest.mark.asyncio
+async def test_internal_tool_protocol_content_is_rejected_and_retried_without_execution():
+    llm = _SequentialMockLLM(
+        [
+            LLMResponse(
+                content='<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name="echo">',
+                model="mock",
+                usage=TokenUsage(),
+                finish_reason="stop",
+            ),
+            LLMResponse(
+                content="我暂时还需要确认具体信息。",
+                model="mock",
+                usage=TokenUsage(),
+                finish_reason="stop",
+            ),
+        ]
+    )
+    loop = AgentLoop(llm=llm, registry=_make_registry(_EchoTool()))
+
+    result = await loop.run("帮我处理一下")
+
+    assert "DSML" not in result.answer
+    assert "tool_calls" not in result.answer
+    assert result.answer == "我暂时还需要确认具体信息。"
+    assert llm._call_count == 2
+    assert all(not step.tool_calls for step in result.steps)
+
+
+@pytest.mark.asyncio
+async def test_internal_tool_protocol_retry_may_only_execute_structured_tool_call():
+    llm = _SequentialMockLLM(
+        [
+            LLMResponse(
+                content='<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name="echo">',
+                model="mock",
+                usage=TokenUsage(),
+                finish_reason="stop",
+            ),
+            LLMResponse(
+                content=None,
+                tool_calls=[_tool_call("echo", text="hello")],
+                model="mock",
+                usage=TokenUsage(),
+                finish_reason="tool_calls",
+            ),
+            LLMResponse(
+                content="已根据正式工具结果处理。",
+                model="mock",
+                usage=TokenUsage(),
+                finish_reason="stop",
+            ),
+        ]
+    )
+    loop = AgentLoop(llm=llm, registry=_make_registry(_EchoTool()))
+
+    result = await loop.run("回声")
+
+    assert result.answer == "已根据正式工具结果处理。"
+    assert llm._call_count == 3
+    tool_steps = [step for step in result.steps if step.tool_calls]
+    assert len(tool_steps) == 1
+    assert tool_steps[0].tool_calls[0].name == "echo"
+
+
+@pytest.mark.asyncio
+async def test_stream_internal_tool_protocol_never_reaches_customer_tokens():
+    llm = _StreamMockLLM(
+        [
+            [{"type": "content", "content": '<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name="echo">'}],
+            [{"type": "tool_calls", "tool_calls": [_tool_call("echo", text="hello")]}],
+            [{"type": "content", "content": "已处理完毕"}],
+        ]
+    )
+    loop = AgentLoop(llm=llm, registry=_make_registry(_EchoTool()))
+
+    events = [event async for event in loop.run_stream("回声")]
+    customer_text = "".join(event.get("content", "") for event in events if event["event"] == "token")
+
+    assert "DSML" not in customer_text
+    assert "tool_calls" not in customer_text
+    assert customer_text == "已处理完毕"
+    assert [event["event"] for event in events].count("tool_call") == 1
+    assert llm._call_count == 3
+
+
+def test_product_candidate_projection_preserves_trusted_price_metadata():
+    facts = {
+        "search_product": {
+            "status": "success",
+            "data": {
+                "results": [
+                    {
+                        "product_id": "phone-17",
+                        "product_name": "iPhone 17 512GB",
+                        "product_category": "phones",
+                        "price": "7999.00",
+                    },
+                    {
+                        "product_id": "phone-16",
+                        "product_name": "iPhone 16 128GB",
+                        "product_category": "phones",
+                        "price": 5999,
+                    },
+                ]
+            },
+        }
+    }
+
+    candidates = AgentLoop._product_candidates_from_observations(facts)
+
+    assert [item["price_cents"] for item in candidates] == [799900, 599900]

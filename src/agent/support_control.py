@@ -54,6 +54,31 @@ class WorkflowDefinition:
     partial_completion_criteria: Callable[[dict[str, Any]], bool] | None = None
 
 
+@dataclass(frozen=True)
+class PolicyEnvelope:
+    """Runtime policy supplied to the customer-service operator.
+
+    This is deliberately a contract, not a model-authored tool script: it
+    narrows which read capabilities are visible, states what makes a claim
+    complete, and records unavailable facts.  SupportWorkflow eagerly performs
+    safe mandatory reads when parameters are server-bound; the Operator may use
+    only the remaining permitted reads, and the Control Plane still validates
+    every invocation and every customer-visible transaction claim.
+    """
+
+    allowed_tools: tuple[str, ...]
+    required_facts: tuple[str, ...]
+    completion_facts: tuple[str, ...]
+    unavailable_capabilities: tuple[str, ...]
+    unsupported_workflows: tuple[str, ...]
+    write_confirmation_required: bool
+    # A capability map describes safe producers for a missing fact.  It is not
+    # a second execution planner: deterministic mandatory reads are driven by
+    # Workflow dependencies, while only unresolved semantic-parameter reads may
+    # remain for the Operator.
+    fact_affordances: tuple[dict[str, Any], ...] = ()
+
+
 def _has_status(facts: dict[str, Any], key: str) -> bool:
     """判断事实是否已知；False 是有效的否定结论，不能当成 unknown。"""
     return key in facts and facts[key] not in (None, "")
@@ -231,7 +256,14 @@ CAPABILITY_REGISTRY: dict[str, CapabilityDefinition] = {
     "track_order": CapabilityDefinition(
         "track_order",
         ("order_id", "phone"),
-        ("order_identified", "order_status", "shipping_status"),
+        (
+            "orders_listed",
+            "order_identified",
+            "order_status",
+            "shipping_status",
+            "payment_provider",
+            "order_cancel_supported",
+        ),
         ("authenticated_customer_context",),
     ),
     "check_after_sales": CapabilityDefinition(
@@ -370,6 +402,21 @@ def is_capability_available(name: str) -> bool:
 
 
 _WORKFLOWS = {
+    "order.list": WorkflowDefinition(
+        "order.list",
+        (FactRequirement("orders_listed", "track_order"),),
+        ("orders_listed",),
+        _always_if_fact("orders_listed"),
+    ),
+    "order.status": WorkflowDefinition(
+        "order.status",
+        (
+            FactRequirement("order_identified", "track_order"),
+            FactRequirement("order_status", "track_order", ("order_identified",)),
+        ),
+        ("order_identified", "order_status"),
+        _always_if_fact("order_status"),
+    ),
     "payment.check_payment_status": WorkflowDefinition(
         "payment.check_payment_status",
         (FactRequirement("payment_status", "check_payment_status"),),
@@ -733,6 +780,80 @@ def build_execution_plan(requests: list[dict[str, Any]]) -> tuple[list[dict[str,
     return plan, list(dict.fromkeys(required_facts)), completion_facts
 
 
+def build_policy_envelope(requests: list[dict[str, Any]]) -> PolicyEnvelope:
+    """Build the operator envelope around the Control Plane fact contract.
+
+    ``build_execution_plan`` defines required facts and their dependencies.
+    SupportWorkflow may eagerly execute only the safe mandatory reads whose
+    parameters can be server-bound; the envelope then limits any remaining
+    Operator-selected read capability without granting write authority.
+    """
+    plan, required_facts, completion_facts = build_execution_plan(requests)
+    validation = validate_execution_plan(requests, plan)
+    allowed_tools = tuple(
+        dict.fromkeys(
+            str(step["tool"])
+            for step in plan
+            if isinstance(step, dict)
+            and step.get("available") is True
+            and isinstance(step.get("tool"), str)
+            and step.get("tool") != "generate_refund_entry"
+        )
+    )
+    affordances: list[dict[str, Any]] = []
+    seen_facts: set[str] = set()
+    for request in requests:
+        workflow = resolve_workflow(request)
+        if workflow is None:
+            continue
+        for requirement in workflow.facts:
+            if requirement.name in seen_facts:
+                continue
+            seen_facts.add(requirement.name)
+            capability = get_capability(requirement.capability)
+            affordances.append(
+                {
+                    "fact": requirement.name,
+                    "capability": requirement.capability,
+                    "inputs": list(capability.inputs) if capability else [],
+                    "outputs": list(capability.outputs) if capability else [],
+                    "preconditions": list(requirement.depends_on or ("authenticated_customer_context",)),
+                    "available": bool(capability and capability.available),
+                    "read_only": bool(capability is None or capability.read_only),
+                    "subject_required": "order_identified" in requirement.depends_on
+                    or requirement.name == "order_identified",
+                    # This action is deliberately performed only by the
+                    # controlled-action node after trusted facts are present.
+                    "server_controlled": requirement.capability == "generate_refund_entry",
+                    "guidance": _capability_guidance(requirement.name, requirement.capability),
+                }
+            )
+    return PolicyEnvelope(
+        allowed_tools=allowed_tools,
+        required_facts=tuple(required_facts),
+        completion_facts=tuple(completion_facts),
+        unavailable_capabilities=tuple(validation["unavailable_capabilities"]),
+        unsupported_workflows=tuple(validation["unsupported_workflows"]),
+        write_confirmation_required=confirmation_required(requests),
+        fact_affordances=tuple(affordances),
+    )
+
+
+def _capability_guidance(fact: str, capability: str) -> str:
+    """Describe an affordance without turning it into an execution sequence."""
+    if fact == "order_identified" and capability == "track_order":
+        return "未绑定可信订单时可不传 order_id 查询当前登录客户的订单；多结果不可自行选择。"
+    if fact == "refund_status":
+        return "已有服务端绑定订单后查询该订单退款状态；不要从客户自述推断状态。"
+    if fact == "refund_eligibility":
+        return "只有可信订单绑定后查询资格；资格结果由服务端决定。"
+    if fact == "refund_entry":
+        return "由服务端在资格通过且无既有退款时生成订单页入口，不是模型工具。"
+    if fact in {"shipping_status", "expected_ship_time"}:
+        return "按可信订单读取物流事实；缺少预计时间时只能说明限制，不得推断日期。"
+    return "只用于取得当前 Goal 所需的受控事实，不代表固定调用顺序。"
+
+
 def validate_execution_plan(requests: list[dict[str, Any]], plan: list[dict[str, Any]]) -> dict[str, Any]:
     """校验计划结构，并单独报告能力覆盖缺口。
 
@@ -808,22 +929,38 @@ def extract_decision_facts(capability: str, data: dict[str, Any]) -> dict[str, A
     """只从工具响应提取已证实的业务事实；缺字段就是未证实，不可补全。"""
 
     if capability == "track_order":
+        listing_facts: dict[str, Any] = {}
+        if isinstance(data.get("orders"), list) and data.get("count") is not None:
+            # Listing a customer's orders is a successful non-subject result,
+            # including the one-order case.  For a singular workflow the
+            # single row may also be used for subject-bound facts below.
+            listing_facts = {"orders_listed": True, "order_count": int(data.get("count") or len(data["orders"]))}
+            if len(data["orders"]) != 1:
+                return listing_facts
         order = data if isinstance(data.get("order_id"), str) else None
         if order is None and data.get("count") == 1 and isinstance(data.get("orders"), list):
             order = data["orders"][0] if data["orders"] else None
-        if not isinstance(order, dict) or data.get("selection_required"):
+        if not isinstance(order, dict):
             return {}
         order_facts: dict[str, Any] = {
             "order_identified": bool(order.get("order_id")),
-            "order_status": order.get("status"),
+            # Checkout projections expose both the sales-order state and the
+            # delivery-facing ``status`` field.  Prefer the authoritative
+            # order state; legacy orders only have ``status``.
+            "order_status": order.get("order_status") or order.get("status"),
             "shipping_status": order.get("delivery_state"),
+            "payment_provider": order.get("payment_provider"),
+            "order_cancel_supported": order.get("order_cancel_supported"),
         }
         if order.get("expected_ship_time"):
             order_facts["expected_ship_time"] = order["expected_ship_time"]
         refund = order.get("refund")
         if isinstance(refund, dict) and refund.get("status") not in (None, ""):
             order_facts["refund_status"] = _canonical_refund_status(refund["status"])
-        return {key: value for key, value in order_facts.items() if value not in (None, "")}
+        return {
+            **listing_facts,
+            **{key: value for key, value in order_facts.items() if value not in (None, "")},
+        }
     if capability == "check_after_sales":
         records = data.get("after_sales")
         if not isinstance(records, list) or len(records) != 1:
@@ -936,7 +1073,7 @@ def extract_decision_context(
         return True
 
     if capability == "track_order":
-        if data.get("selection_required"):
+        if isinstance(data.get("orders"), list) and len(data["orders"]) > 1:
             return None
         candidate = data.get("order_id") or data.get("order_no")
         if not isinstance(candidate, str) and data.get("count") == 1:

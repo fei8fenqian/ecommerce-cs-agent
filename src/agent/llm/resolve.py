@@ -5,6 +5,7 @@
 """
 
 import re
+from typing import Any, Mapping
 
 PRONOUN_MAP: dict[str, str] = {
     # 复合表达必须在“这款 / 那款”前替换，否则会留下“刚刚商品名”这种残句。
@@ -32,17 +33,19 @@ _INVENTORY_QUESTION_MARKERS = ("库存", "现货", "有货")
 _INVENTORY_OFFER_MARKERS = ("需要我", "要不要我", "是否需要", "要不要")
 
 
-def resolve_pronouns(query: str, entities: dict[str, str]) -> str:
+def resolve_pronouns(query: str, entities: Mapping[str, Any]) -> str:
     """用上一轮识别的实体补全指代词和省略商品的购买命令。"""
     if not entities:
         return query
     for pronoun, key in PRONOUN_MAP.items():
         entity = entities.get(key, "")
-        if entity and pronoun in query:
+        if isinstance(entity, str) and entity and pronoun in query:
             query = query.replace(pronoun, entity)
 
     product = entities.get("product", "")
-    if product and product not in query and any(action in query for action in _IMPLICIT_PRODUCT_ACTIONS):
+    if isinstance(product, str) and product and product not in query and any(
+        action in query for action in _IMPLICIT_PRODUCT_ACTIONS
+    ):
         query = f"{query}，商品为 {product}"
     return query
 

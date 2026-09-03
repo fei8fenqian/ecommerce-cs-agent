@@ -54,6 +54,7 @@ import {
   requestReplyDraft,
   requestCheckoutRefund,
   refreshCheckoutPayment,
+  refreshFinanceRefund,
   refreshCheckoutRefund,
   rejectFinanceRefund,
   resumeCheckout,
@@ -70,6 +71,8 @@ import { latestInteractiveChoiceMessageId } from "./chat/presentationState";
 
 // 登录态只属于当前标签页；避免一个标签页退出时清空所有打开中的工作台。
 const STORAGE_KEY = "ecommerce-agent.tab-auth";
+const AUTH_TAB_ID_KEY = "ecommerce-agent.auth-tab-id";
+const AUTH_HANDOFF_CHANNEL = "ecommerce-agent.auth-handoff";
 
 type ChatMessage = {
   id: string;
@@ -77,6 +80,32 @@ type ChatMessage = {
   content: string;
   sequenceNo?: number;
   presentation?: CustomerPresentation | null;
+};
+
+type AuthHandoffRequest = {
+  type: "request";
+  sourceTabId: string;
+  requestId: string;
+};
+
+type AuthHandoffResponse = {
+  type: "response";
+  sourceTabId: string;
+  requestId: string;
+  auth: AuthState;
+};
+
+type TypingQueue = {
+  assistantId: string;
+  pendingText: string;
+  receivedText: string;
+  renderedText: string;
+  doneAnswer?: string;
+  presentation?: CustomerPresentation | null;
+  frameId: number | null;
+  settled: boolean;
+  resolve: () => void;
+  drain: Promise<void>;
 };
 
 type CustomerPage = "service" | "catalog" | "product" | "orders" | "cart" | "tickets";
@@ -136,6 +165,81 @@ function saveAuth(auth: AuthState | null): void {
   else window.sessionStorage.removeItem(STORAGE_KEY);
 }
 
+function randomBrowserId(): string {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+/** 同源新标签只传递一次性 tab id；JWT 永远不进入 URL。 */
+function currentAuthTabId(): string {
+  try {
+    const existing = window.sessionStorage.getItem(AUTH_TAB_ID_KEY);
+    if (existing) return existing;
+    const created = randomBrowserId();
+    window.sessionStorage.setItem(AUTH_TAB_ID_KEY, created);
+    return created;
+  } catch {
+    return randomBrowserId();
+  }
+}
+
+function removeAuthSourceFromUrl(): void {
+  const url = new URL(window.location.href);
+  if (!url.searchParams.has("auth_source")) return;
+  url.searchParams.delete("auth_source");
+  window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+}
+
+/** 只给同源站内链接添加认证接力提示；外链保持原样。 */
+function decorateInternalHref(href?: string): string | undefined {
+  if (!href) return href;
+  try {
+    const url = new URL(href, window.location.href);
+    if (url.origin !== window.location.origin) return href;
+    url.searchParams.set("auth_source", currentAuthTabId());
+    return `${url.pathname}${url.search}${url.hash}`;
+  } catch {
+    return href;
+  }
+}
+
+function isAuthHandoffResponse(value: unknown): value is AuthHandoffResponse {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<AuthHandoffResponse>;
+  const auth = candidate.auth;
+  return candidate.type === "response"
+    && typeof candidate.sourceTabId === "string"
+    && typeof candidate.requestId === "string"
+    && Boolean(auth)
+    && typeof auth?.token === "string"
+    && auth.token.length > 0
+    && Boolean(auth.user)
+    && typeof auth.user.id === "number"
+    && typeof auth.user.username === "string"
+    && ["customer", "agent", "operator", "admin", "finance"].includes(auth.user.role);
+}
+
+/** 认证后的 Markdown 站内链接支持右键新标签，并通过同源 tab handoff 恢复登录。 */
+function CustomerMarkdown({ children }: { children: string }) {
+  return <ReactMarkdown
+    remarkPlugins={[remarkGfm]}
+    components={{
+      a: ({ node: _node, href, children: linkChildren, ...props }) => (
+        <a {...props} href={decorateInternalHref(href)}>{linkChildren}</a>
+      ),
+    }}
+  >{children}</ReactMarkdown>;
+}
+
+function splitGraphemes(value: string): string[] {
+  type SegmenterLike = new (locales?: string | string[], options?: { granularity: "grapheme" }) => {
+    segment: (input: string) => Iterable<{ segment: string }>;
+  };
+  const segmenter = (Intl as unknown as { Segmenter?: SegmenterLike }).Segmenter;
+  if (!segmenter) return Array.from(value);
+  return Array.from(new segmenter("zh", { granularity: "grapheme" }).segment(value), (item) => item.segment);
+}
+
 function formatDate(value: string | number): string {
   const date = typeof value === "number" ? new Date(value * 1000) : new Date(value);
   return Number.isNaN(date.valueOf()) ? String(value) : date.toLocaleString("zh-CN");
@@ -155,6 +259,69 @@ function replaceSessionUrl(sessionId: string | undefined): void {
 /** MVP 入口：按登录身份加载客户服务台或内部客服工作台。 */
 export function App() {
   const [auth, setAuth] = useState<AuthState | null>(loadAuth);
+  const authSource = new URLSearchParams(window.location.search).get("auth_source");
+  const [authHandoffPending, setAuthHandoffPending] = useState(() => Boolean(authSource && !window.sessionStorage.getItem(STORAGE_KEY)));
+
+  useEffect(() => {
+    const tabId = currentAuthTabId();
+    if (!("BroadcastChannel" in window)) return;
+    const channel = new BroadcastChannel(AUTH_HANDOFF_CHANNEL);
+    const respondToHandoff = (event: MessageEvent<AuthHandoffRequest>): void => {
+      const message = event.data;
+      if (!message || message.type !== "request" || message.sourceTabId !== tabId || typeof message.requestId !== "string") return;
+      if (!auth || isJwtExpired(auth.token)) return;
+      const response: AuthHandoffResponse = { type: "response", sourceTabId: tabId, requestId: message.requestId, auth };
+      channel.postMessage(response);
+    };
+    channel.addEventListener("message", respondToHandoff);
+    return () => {
+      channel.removeEventListener("message", respondToHandoff);
+      channel.close();
+    };
+  }, [auth]);
+
+  useEffect(() => {
+    if (!authSource) return;
+    if (auth || !authHandoffPending) {
+      removeAuthSourceFromUrl();
+      return;
+    }
+    if (!("BroadcastChannel" in window)) {
+      const timer = globalThis.setTimeout(() => {
+        removeAuthSourceFromUrl();
+        setAuthHandoffPending(false);
+      }, 1200);
+      return () => globalThis.clearTimeout(timer);
+    }
+
+    const requestId = randomBrowserId();
+    const channel = new BroadcastChannel(AUTH_HANDOFF_CHANNEL);
+    let completed = false;
+    const finish = (nextAuth?: AuthState): void => {
+      if (completed) return;
+      completed = true;
+      if (nextAuth && !isJwtExpired(nextAuth.token)) {
+        saveAuth(nextAuth);
+        setAuth(nextAuth);
+      }
+      removeAuthSourceFromUrl();
+      setAuthHandoffPending(false);
+      channel.close();
+    };
+    const receiveHandoff = (event: MessageEvent<unknown>): void => {
+      const message = event.data;
+      if (!isAuthHandoffResponse(message) || message.sourceTabId !== authSource || message.requestId !== requestId) return;
+      finish(message.auth);
+    };
+    channel.addEventListener("message", receiveHandoff);
+    channel.postMessage({ type: "request", sourceTabId: authSource, requestId } satisfies AuthHandoffRequest);
+    const timeout = window.setTimeout(() => finish(), 1500);
+    return () => {
+      window.clearTimeout(timeout);
+      channel.removeEventListener("message", receiveHandoff);
+      if (!completed) channel.close();
+    };
+  }, [auth, authHandoffPending, authSource]);
 
   const returnToPublicCatalog = (): void => {
     window.history.replaceState(null, "", window.location.pathname);
@@ -169,6 +336,10 @@ export function App() {
     window.addEventListener("ecommerce-agent.auth-invalid", discardExpiredAuth);
     return () => window.removeEventListener("ecommerce-agent.auth-invalid", discardExpiredAuth);
   }, []);
+
+  if (authHandoffPending) {
+    return <main className="login-page"><section className="login-card"><p className="eyebrow">GEEX DIGITAL</p><h1>正在恢复当前标签页</h1><p className="muted">正在通过原标签页确认登录状态…</p></section></main>;
+  }
 
   const onSignedIn = (nextAuth: AuthState): void => {
     saveAuth(nextAuth);
@@ -195,6 +366,7 @@ export function App() {
 function PublicStorefront({ onSignedIn }: { onSignedIn: (auth: AuthState) => void }) {
   const parameters = new URLSearchParams(window.location.search);
   const initialCategory = parameters.get("category");
+  const initialComponentCategory = parameters.get("component_category") ?? "";
   const initialProduct = parameters.get("product");
   const [page, setPage] = useState<"catalog" | "product" | "assistant" | "login">(
     parameters.get("page") === "product" && initialCategory && initialProduct ? "product" : "catalog",
@@ -245,7 +417,7 @@ function PublicStorefront({ onSignedIn }: { onSignedIn: (auth: AuthState) => voi
       <nav aria-label="商城导航">{page !== "catalog" && <button onClick={() => setPage("catalog")}>商品目录</button>}<button onClick={() => openAssistant()}>智能客服</button><button onClick={() => openLogin("cart")}>购物车</button><button onClick={() => openLogin("orders")}>我的订单</button><button onClick={() => openLogin("tickets")}>售后服务</button><i /> <span>你好，</span><button className="store-login" onClick={() => openLogin("catalog")}>请登录</button><button onClick={() => openLogin("catalog")}>免费注册</button></nav>
     </header>
     <section className="store-content">
-      {page === "catalog" ? <ProductCatalog onView={openProduct} /> : page === "product" && detailTarget ? <ProductDetailPage category={detailTarget.category} productId={detailTarget.productId} onBack={() => setPage("catalog")} onAsk={(product, question) => openAssistant(question || `我想了解 ${product.product_name}`, { category: detailTarget.category, productId: product.id })} onRequireLogin={() => openLogin("product")} /> : <PublicAssistantPage initialQuestion={assistantQuestion} initialProduct={assistantProduct} onBrowseProducts={() => setPage("catalog")} />}
+      {page === "catalog" ? <ProductCatalog onView={openProduct} initialComponentCategory={initialComponentCategory} /> : page === "product" && detailTarget ? <ProductDetailPage category={detailTarget.category} productId={detailTarget.productId} onBack={() => setPage("catalog")} onAsk={(product, question) => openAssistant(question || `我想了解 ${product.product_name}`, { category: detailTarget.category, productId: product.id })} onRequireLogin={() => openLogin("product")} /> : <PublicAssistantPage initialQuestion={assistantQuestion} initialProduct={assistantProduct} onBrowseProducts={() => setPage("catalog")} />}
     </section>
   </main>;
 }
@@ -256,6 +428,8 @@ function CustomerStorefront({
   page,
   detailTarget,
   initialQuery,
+  initialCategory,
+  initialComponentCategory,
   onNavigate,
   onViewProduct,
   onBackToCatalog,
@@ -266,6 +440,8 @@ function CustomerStorefront({
   page: Exclude<CustomerPage, "service">;
   detailTarget: { category: "laptops" | "phones" | "components"; productId: string } | null;
   initialQuery: string;
+  initialCategory: "laptops" | "phones" | "components";
+  initialComponentCategory: string;
   onNavigate: (page: CustomerPage) => void;
   onViewProduct: (category: "laptops" | "phones" | "components", productId: string) => void;
   onBackToCatalog: () => void;
@@ -286,7 +462,7 @@ function CustomerStorefront({
       </nav>
     </header>
     <section className="store-content customer-store-content">
-      {page === "catalog" ? <ProductCatalog auth={auth} initialQuery={initialQuery} onView={onViewProduct} />
+      {page === "catalog" ? <ProductCatalog auth={auth} initialQuery={initialQuery} initialCategory={initialCategory} initialComponentCategory={initialComponentCategory} onView={onViewProduct} />
         : page === "product" && detailTarget ? <ProductDetailPage auth={auth} category={detailTarget.category} productId={detailTarget.productId} onBack={onBackToCatalog} onAsk={onAskProduct} />
           : page === "cart" ? <CartPage auth={auth} />
               : page === "orders" ? <OrderList auth={auth} focusOrderId={new URLSearchParams(window.location.search).get("order_id") ?? new URLSearchParams(window.location.search).get("refund_order") ?? undefined} />
@@ -350,6 +526,11 @@ function Shell({ title, subtitle, auth, onSignOut, children }: { title: string; 
 function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: () => Promise<void> }) {
   const pageFromUrl = new URLSearchParams(window.location.search).get("page");
   const catalogQueryFromUrl = new URLSearchParams(window.location.search).get("q") ?? "";
+  const catalogComponentCategoryFromUrl = new URLSearchParams(window.location.search).get("component_category") ?? "";
+  const catalogCategoryFromUrl = (() => {
+    const category = new URLSearchParams(window.location.search).get("category");
+    return category === "laptops" || category === "phones" || category === "components" ? category : "laptops";
+  })();
   const detailCategoryFromUrl = new URLSearchParams(window.location.search).get("category");
   const detailProductIdFromUrl = new URLSearchParams(window.location.search).get("product");
   const [page, setPage] = useState<CustomerPage>(() =>
@@ -379,8 +560,101 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
   const sessionLoadRequestRef = useRef(0);
   const sessionCacheRef = useRef(new Map<string, ChatMessage[]>());
   const pendingUrlSessionRef = useRef(new URLSearchParams(window.location.search).get("session") ?? undefined);
+  const typingQueueRef = useRef<TypingQueue | null>(null);
+
+  const settleTypingQueue = (queue: TypingQueue): void => {
+    if (queue.settled) return;
+    queue.settled = true;
+    queue.resolve();
+    if (typingQueueRef.current === queue) typingQueueRef.current = null;
+  };
+
+  const cancelTyping = (): void => {
+    const queue = typingQueueRef.current;
+    if (!queue) return;
+    if (queue.frameId !== null) window.cancelAnimationFrame(queue.frameId);
+    queue.frameId = null;
+    settleTypingQueue(queue);
+  };
+
+  const pumpTyping = (queue: TypingQueue): void => {
+    if (typingQueueRef.current !== queue || queue.settled) return;
+    if (queue.pendingText) {
+      const units = splitGraphemes(queue.pendingText);
+      // Keep short answers natural while preventing a long answer from
+      // blocking the UI for an excessive amount of time.
+      const count = units.length > 240 ? 8 : units.length > 80 ? 3 : 1;
+      const rendered = units.slice(0, count).join("");
+      queue.pendingText = queue.pendingText.slice(rendered.length);
+      queue.renderedText += rendered;
+      setChatMessages((items) => items.map((message) => message.id === queue.assistantId
+        ? { ...message, content: queue.renderedText }
+        : message));
+      queue.frameId = window.requestAnimationFrame(() => pumpTyping(queue));
+      return;
+    }
+    if (queue.doneAnswer !== undefined) {
+      const finalAnswer = queue.doneAnswer;
+      setChatMessages((items) => items.map((message) => message.id === queue.assistantId
+        ? { ...message, content: finalAnswer, presentation: queue.presentation ?? message.presentation }
+        : message));
+      queue.frameId = null;
+      settleTypingQueue(queue);
+    } else {
+      queue.frameId = null;
+    }
+  };
+
+  const ensureTypingQueue = (assistantId: string): TypingQueue => {
+    const existing = typingQueueRef.current;
+    if (existing && existing.assistantId === assistantId) return existing;
+    cancelTyping();
+    let resolveDrain: () => void = () => undefined;
+    const drain = new Promise<void>((resolve) => { resolveDrain = resolve; });
+    const created: TypingQueue = {
+      assistantId,
+      pendingText: "",
+      receivedText: "",
+      renderedText: "",
+      frameId: null,
+      settled: false,
+      resolve: resolveDrain,
+      drain,
+    };
+    typingQueueRef.current = created;
+    return created;
+  };
+
+  const queueAssistantToken = (assistantId: string, content: string): void => {
+    if (!content) return;
+    const queue = ensureTypingQueue(assistantId);
+    queue.receivedText += content;
+    queue.pendingText += content;
+    if (queue.frameId === null) queue.frameId = window.requestAnimationFrame(() => pumpTyping(queue));
+  };
+
+  const finishAssistantTyping = (assistantId: string, answer: string, presentation?: CustomerPresentation | null): void => {
+    const queue = ensureTypingQueue(assistantId);
+    if (!queue.receivedText) queue.pendingText = answer;
+    else if (answer.startsWith(queue.receivedText)) queue.pendingText += answer.slice(queue.receivedText.length);
+    else {
+      queue.pendingText = answer;
+      queue.renderedText = "";
+    }
+    queue.doneAnswer = answer;
+    queue.presentation = presentation;
+    if (queue.frameId === null) queue.frameId = window.requestAnimationFrame(() => pumpTyping(queue));
+  };
+
+  const waitForTypingDrain = async (assistantId: string): Promise<void> => {
+    const queue = typingQueueRef.current;
+    if (queue && queue.assistantId === assistantId) await queue.drain;
+  };
+
+  useEffect(() => () => cancelTyping(), []);
 
   const navigatePage = (nextPage: CustomerPage): void => {
+    cancelTyping();
     const parameters = new URLSearchParams();
     parameters.set("page", nextPage);
     const currentSession = new URLSearchParams(window.location.search).get("session");
@@ -410,6 +684,7 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
   }, [busy, chatMessages]);
 
   const startNewChat = (): void => {
+    cancelTyping();
     sessionLoadRequestRef.current += 1;
     selectedSessionIdRef.current = undefined;
     replaceSessionUrl(undefined);
@@ -422,6 +697,7 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
   };
 
   const openSession = async (nextSessionId: string): Promise<void> => {
+    cancelTyping();
     setError("");
     const requestNumber = ++sessionLoadRequestRef.current;
     selectedSessionIdRef.current = nextSessionId;
@@ -524,22 +800,19 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
         if (event.event === "token") {
           if (selectedSessionIdRef.current === activeSessionId) {
             setStreamStatus("正在思考…");
-            setChatMessages((items) => items.map((message) => message.id === assistantId ? { ...message, content: message.content + (event.content ?? "") } : message));
+            queueAssistantToken(assistantId, event.content ?? "");
           }
           return;
         }
         if (event.event === "done") {
           const completedAnswer = event.answer ?? event.data?.answer;
           if (selectedSessionIdRef.current === activeSessionId) {
-            setChatMessages((items) => items.map((message) => message.id === assistantId ? {
-              ...message,
-              ...(completedAnswer && !message.content ? { content: completedAnswer } : {}),
-              presentation: event.presentation ?? message.presentation,
-            } : message));
+            finishAssistantTyping(assistantId, completedAnswer ?? "", event.presentation);
             setStreamStatus("");
           }
         }
       }, replaceFromSequence, productContext, interaction);
+      await waitForTypingDrain(assistantId);
       setSessions(await listSessions(auth.token));
       if (activeSessionId && selectedSessionIdRef.current === activeSessionId) {
         const persisted = await getSession(auth.token, activeSessionId);
@@ -548,6 +821,7 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
         setChatMessages(persistedMessages);
       }
     } catch (reason) {
+      cancelTyping();
       if (selectedSessionIdRef.current === activeSessionId) {
         setError(reason instanceof Error ? reason.message : "智能客服暂时不可用");
         setChatMessages((items) => items.filter((message) => message.id !== assistantId || message.content));
@@ -627,6 +901,8 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
       page={page}
       detailTarget={detailTarget}
       initialQuery={catalogQueryFromUrl}
+      initialCategory={catalogCategoryFromUrl}
+      initialComponentCategory={catalogComponentCategoryFromUrl}
       onNavigate={navigatePage}
       onViewProduct={openProductDetail}
       onBackToCatalog={returnToCatalog}
@@ -646,13 +922,13 @@ function CustomerWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: ()
         <button className={page === "orders" ? "active" : "secondary"} onClick={() => navigatePage("orders")}>我的订单</button>
         <button className={page === "tickets" ? "active" : "secondary"} onClick={() => navigatePage("tickets")}>我的售后</button>
       </nav>
-      <section className="sidebar-sessions"><button className="sidebar-section-toggle" onClick={() => setSessionsExpanded((value) => !value)}><span>最近对话</span><span>{sessionsExpanded ? "⌃" : "⌄"}</span></button>{sessionsExpanded && (sessions.length ? sessions.slice(0, 10).map((session) => <div className={`session-item ${sessionId === session.session_id ? "active" : ""}`} key={session.session_id}><a className="session-row" href={sessionUrl(session.session_id)} onClick={(event) => { if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); void openSession(session.session_id); }}><span>{session.title || "新对话"}</span><small>{session.message_count} 条消息</small></a><button className="session-delete" aria-label={`删除会话：${session.title || "新对话"}`} onClick={() => void removeSession(session.session_id)}>×</button></div>) : <p className="sidebar-empty">暂无历史对话</p>)}</section>
+      <section className="sidebar-sessions"><button className="sidebar-section-toggle" onClick={() => setSessionsExpanded((value) => !value)}><span>最近对话</span><span>{sessionsExpanded ? "⌃" : "⌄"}</span></button>{sessionsExpanded && (sessions.length ? sessions.slice(0, 10).map((session) => <div className={`session-item ${sessionId === session.session_id ? "active" : ""}`} key={session.session_id}><a className="session-row" href={decorateInternalHref(sessionUrl(session.session_id))} onClick={(event) => { if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); void openSession(session.session_id); }}><span>{session.title || "新对话"}</span><small>{session.message_count} 条消息</small></a><button className="session-delete" aria-label={`删除会话：${session.title || "新对话"}`} onClick={() => void removeSession(session.session_id)}>×</button></div>) : <p className="sidebar-empty">暂无历史对话</p>)}</section>
       <div className="chat-account"><span>{auth.user.username}</span><button className="text-button" onClick={() => void onSignOut()}>退出</button></div>
     </aside>
     <section className="chat-main">
       <header className="chat-main-header"><div><strong>{page === "service" ? "智能客服" : page === "catalog" ? "商品目录" : page === "product" ? "商品详情" : page === "orders" ? "我的订单" : page === "cart" ? "购物车" : "我的售后"}</strong><span>{page === "service" ? (sessionId ? "当前会话" : "新对话") : "Geex Digital"}</span></div><span className="role-badge">客户服务台</span></header>
-      {page === "catalog" ? <div className="customer-page-scroll"><ProductCatalog initialQuery={catalogQueryFromUrl} auth={auth} onView={openProductDetail} /></div> : page === "product" && detailTarget ? <div className="customer-page-scroll"><ProductDetailPage auth={auth} category={detailTarget.category} productId={detailTarget.productId} onBack={returnToCatalog} onAsk={askAboutProduct} /></div> : page === "orders" ? <div className="customer-page-scroll"><OrderList auth={auth} focusOrderId={new URLSearchParams(window.location.search).get("order_id") ?? new URLSearchParams(window.location.search).get("refund_order") ?? undefined} /></div> : page === "cart" ? <div className="customer-page-scroll"><CartPage auth={auth} /></div> : page === "tickets" ? <div className="customer-page-scroll"><CustomerTicketCenter auth={auth} focusTicketId={new URLSearchParams(window.location.search).get("ticket_id") ?? undefined} /></div> : <section className="chat-canvas">
-        <div ref={chatHistoryRef} className="chat-history chatgpt-history">{chatMessages.length === 0 ? <div className="chat-welcome"><p className="eyebrow">GEEX DIGITAL · AI ASSISTANT</p><h1>今天想解决什么问题？</h1><p>我可以介绍商品、查询已归属订单，也能帮你发起售后工单。</p><div className="prompt-grid"><button className="prompt-card" onClick={() => setQuery("帮我推荐一台预算 5000 元左右的笔记本")}>推荐一台预算 5000 元的笔记本</button><button className="prompt-card" onClick={() => setQuery("帮我查询订单物流")}>查询我的订单物流</button><button className="prompt-card" onClick={() => setQuery("哪些手机目前有库存？")}>查询有库存的手机</button></div></div> : chatMessages.map((message) => <article className={`bubble ${message.role}${!message.content ? " thinking" : ""}`} key={message.id}><div className="message-content">{message.content ? message.role === "assistant" ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown> : message.content : streamStatus || "正在思考…"}{message.role === "assistant" && message.presentation && <PresentationRenderer presentation={message.presentation} onAction={handlePresentationAction} disabled={busy} choiceEnabled={message.id === interactiveChoiceMessageId} />}</div></article>)}</div>
+      {page === "catalog" ? <div className="customer-page-scroll"><ProductCatalog initialQuery={catalogQueryFromUrl} initialCategory={catalogCategoryFromUrl} initialComponentCategory={catalogComponentCategoryFromUrl} auth={auth} onView={openProductDetail} /></div> : page === "product" && detailTarget ? <div className="customer-page-scroll"><ProductDetailPage auth={auth} category={detailTarget.category} productId={detailTarget.productId} onBack={returnToCatalog} onAsk={askAboutProduct} /></div> : page === "orders" ? <div className="customer-page-scroll"><OrderList auth={auth} focusOrderId={new URLSearchParams(window.location.search).get("order_id") ?? new URLSearchParams(window.location.search).get("refund_order") ?? undefined} /></div> : page === "cart" ? <div className="customer-page-scroll"><CartPage auth={auth} /></div> : page === "tickets" ? <div className="customer-page-scroll"><CustomerTicketCenter auth={auth} focusTicketId={new URLSearchParams(window.location.search).get("ticket_id") ?? undefined} /></div> : <section className="chat-canvas">
+        <div ref={chatHistoryRef} className="chat-history chatgpt-history">{chatMessages.length === 0 ? <div className="chat-welcome"><p className="eyebrow">GEEX DIGITAL · AI ASSISTANT</p><h1>今天想解决什么问题？</h1><p>我可以介绍商品、查询已归属订单，也能帮你发起售后工单。</p><div className="prompt-grid"><button className="prompt-card" onClick={() => setQuery("帮我推荐一台预算 5000 元左右的笔记本")}>推荐一台预算 5000 元的笔记本</button><button className="prompt-card" onClick={() => setQuery("帮我查询订单物流")}>查询我的订单物流</button><button className="prompt-card" onClick={() => setQuery("哪些手机目前有库存？")}>查询有库存的手机</button></div></div> : chatMessages.map((message) => <article className={`bubble ${message.role}${!message.content ? " thinking" : ""}`} key={message.id}><div className="message-content">{message.content ? message.role === "assistant" ? <CustomerMarkdown>{message.content}</CustomerMarkdown> : message.content : streamStatus || "正在思考…"}{message.role === "assistant" && message.presentation && <PresentationRenderer presentation={message.presentation} onAction={handlePresentationAction} disabled={busy} choiceEnabled={message.id === interactiveChoiceMessageId} />}</div></article>)}</div>
         <form className="composer chatgpt-composer" onSubmit={submitChat}><textarea value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={handleChatKeyDown} placeholder="给 Geex AI 发送消息" maxLength={2000} rows={1} /><button aria-label="发送消息" disabled={busy || !query.trim()}>{busy ? "…" : "↑"}</button></form><p className="chat-disclaimer">Enter 发送 · Shift / Alt + Enter 换行</p>
       </section>}
     </section>
@@ -678,13 +954,13 @@ function productDetailUrl(category: "laptops" | "phones" | "components", product
   return `${window.location.pathname}?${parameters}`;
 }
 
-function ProductCatalog({ auth, onView, initialQuery = "" }: { auth?: AuthState; onView: (category: "laptops" | "phones" | "components", productId: string) => void; initialQuery?: string }) {
-  const [category, setCategory] = useState<"laptops" | "phones" | "components">("laptops");
+function ProductCatalog({ auth, onView, initialQuery = "", initialCategory = "laptops", initialComponentCategory = "" }: { auth?: AuthState; onView: (category: "laptops" | "phones" | "components", productId: string) => void; initialQuery?: string; initialCategory?: "laptops" | "phones" | "components"; initialComponentCategory?: string }) {
+  const [category, setCategory] = useState<"laptops" | "phones" | "components">(initialCategory);
   const [query, setQuery] = useState(initialQuery);
   const [products, setProducts] = useState<Product[]>([]);
   const [catalogPage, setCatalogPage] = useState<ProductCatalogPage | null>(null);
   const [brand, setBrand] = useState("");
-  const [componentCategory, setComponentCategory] = useState("");
+  const [componentCategory, setComponentCategory] = useState(initialComponentCategory);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const requestVersionRef = useRef(0);
@@ -715,7 +991,13 @@ function ProductCatalog({ auth, onView, initialQuery = "" }: { auth?: AuthState;
       if (requestVersion === requestVersionRef.current) setLoading(false);
     }
   };
-  useEffect(() => { void load(category, query, 1, "", ""); }, [auth?.token]);
+  useEffect(() => {
+    setCategory(initialCategory);
+    setQuery(initialQuery);
+    setBrand("");
+    setComponentCategory(initialComponentCategory);
+    void load(initialCategory, initialQuery, 1, "", initialComponentCategory);
+  }, [auth?.token, initialCategory, initialQuery, initialComponentCategory]);
   const selectCategory = (nextCategory: "laptops" | "phones" | "components"): void => {
     setCategory(nextCategory); setBrand(""); setComponentCategory("");
     void load(nextCategory, query, 1, "", "");
@@ -725,7 +1007,7 @@ function ProductCatalog({ auth, onView, initialQuery = "" }: { auth?: AuthState;
   const selectComponentCategory = (nextComponentCategory: string): void => { setComponentCategory(nextComponentCategory); void load(category, query, 1, brand, nextComponentCategory); };
   const hasPreviousPage = (catalogPage?.page ?? 1) > 1;
   const hasNextPage = catalogPage !== null && catalogPage.page * catalogPage.page_size < catalogPage.total;
-  return <section className="catalog"><header className="catalog-header"><div><p className="eyebrow">PRODUCT CATALOG</p><h2>发现适合你的数码产品</h2><p className="muted">共 {catalogPage?.total ?? 0} 件商品；价格以当前系统数据为准。</p></div><form className="catalog-search" onSubmit={search}><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索品牌或商品名称" maxLength={100} /><button>搜索</button></form></header><div className="catalog-tabs">{PRODUCT_CATEGORIES.map(([value, label]) => <button key={value} className={category === value ? "active" : "secondary"} onClick={() => selectCategory(value)}>{label}</button>)}</div>{catalogPage && category !== "components" && catalogPage.brands.length > 0 && <div className="catalog-filters"><button className={!brand ? "active" : "secondary"} onClick={() => selectBrand("")}>全部品牌</button>{catalogPage.brands.map((item) => <button key={item} className={brand === item ? "active" : "secondary"} onClick={() => selectBrand(item)}>{item}</button>)}</div>}{catalogPage && category === "components" && <div className="catalog-filters"><button className={!componentCategory ? "active" : "secondary"} onClick={() => selectComponentCategory("")}>全部配件</button>{Object.entries(catalogPage.component_categories).map(([value, label]) => <button key={value} className={componentCategory === value ? "active" : "secondary"} onClick={() => selectComponentCategory(value)}>{label}</button>)}</div>}{error && <p className="error">{error}</p>}<div className="product-grid">{loading ? <p className="empty">正在读取商品目录…</p> : products.length ? products.map((product) => <a className="product-card product-card-button product-card-link" key={product.id} href={productDetailUrl(category, product.id)} onClick={(event) => { if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); onView(category, product.id); }}><ProductImage product={product} /><div className="product-info"><span className="product-type">{product.product_type || (category === "laptops" ? "笔记本" : category === "phones" ? "手机" : "电脑配件")}</span><h3>{product.product_name}</h3><p>{product.description.slice(0, 84) || "查看详细配置与 AI 咨询。"}</p><div className="product-bottom"><strong>{product.price === null ? "价格待询" : `¥${product.price.toLocaleString("zh-CN")}`}</strong>{product.stock <= 0 && <span className="out-stock">暂时缺货</span>}</div></div></a>) : <p className="empty">没有找到匹配商品，换个关键词试试。</p>}</div>{catalogPage && <nav className="catalog-pagination" aria-label="商品分页"><button className="secondary" disabled={!hasPreviousPage || loading} onClick={() => void load(category, query, catalogPage.page - 1, brand, componentCategory)}>上一页</button><span>第 {catalogPage.page} / {Math.max(1, Math.ceil(catalogPage.total / catalogPage.page_size))} 页</span><button className="secondary" disabled={!hasNextPage || loading} onClick={() => void load(category, query, catalogPage.page + 1, brand, componentCategory)}>下一页</button></nav>}</section>;
+  return <section className="catalog"><header className="catalog-header"><div><p className="eyebrow">PRODUCT CATALOG</p><h2>发现适合你的数码产品</h2><p className="muted">共 {catalogPage?.total ?? 0} 件商品；价格以当前系统数据为准。</p></div><form className="catalog-search" onSubmit={search}><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索品牌或商品名称" maxLength={100} /><button>搜索</button></form></header><div className="catalog-tabs">{PRODUCT_CATEGORIES.map(([value, label]) => <button key={value} className={category === value ? "active" : "secondary"} onClick={() => selectCategory(value)}>{label}</button>)}</div>{catalogPage && category !== "components" && catalogPage.brands.length > 0 && <div className="catalog-filters"><button className={!brand ? "active" : "secondary"} onClick={() => selectBrand("")}>全部品牌</button>{catalogPage.brands.map((item) => <button key={item} className={brand === item ? "active" : "secondary"} onClick={() => selectBrand(item)}>{item}</button>)}</div>}{catalogPage && category === "components" && <div className="catalog-filters"><button className={!componentCategory ? "active" : "secondary"} onClick={() => selectComponentCategory("")}>全部配件</button>{Object.entries(catalogPage.component_categories).map(([value, label]) => <button key={value} className={componentCategory === value ? "active" : "secondary"} onClick={() => selectComponentCategory(value)}>{label}</button>)}</div>}{error && <p className="error">{error}</p>}<div className="product-grid">{loading ? <p className="empty">正在读取商品目录…</p> : products.length ? products.map((product) => <a className="product-card product-card-button product-card-link" key={product.id} href={decorateInternalHref(productDetailUrl(category, product.id))} onClick={(event) => { if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); onView(category, product.id); }}><ProductImage product={product} /><div className="product-info"><span className="product-type">{product.product_type || (category === "laptops" ? "笔记本" : category === "phones" ? "手机" : "电脑配件")}</span><h3>{product.product_name}</h3><p>{product.description.slice(0, 84) || "查看详细配置与 AI 咨询。"}</p><div className="product-bottom"><strong>{product.price === null ? "价格待询" : `¥${product.price.toLocaleString("zh-CN")}`}</strong>{product.stock <= 0 && <span className="out-stock">暂时缺货</span>}</div></div></a>) : <p className="empty">没有找到匹配商品，换个关键词试试。</p>}</div>{catalogPage && <nav className="catalog-pagination" aria-label="商品分页"><button className="secondary" disabled={!hasPreviousPage || loading} onClick={() => void load(category, query, catalogPage.page - 1, brand, componentCategory)}>上一页</button><span>第 {catalogPage.page} / {Math.max(1, Math.ceil(catalogPage.total / catalogPage.page_size))} 页</span><button className="secondary" disabled={!hasNextPage || loading} onClick={() => void load(category, query, catalogPage.page + 1, brand, componentCategory)}>下一页</button></nav>}</section>;
 }
 
 /** 商品详情承载参数、购买和面向该商品的 AI 咨询，目录卡只负责快速浏览。 */
@@ -988,6 +1270,7 @@ function OrderList({ auth, focusOrderId }: { auth: AuthState; focusOrderId?: str
   const [loading, setLoading] = useState(true);
   const [expandedOrder, setExpandedOrder] = useState<string | null>(null);
   const [resumingOrder, setResumingOrder] = useState<string | null>(null);
+  const [refreshingPaymentOrder, setRefreshingPaymentOrder] = useState<string | null>(null);
   const [cancellingOrder, setCancellingOrder] = useState<string | null>(null);
   const [requestingRefundOrder, setRequestingRefundOrder] = useState<string | null>(null);
   const [confirmingRefundId, setConfirmingRefundId] = useState<string | null>(null);
@@ -1000,23 +1283,28 @@ function OrderList({ auth, focusOrderId }: { auth: AuthState; focusOrderId?: str
   const load = async (paymentOrderNo?: string, isPaymentReturn = false): Promise<void> => {
     setLoading(true); setError("");
     if (isPaymentReturn) setPaymentReturnMessage("正在确认支付结果…");
-    let refreshedOrder: CheckoutOrder | null = null;
     try {
-      if (paymentOrderNo) refreshedOrder = await refreshCheckoutPayment(auth.token, paymentOrderNo);
-    } catch (reason) {
-      if (isPaymentReturn) setPaymentReturnMessage("支付结果暂时无法确认，请稍后刷新。");
-      else setError(reason instanceof Error ? reason.message : "订单暂时无法读取");
-    }
-    try {
-      const [legacyOrders, currentOrders] = await Promise.all([listMyOrders(auth.token), listMyCheckoutOrders(auth.token)]);
+      let [legacyOrders, currentOrders] = await Promise.all([listMyOrders(auth.token), listMyCheckoutOrders(auth.token)]);
+      // The server front-return has already performed authoritative
+      // queryTrans reconciliation.  Read local state first; refresh the
+      // provider only when that convergence has not reached PAID yet.
+      let returnedOrder = paymentOrderNo ? currentOrders.find((order) => order.order_no === paymentOrderNo) : undefined;
+      if (isPaymentReturn && returnedOrder && returnedOrder.status !== "PAID" && returnedOrder.payment_status !== "SUCCEEDED") {
+        try {
+          await refreshCheckoutPayment(auth.token, returnedOrder.order_no);
+          [legacyOrders, currentOrders] = await Promise.all([listMyOrders(auth.token), listMyCheckoutOrders(auth.token)]);
+          returnedOrder = currentOrders.find((order) => order.order_no === paymentOrderNo);
+        } catch {
+          setPaymentReturnMessage("支付结果暂时无法确认，请稍后刷新。");
+        }
+      }
       setOrders(legacyOrders); setCheckoutOrders(currentOrders);
-      if (isPaymentReturn && !refreshedOrder) setPaymentReturnMessage("支付结果暂时无法确认，请稍后刷新。");
-      if (isPaymentReturn && refreshedOrder) setPaymentReturnMessage(refreshedOrder.status === "PAID" || refreshedOrder.payment_status === "SUCCEEDED" ? "支付成功" : "支付结果暂时无法确认，请稍后刷新。");
+      if (isPaymentReturn) setPaymentReturnMessage(returnedOrder?.status === "PAID" || returnedOrder?.payment_status === "SUCCEEDED" ? "支付成功" : "支付结果暂时无法确认，请稍后刷新。");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "订单暂时无法读取");
     } finally { setLoading(false); }
   };
-  useEffect(() => { const parameters = new URLSearchParams(window.location.search); const isPaymentReturn = parameters.get("payment_return") === "1"; const returnedOrderNo = isPaymentReturn ? parameters.get("checkout_order") ?? undefined : undefined; void load(returnedOrderNo, isPaymentReturn); if (isPaymentReturn) window.history.replaceState(null, "", `${window.location.pathname}?page=orders`); }, [auth.token]);
+  useEffect(() => { const parameters = new URLSearchParams(window.location.search); const isPaymentReturn = parameters.get("payment_return") === "1"; const returnedOrderNo = isPaymentReturn ? parameters.get("checkout_order") ?? undefined : undefined; void load(returnedOrderNo, isPaymentReturn).finally(() => { if (isPaymentReturn) window.history.replaceState(null, "", `${window.location.pathname}?page=orders`); }); }, [auth.token]);
   useEffect(() => { const resetResume = (): void => setResumingOrder(null); window.addEventListener("pageshow", resetResume); window.addEventListener("focus", resetResume); return () => { window.removeEventListener("pageshow", resetResume); window.removeEventListener("focus", resetResume); }; }, []);
   useEffect(() => {
     if (!focusOrderId || loading) return;
@@ -1034,7 +1322,8 @@ function OrderList({ auth, focusOrderId }: { auth: AuthState; focusOrderId?: str
     const timer = window.setTimeout(() => setFocusedOrderId(null), 2200);
     return () => { window.cancelAnimationFrame(frame); window.clearTimeout(timer); };
   }, [checkoutOrders, orders, loading, focusOrderId]);
-  const resumePayment = async (orderNo: string): Promise<void> => { setResumingOrder(orderNo); setError(""); try { const session = await resumeCheckout(auth.token, orderNo, window.location.origin); openPaymentCheckout(session); } catch (reason) { setError(reason instanceof Error ? reason.message : "暂时无法继续付款"); setResumingOrder(null); } };
+  const resumePayment = async (orderNo: string): Promise<void> => { setResumingOrder(orderNo); setError(""); try { const session = await resumeCheckout(auth.token, orderNo, window.location.origin); openPaymentCheckout(session); } catch (reason) { setError(reason instanceof Error ? reason.message : "暂时无法继续付款"); await load(); } finally { setResumingOrder(null); } };
+  const refreshPayment = async (orderNo: string): Promise<void> => { setRefreshingPaymentOrder(orderNo); setError(""); try { await refreshCheckoutPayment(auth.token, orderNo); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "支付结果暂时无法确认，请稍后重试"); await load(); } finally { setRefreshingPaymentOrder(null); } };
   const cancelPayment = async (orderNo: string): Promise<void> => { if (!window.confirm("确认取消这笔待支付订单吗？")) return; setCancellingOrder(orderNo); setError(""); try { await cancelCheckout(auth.token, orderNo); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : "暂时无法取消订单"); await load(); } finally { setCancellingOrder(null); } };
   const requestRefund = async (order: CheckoutOrder): Promise<void> => {
     const reason = window.prompt("请简要说明退款原因（可留空）：", "");
@@ -1112,7 +1401,7 @@ function OrderList({ auth, focusOrderId }: { auth: AuthState; focusOrderId?: str
         <header><div><strong>{order.order_no}</strong><small>{formatDate(order.created_at)}</small></div><div className="order-status-group"><span className="status">{checkoutLabel(order)}</span><small>{paymentProviderLabel(order.payment_provider)}</small></div></header>
         <div className="order-products"><p>{order.product_name}<span>×{order.quantity}</span></p></div>
         <footer><div><strong>实付 ¥{(order.total_amount_cents / 100).toLocaleString("zh-CN")}</strong><small>{checkoutDetail(order)}</small></div>
-          {order.status === "PENDING_PAYMENT" && <div className="order-actions"><button className="secondary" disabled={resumingOrder === order.order_no || cancellingOrder === order.order_no} onClick={() => void resumePayment(order.order_no)}>{resumingOrder === order.order_no ? "正在跳转…" : "继续付款"}</button>{order.payment_provider !== "unionpay_test" && <button className="secondary cancel-order-button" disabled={resumingOrder === order.order_no || cancellingOrder === order.order_no} onClick={() => void cancelPayment(order.order_no)}>{cancellingOrder === order.order_no ? "取消中…" : "取消订单"}</button>}</div>}
+          {order.status === "PENDING_PAYMENT" && <div className="order-actions">{order.payment_provider === "unionpay_test" ? <button className="secondary" disabled={refreshingPaymentOrder === order.order_no} onClick={() => void refreshPayment(order.order_no)}>{refreshingPaymentOrder === order.order_no ? "查询中…" : "刷新支付状态"}</button> : <button className="secondary" disabled={resumingOrder === order.order_no || cancellingOrder === order.order_no} onClick={() => void resumePayment(order.order_no)}>{resumingOrder === order.order_no ? "正在跳转…" : "继续付款"}</button>}{order.cancel_supported && <button className="secondary cancel-order-button" disabled={resumingOrder === order.order_no || cancellingOrder === order.order_no} onClick={() => void cancelPayment(order.order_no)}>{cancellingOrder === order.order_no ? "取消中…" : "取消订单"}</button>}</div>}
           {order.refund_eligible && !order.refund_status && <div className="order-actions"><button className="secondary" disabled={requestingRefundOrder === order.order_no} onClick={() => void requestRefund(order)}>{requestingRefundOrder === order.order_no ? "提交中…" : "申请退款"}</button></div>}
           {order.refund_supported && order.refund_status === "PENDING_CONFIRMATION" && order.refund_id && <div className="order-actions"><button className="secondary" disabled={confirmingRefundId === order.refund_id} onClick={() => void confirmRefund(order)}>{confirmingRefundId === order.refund_id ? "退款提交中…" : "确认退款"}</button></div>}
           {order.refund_supported && order.refund_status === "PROCESSING" && order.refund_id && <div className="order-actions"><button className="secondary" disabled={refreshingRefundId === order.refund_id} onClick={() => void refreshRefund(order)}>{refreshingRefundId === order.refund_id ? "查询中…" : "刷新退款状态"}</button></div>}
@@ -1492,15 +1781,48 @@ function Message({ message }: { message: TicketMessage }) {
   return <article className={`message ${message.author_role}`}><header><strong>{label}</strong><small>{formatDate(message.created_at)}</small></header><p>{message.content}</p>{message.ai_assisted && <small className="ai-note">AI 辅助草稿，经客服确认发送</small>}</article>;
 }
 
+type FinanceQueueTab = "pending" | "processing" | "succeeded" | "all";
+
+function financeStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    PENDING_FINANCE_APPROVAL: "待财务审批",
+    PENDING_CONFIRMATION: "待客户确认",
+    PENDING_MERCHANT_REVIEW: "商家审核中",
+    PROCESSING: "退款处理中",
+    SUCCEEDED: "退款成功",
+    COMPLETED: "退款成功",
+    FAILED: "退款失败",
+    REJECTED: "已驳回",
+    PENDING: "支付待确认",
+    NOT_PAID: "未支付",
+  };
+  return labels[status] ?? "待核查";
+}
+
+function financeElapsedLabel(ageSeconds: number): string {
+  const seconds = Math.max(0, Math.floor(ageSeconds));
+  if (seconds < 60) return "刚刚";
+  const minutes = Math.floor(seconds / 60);
+  const days = Math.floor(minutes / (24 * 60));
+  const hours = Math.floor((minutes % (24 * 60)) / 60);
+  const remainingMinutes = minutes % 60;
+  if (days > 0) return hours > 0 ? `${days}天${hours}小时` : `${days}天`;
+  if (hours > 0) return remainingMinutes > 0 ? `${hours}小时${remainingMinutes}分钟` : `${hours}小时`;
+  return `${minutes}分钟`;
+}
+
 function FinanceWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: () => Promise<void> }) {
   const [refunds, setRefunds] = useState<FinanceRefund[]>([]);
   const [anomalies, setAnomalies] = useState<FinanceAnomaly[]>([]);
   const [summary, setSummary] = useState<FinanceAnomalySummary | null>(null);
   const [showSummaryPage, setShowSummaryPage] = useState(false);
+  const [financeTab, setFinanceTab] = useState<FinanceQueueTab>("pending");
+  const [selectedRefundId, setSelectedRefundId] = useState<string | null>(null);
   const [summaryBusy, setSummaryBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [decisionBusy, setDecisionBusy] = useState<string | null>(null);
+  const [refreshingRefundId, setRefreshingRefundId] = useState<string | null>(null);
   const load = async (): Promise<void> => {
     setLoading(true); setError("");
     try {
@@ -1540,12 +1862,26 @@ function FinanceWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: () 
         finance_decided_at: new Date().toISOString(),
       } : item));
     } catch (reason) { setError(reason instanceof Error ? reason.message : "退款决策失败"); }
-    finally { setDecisionBusy(null); }
+    finally { setDecisionBusy(null); await load(); }
+  };
+
+  const refreshRefund = async (refund: FinanceRefund): Promise<void> => {
+    setRefreshingRefundId(refund.refund_id); setError("");
+    try { await refreshFinanceRefund(auth.token, refund.refund_id); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "退款状态暂时无法确认"); }
+    finally { setRefreshingRefundId(null); await load(); }
   };
 
   const pending = refunds.filter((refund) => refund.status === "PENDING_FINANCE_APPROVAL").length;
   const processing = refunds.filter((refund) => refund.status === "PROCESSING").length;
   const succeeded = refunds.filter((refund) => refund.status === "SUCCEEDED").length;
+  const visibleRefunds = useMemo(() => refunds.filter((refund) => {
+    if (financeTab === "pending") return refund.status === "PENDING_FINANCE_APPROVAL";
+    if (financeTab === "processing") return refund.status === "PROCESSING";
+    if (financeTab === "succeeded") return refund.status === "SUCCEEDED" || refund.status === "COMPLETED";
+    return true;
+  }), [financeTab, refunds]);
+  const selectedRefund = refunds.find((refund) => refund.refund_id === selectedRefundId) ?? null;
   const anomalyLabel = (anomaly: FinanceAnomaly): string => {
     if (anomaly.anomaly_type === "REFUND_PENDING_APPROVAL") return "退款待审批";
     if (anomaly.anomaly_type === "REFUND_FAILED") return "退款失败";
@@ -1581,8 +1917,11 @@ function FinanceWorkspace({ auth, onSignOut }: { auth: AuthState; onSignOut: () 
 
   return <Shell title="财务工作台" subtitle="查看退款队列和支付结果；审批、支付和退款状态变化必须经过确定性业务服务。" auth={auth} onSignOut={onSignOut}>
     <section className="metric-grid"><Metric label="退款总数" value={loading ? "—" : String(refunds.length)} /><Metric label="待处理" value={loading ? "—" : String(pending)} tone={pending ? "warning" : "normal"} /><Metric label="处理中" value={loading ? "—" : String(processing)} /><Metric label="已成功" value={loading ? "—" : String(succeeded)} /><Metric label="资金异常" value={loading ? "—" : String(anomalies.length)} tone={anomalies.length ? "danger" : "normal"} /></section>
-    <section className="panel finance-anomaly-panel"><div className="section-title"><div><p className="eyebrow">EXCEPTION QUEUE</p><h2>资金异常</h2><p className="muted">仅根据本地支付和退款事实筛选；这里不会自动改变资金状态。</p></div><button className="secondary" onClick={() => void generateSummary()} disabled={loading || summaryBusy || !anomalies.length}>{summaryBusy ? "生成中…" : "生成 Agent 摘要"}</button></div>{loading ? <p className="empty">正在扫描资金异常…</p> : anomalies.length ? <div className="finance-anomaly-list">{anomalies.map((anomaly) => <article className="finance-anomaly-row" key={`${anomaly.anomaly_type}-${anomaly.reference_id}`}><div><strong>{anomalyLabel(anomaly)}</strong><small>{anomaly.order_no} · {formatDate(anomaly.occurred_at)}</small></div><div><span className="status finance-anomaly-status">{anomaly.status}</span><strong>¥{(anomaly.amount_cents / 100).toLocaleString("zh-CN", { minimumFractionDigits: 2 })}</strong></div><p>{anomaly.reason || "需要财务核查本地事实和外部渠道状态"} · 已持续 {Math.max(1, Math.floor(anomaly.age_seconds / 60))} 分钟</p></article>)}</div> : <div className="role-empty"><div className="agent-empty-icon">✓</div><h3>当前没有资金异常</h3><p>支付和退款状态目前均在可接受范围内。</p></div>}</section>
-    <section className="panel finance-refund-panel"><div className="section-title"><div><p className="eyebrow">REFUND QUEUE</p><h2>退款队列</h2><p className="muted">只处理进入财务审批范围的退款；金额和订单事实由服务端确定。</p></div><button className="secondary" onClick={() => void load()} disabled={loading || decisionBusy !== null}>{loading ? "读取中…" : "刷新"}</button></div>{error && <p className="error">{error}</p>}{loading ? <p className="empty">正在读取退款记录…</p> : refunds.length ? <div className="finance-refund-list">{refunds.map((refund) => <article className="finance-refund-row" key={refund.refund_id}><div><strong>{refund.order_no}</strong><small>{refund.refund_id} · {formatDate(refund.requested_at)}</small></div><div><span className={`status finance-status-${refund.status}`}>{refund.status}</span><strong>¥{(refund.amount_cents / 100).toLocaleString("zh-CN", { minimumFractionDigits: 2 })}</strong></div><p>{refund.reason || "客户未填写原因"}</p>{refund.status === "PENDING_FINANCE_APPROVAL" && <div className="finance-decision-actions"><button disabled={decisionBusy !== null} onClick={() => void decide(refund, "approve")}>批准并发起退款</button><button className="secondary" disabled={decisionBusy !== null} onClick={() => void decide(refund, "reject")}>驳回</button></div>}</article>)}</div> : <div className="role-empty"><div className="agent-empty-icon">✓</div><h3>当前没有退款记录</h3><p>客户提交退款申请后，记录会出现在这里。</p></div>}</section>
+    <section className="panel finance-anomaly-panel"><div className="section-title"><div><p className="eyebrow">EXCEPTION QUEUE</p><h2>资金异常</h2><p className="muted">仅根据本地支付和退款事实筛选；这里不会自动改变资金状态。</p></div><button className="secondary" onClick={() => void generateSummary()} disabled={loading || summaryBusy || !anomalies.length}>{summaryBusy ? "生成中…" : "AI 分析"}</button></div>{loading ? <p className="empty">正在扫描资金异常…</p> : anomalies.length ? <div className="finance-anomaly-list">{anomalies.map((anomaly) => <article className="finance-anomaly-row" key={`${anomaly.anomaly_type}-${anomaly.reference_id}`}><div><strong>{anomalyLabel(anomaly)}</strong><small>{anomaly.order_no} · {formatDate(anomaly.occurred_at)}</small></div><div><span className="status finance-anomaly-status">{financeStatusLabel(anomaly.status)}</span><strong>¥{(anomaly.amount_cents / 100).toLocaleString("zh-CN", { minimumFractionDigits: 2 })}</strong></div><p>{anomaly.reason || "需要财务核查本地事实和外部渠道状态"} · 已持续 {financeElapsedLabel(anomaly.age_seconds)}</p></article>)}</div> : <div className="role-empty"><div className="agent-empty-icon">✓</div><h3>当前没有资金异常</h3><p>支付和退款状态目前均在可接受范围内。</p></div>}</section>
+    <section className="panel finance-refund-panel"><div className="section-title"><div><p className="eyebrow">REFUND QUEUE</p><h2>退款队列</h2><p className="muted">只处理进入财务审批范围的退款；金额和订单事实由服务端确定。</p></div><button className="secondary" onClick={() => void load()} disabled={loading || decisionBusy !== null}>{loading ? "读取中…" : "刷新"}</button></div>{error && <p className="error">{error}</p>}
+      <div className="finance-queue-tabs" role="tablist" aria-label="退款状态筛选">{([ ["pending", `待审批 ${pending}`], ["processing", `处理中 ${processing}`], ["succeeded", `已完成 ${succeeded}`], ["all", `全部 ${refunds.length}`] ] as Array<[FinanceQueueTab, string]>).map(([tab, label]) => <button key={tab} className={financeTab === tab ? "active" : "secondary"} role="tab" aria-selected={financeTab === tab} onClick={() => setFinanceTab(tab)}>{label}</button>)}</div>
+      {loading ? <p className="empty">正在读取退款记录…</p> : visibleRefunds.length ? <div className="finance-refund-layout"><div className="finance-refund-list">{visibleRefunds.map((refund) => <article className={`finance-refund-row${selectedRefundId === refund.refund_id ? " selected" : ""}`} key={refund.refund_id}><div><strong>{refund.order_no}</strong><small>申请于 {formatDate(refund.requested_at)}</small></div><div><span className={`status finance-status-${refund.status}`}>{financeStatusLabel(refund.status)}</span><strong>¥{(refund.amount_cents / 100).toLocaleString("zh-CN", { minimumFractionDigits: 2 })}</strong></div><p>{refund.reason || "客户未填写原因"}</p><div className="finance-row-footer"><button className="text-button" onClick={() => setSelectedRefundId(refund.refund_id)}>{selectedRefundId === refund.refund_id ? "已查看详情" : "查看详情"}</button>{refund.status === "PENDING_FINANCE_APPROVAL" && <div className="finance-decision-actions"><button disabled={decisionBusy !== null} onClick={() => void decide(refund, "approve")}>批准并发起退款</button><button className="secondary" disabled={decisionBusy !== null} onClick={() => void decide(refund, "reject")}>驳回</button></div>}{refund.status === "PROCESSING" && <div className="finance-decision-actions"><button className="secondary" disabled={refreshingRefundId === refund.refund_id} onClick={() => void refreshRefund(refund)}>{refreshingRefundId === refund.refund_id ? "查询中…" : "刷新退款状态"}</button></div>}</div></article>)}</div>{selectedRefund && <aside className="finance-refund-detail"><div className="section-title"><div><p className="eyebrow">REFUND DETAIL</p><h3>退款详情</h3></div><button className="text-button" onClick={() => setSelectedRefundId(null)}>关闭</button></div><dl><div><dt>订单</dt><dd>{selectedRefund.order_no}</dd></div><div><dt>状态</dt><dd>{financeStatusLabel(selectedRefund.status)}</dd></div><div><dt>金额</dt><dd>¥{(selectedRefund.amount_cents / 100).toLocaleString("zh-CN", { minimumFractionDigits: 2 })}</dd></div><div><dt>申请时间</dt><dd>{formatDate(selectedRefund.requested_at)}</dd></div><div><dt>备注</dt><dd>{selectedRefund.reason || "客户未填写原因"}</dd></div></dl><details><summary>技术信息</summary><code>{selectedRefund.refund_id}</code></details></aside>}</div> : <div className="role-empty"><div className="agent-empty-icon">✓</div><h3>当前没有符合条件的退款</h3><p>{financeTab === "all" ? "客户提交退款申请后，记录会出现在这里。" : "切换其他状态标签查看全部退款。"}</p></div>}
+    </section>
   </Shell>;
 }
 
@@ -1618,7 +1957,7 @@ function FinanceSummaryPage({
       </article>
       <section className="panel finance-summary-facts">
         <div className="section-title"><div><p className="eyebrow">SOURCE FACTS</p><h2>对应异常事实</h2></div><span className="status">只读</span></div>
-        {anomalies.length ? <div className="finance-anomaly-list">{anomalies.map((anomaly) => <article className="finance-anomaly-row" key={`${anomaly.anomaly_type}-${anomaly.reference_id}`}><div><strong>{anomalyLabel(anomaly)}</strong><small>{anomaly.order_no} · {formatDate(anomaly.occurred_at)}</small></div><div><span className="status finance-anomaly-status">{anomaly.status}</span><strong>¥{(anomaly.amount_cents / 100).toLocaleString("zh-CN", { minimumFractionDigits: 2 })}</strong></div><p>{anomaly.reason || "需要财务核查本地事实和外部渠道状态"} · 已持续 {Math.max(1, Math.floor(anomaly.age_seconds / 60))} 分钟</p></article>)}</div> : <p className="empty">本次没有可展示的异常事实。</p>}
+        {anomalies.length ? <div className="finance-anomaly-list">{anomalies.map((anomaly) => <article className="finance-anomaly-row" key={`${anomaly.anomaly_type}-${anomaly.reference_id}`}><div><strong>{anomalyLabel(anomaly)}</strong><small>{anomaly.order_no} · {formatDate(anomaly.occurred_at)}</small></div><div><span className="status finance-anomaly-status">{financeStatusLabel(anomaly.status)}</span><strong>¥{(anomaly.amount_cents / 100).toLocaleString("zh-CN", { minimumFractionDigits: 2 })}</strong></div><p>{anomaly.reason || "需要财务核查本地事实和外部渠道状态"} · 已持续 {financeElapsedLabel(anomaly.age_seconds)}</p></article>)}</div> : <p className="empty">本次没有可展示的异常事实。</p>}
       </section>
     </section>
   </Shell>;

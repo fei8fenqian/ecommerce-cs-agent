@@ -82,11 +82,25 @@ class SearchComponent(BaseTool):
             if not raw_results:
                 return ToolResult(name=self.name, status="error", error="未找到相关内容")
             for r in raw_results:
+                product_id = r.get("product_id") or r.get("id")
+                component_category = r.get("component_category") or r.get("category")
                 results.append(
                     {
+                        # Keep the server-owned catalog identity in the observation.  The
+                        # display title is for prose only; a later "就选这款/购买" turn
+                        # must not have to reconstruct a product from text search.
+                        "id": product_id,
+                        "product_id": product_id,
+                        "product_name": r.get("product_name") or r.get("title"),
+                        "display_title": r.get("display_title") or r.get("title"),
+                        "product_category": "components",
+                        "component_category": component_category,
                         "title": r.get("title"),
                         "category": r.get("category"),
                         "price": r.get("price"),
+                        "comparison_metadata": r.get("comparison_metadata")
+                        if isinstance(r.get("comparison_metadata"), dict)
+                        else {},
                         "content": r.get("content", "")[:200] + ("..." if len(r.get("content", "")) > 200 else ""),
                         "score": r.get("score"),
                         "normalized": r.get("normalized"),

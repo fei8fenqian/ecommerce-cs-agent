@@ -230,6 +230,7 @@ export interface CheckoutOrder {
   refund_id: string | null;
   refund_status: string | null;
   payment_provider: PaymentProvider;
+  cancel_supported: boolean;
   refund_supported: boolean;
   refund_eligible: boolean;
 }
@@ -347,7 +348,14 @@ async function api<T>(path: string, options: RequestInit = {}, token?: string): 
   if (options.body) headers.set("Content-Type", "application/json");
   if (token) headers.set("Authorization", `Bearer ${token}`);
 
-  const response = await fetch(path, { ...options, credentials: "same-origin", headers });
+  let response: Response;
+  try {
+    response = await fetch(path, { ...options, credentials: "same-origin", headers });
+  } catch {
+    // Browser network exceptions otherwise surface as the raw, non-localized
+    // TypeError("Failed to fetch") in Orders immediately after a payment return.
+    throw new ApiError("服务暂时无法连接，请稍后重试", 0, "NETWORK_UNAVAILABLE");
+  }
   if (!response.ok) {
     const body = (await response.json().catch(() => ({}))) as ErrorBody;
     if (token && response.status === 401) notifyAuthenticationExpired();
@@ -400,19 +408,24 @@ export async function streamChat(
   product?: ProductContextRef,
   interaction?: ChatInteraction,
 ): Promise<void> {
-  const response = await fetch("/api/v1/chat/stream", {
-    method: "POST",
-    credentials: "same-origin",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}`, Accept: "text/event-stream" },
-    body: JSON.stringify({
-      query,
-      session_id: sessionId,
-      replace_from_sequence: replaceFromSequence,
-      product_category: product?.category,
-      product_id: product?.productId,
-      interaction,
-    }),
-  });
+  let response: Response;
+  try {
+    response = await fetch("/api/v1/chat/stream", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}`, Accept: "text/event-stream" },
+      body: JSON.stringify({
+        query,
+        session_id: sessionId,
+        replace_from_sequence: replaceFromSequence,
+        product_category: product?.category,
+        product_id: product?.productId,
+        interaction,
+      }),
+    });
+  } catch {
+    throw new ApiError("服务暂时无法连接，请稍后重试", 0, "NETWORK_UNAVAILABLE");
+  }
   if (!response.ok || !response.body) {
     const body = (await response.json().catch(() => ({}))) as ErrorBody;
     if (response.status === 401) notifyAuthenticationExpired();
@@ -427,7 +440,12 @@ export async function streamChat(
   const decoder = new TextDecoder();
   let pending = "";
   while (true) {
-    const chunk = await reader.read();
+    let chunk: ReadableStreamReadResult<Uint8Array>;
+    try {
+      chunk = await reader.read();
+    } catch {
+      throw new ApiError("服务暂时无法连接，请稍后重试", 0, "NETWORK_UNAVAILABLE");
+    }
     if (chunk.done) break;
     pending += decoder.decode(chunk.value, { stream: true });
     const messages = pending.split("\n\n");
@@ -559,6 +577,13 @@ export async function listMyCheckoutOrders(token: string): Promise<CheckoutOrder
 /** 以支付宝网关的交易查询结果刷新一笔待支付订单。 */
 export function refreshCheckoutPayment(token: string, orderNo: string): Promise<CheckoutOrder> {
   return api<CheckoutOrder>(`/api/v1/checkout/orders/${encodeURIComponent(orderNo)}/refresh-payment`, {
+    method: "POST",
+  }, token);
+}
+
+/** 财务只读核对一笔处理中退款；不会再次提交退款。 */
+export function refreshFinanceRefund(token: string, refundId: string): Promise<CheckoutRefund> {
+  return api<CheckoutRefund>(`/api/v1/checkout/finance/refunds/${encodeURIComponent(refundId)}/refresh`, {
     method: "POST",
   }, token);
 }

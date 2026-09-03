@@ -22,8 +22,9 @@ class TrackOrder(BaseTool):
         适用场景：用户询问"我的订单到哪了""帮我查一下订单""这个手机号下的订单"等。
         查单规则：优先用订单号精确查询；若无订单号则查询当前登录客户最近订单；
         手机号仅用于兼容已确认归属的历史订单。
-        不传订单号时如果返回多个订单，必须先列出商品、订单号和履约阶段，请客户选择，
-        不得把其中一笔当成“最近买的某商品”。履约阶段以 delivery_state 为准：
+        不传订单号时可以返回当前客户的多个订单。多结果本身不是失败，也不必然要求客户选择；
+        只有当前业务目标必须绑定单一订单且服务端不能从客户原话唯一解析时，才会要求选择。
+        你不得自行把其中一笔当成“最近买的某商品”。履约阶段以 delivery_state 为准：
         NOT_SHIPPED(未发货)、IN_TRANSIT(运输中)、DELIVERED(已签收)、
         NOT_APPLICABLE(已取消/已退款，不进入物流) 或 UNKNOWN(无法核验)。
         返回结果中的 order_source=checkout 表示当前商城新交易，
@@ -74,11 +75,25 @@ class TrackOrder(BaseTool):
             if order_id:
                 data: dict[str, Any] = _with_delivery_facts(orders[0])
             else:
-                visible_orders = [_with_delivery_facts(order) for order in orders]
+                visible_orders = []
+                for recency_rank, order in enumerate(orders, start=1):
+                    projected = _with_delivery_facts(order)
+                    # The rank is calculated from the server-owned order
+                    # ordering.  It is semantic metadata for subject
+                    # resolution, never an order identifier or a transaction
+                    # fact chosen by the model.
+                    if "created_at" in projected or "order_date" in projected:
+                        projected["recency_rank"] = recency_rank
+                    visible_orders.append(projected)
                 data = {
                     "count": len(visible_orders),
                     "orders": visible_orders,
-                    "selection_required": len(visible_orders) > 1,
+                    "multiple_results": len(visible_orders) > 1,
+                    # Multiple results are a valid order.list observation.  A
+                    # singular workflow may ask the Control Plane for a
+                    # choice, but the discovery tool cannot decide that from
+                    # its own result shape.
+                    "selection_required": False,
                 }
 
             return ToolResult(name=self.name, status="success", data=data)

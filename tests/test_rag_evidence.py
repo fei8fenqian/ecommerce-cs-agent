@@ -36,6 +36,36 @@ def test_knowledge_context_marks_general_knowledge_as_a_source() -> None:
     assert "退款说明" in context
 
 
+def test_catalog_product_document_keeps_canonical_identity_without_duplicate_brand() -> None:
+    document = retrieve._catalog_product_document(
+        product_id="LP-1",
+        product_name="联想拯救者Y9000P",
+        brand="联想",
+        price=9999,
+        description="游戏本",
+        category="laptops",
+    )
+
+    assert document["product_id"] == "LP-1"
+    assert document["product_name"] == "联想拯救者Y9000P"
+    assert document["category"] == "laptops"
+    assert document["display_title"] == "联想拯救者Y9000P"
+
+
+def test_component_catalog_document_keeps_detail_navigation_category() -> None:
+    document = retrieve._catalog_product_document(
+        product_id="COMP-1",
+        product_name="三星 DDR5 内存",
+        brand="三星",
+        price=699,
+        description="内存",
+        category="components",
+    )
+
+    assert document["product_id"] == "COMP-1"
+    assert document["category"] == "components"
+
+
 @pytest.mark.asyncio
 async def test_hybrid_search_keeps_bm25_only_runtime_knowledge_candidate(monkeypatch: pytest.MonkeyPatch) -> None:
     vector_doc = {"id": "vector-1", "title": "向量命中", "content": "普通内容", "source": "runtime.md"}
@@ -140,3 +170,30 @@ async def test_search_product_cannot_be_used_as_knowledge_backdoor() -> None:
 
     assert result.is_success is False
     assert "仅支持商品目录" in result.error
+
+
+def test_product_search_and_purchase_require_catalog_evidence_without_llm_prompt_reliance() -> None:
+    search = resolve_evidence(domain="product", operation="search_product", target="agent")
+    purchase = resolve_evidence(domain="product", operation="purchase", target="agent")
+
+    assert search.catalog is True
+    assert purchase.catalog is True
+
+
+def test_catalog_document_projects_public_comparison_metadata() -> None:
+    document = retrieve._catalog_product_document(
+        product_id="PHONE-1",
+        product_name="Phone Example 1TB",
+        brand="ExampleBrand",
+        price=9999,
+        description="旗舰手机",
+        category="phones",
+        metadata={"model": "Example Pro", "storage": "1TB", "screen_size": "6.2-inch"},
+    )
+
+    assert document["comparison_metadata"] == {
+        "brand": "ExampleBrand",
+        "model": "Example Pro",
+        "storage": "1TB",
+        "screen_size": "6.2-inch",
+    }

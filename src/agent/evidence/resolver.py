@@ -41,6 +41,8 @@ _EVIDENCE_BY_ROUTE: dict[tuple[str, str], EvidencePlan] = {
     ("price_protection", "refund_status"): EvidencePlan(knowledge="required", live_facts=True),
     ("product", "device_troubleshooting"): EvidencePlan(knowledge="required"),
     ("product", "product_compatibility"): EvidencePlan(knowledge="optional", catalog=True),
+    ("product", "search_product"): EvidencePlan(catalog=True),
+    ("product", "purchase"): EvidencePlan(catalog=True),
 }
 
 

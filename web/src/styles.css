@@ -82,6 +82,23 @@ h1, h2, p { margin-top: 0; } h1 { margin-bottom: 6px; font-size: 28px; } h2 { ma
 .finance-summary-hero small { color: #78859b; }
 .agent-summary-text { white-space: pre-wrap; line-height: 1.7; }
 .finance-summary-facts .section-title { margin-bottom: 12px; }
+.finance-queue-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0 4px; padding-bottom: 12px; border-bottom: 1px solid #edf1f7; }
+.finance-queue-tabs button { width: auto; min-width: 96px; }
+.finance-queue-tabs button.active { color: white; background: #315fe8; }
+.finance-refund-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(250px, 300px); gap: 16px; align-items: start; }
+.finance-refund-row.selected { border-color: #9eb8ff; box-shadow: 0 0 0 2px #315fe81a; }
+.finance-row-footer { display: flex !important; align-items: center; justify-content: space-between; gap: 10px; grid-column: 1 / -1; }
+.finance-row-footer .finance-decision-actions { margin-left: auto; }
+.finance-refund-detail { position: sticky; top: 18px; padding: 16px; border: 1px solid #dfe5f2; border-radius: 11px; background: #fff; }
+.finance-refund-detail .section-title { margin-bottom: 12px; }
+.finance-refund-detail h3 { margin: 0; }
+.finance-refund-detail dl { display: grid; gap: 9px; margin: 0; }
+.finance-refund-detail dl > div { display: grid; grid-template-columns: 70px minmax(0, 1fr); gap: 8px; font-size: 13px; }
+.finance-refund-detail dt { color: #78859b; }
+.finance-refund-detail dd { min-width: 0; margin: 0; color: #2c3953; font-weight: 600; overflow-wrap: anywhere; }
+.finance-refund-detail details { margin-top: 14px; color: #78859b; font-size: 12px; }
+.finance-refund-detail code { display: block; margin-top: 7px; overflow-wrap: anywhere; color: #65738c; }
+@media (max-width: 760px) { .finance-refund-layout { grid-template-columns: 1fr; }.finance-refund-detail { position: static; }.finance-row-footer { align-items: flex-start; flex-direction: column; }.finance-row-footer .finance-decision-actions { margin-left: 0; } }
 
 /* 对话区和侧栏各自拥有滚动容器，滚轮不会带动另一侧或整个页面。 */
 html, body, #root { height: 100%; overflow: hidden; }

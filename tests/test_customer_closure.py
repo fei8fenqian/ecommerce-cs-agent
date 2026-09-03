@@ -11,7 +11,14 @@ from agent.decision_context import SUBJECT_CONTEXT_RESET_MARKER
 from agent.engines.loop import LoopResult
 from agent.llm.intent_router import Intent, SupportRequest
 from agent.tools_registry import ToolContext, ToolResult
-from api.chat import _apply_customer_refund_fact_boundary, _immediate_trusted_subject_continuation
+from api.chat import (
+    _apply_customer_refund_fact_boundary,
+    _await_support_case_customer,
+    _immediate_trusted_subject_continuation,
+    _trusted_previous_subject_for_resolution,
+    _workflow_subject_context_kwargs,
+)
+from service.support_case_service import SupportCaseService
 from store.support_case_store import SupportCase
 
 
@@ -36,6 +43,106 @@ def _completed_eligibility_case(*, reset: bool = False) -> SupportCase:
         updated_at=datetime.now(UTC),
         completed_at=datetime.now(UTC),
     )
+
+
+def _active_eligibility_case() -> SupportCase:
+    base = _completed_eligibility_case()
+    return SupportCase(**{**base.__dict__, "status": "ACTIVE", "completed_at": None})
+
+
+@pytest.mark.asyncio
+async def test_active_case_subject_is_previous_resolver_context_on_natural_language_turn():
+    registry = SimpleNamespace(
+        execute=AsyncMock(return_value=ToolResult(name="track_order", status="success", data={"order_id": "SO-AMD"}))
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(registry=registry)))
+    intent = Intent(
+        target="agent",
+        requests=[SupportRequest(domain="refund", operation="status")],
+        subject_relation="same",
+    )
+
+    kwargs = await _workflow_subject_context_kwargs(
+        request,
+        intent=intent,
+        support_case=_active_eligibility_case(),
+        recent_case=None,
+        tool_context=ToolContext(user_id=7, role="customer"),
+        structured_interaction=False,
+    )
+
+    assert kwargs == {"previous_subjects": {"order_id": "SO-AMD"}}
+    assert "selected_subjects" not in kwargs
+    registry.execute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_structured_choice_remains_current_subject_without_semantic_rebinding():
+    registry = SimpleNamespace(execute=AsyncMock())
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(registry=registry)))
+    intent = Intent(target="agent", requests=[SupportRequest(domain="refund", operation="status")])
+
+    kwargs = await _workflow_subject_context_kwargs(
+        request,
+        intent=intent,
+        support_case=_active_eligibility_case(),
+        recent_case=None,
+        tool_context=ToolContext(user_id=7, role="customer"),
+        structured_interaction=True,
+    )
+
+    assert kwargs == {"selected_subjects": {"order_id": "SO-AMD"}}
+    registry.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_customer_claim_verification_persists_pending_choice_request_stack():
+    case = _active_eligibility_case()
+    service = SupportCaseService()
+    service.await_customer = AsyncMock(return_value=case)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(support_case_service=service)))
+    intent = Intent(
+        target="agent",
+        speech_act="STATEMENT",
+        domain="refund",
+        operation="status",
+        customer_claims=["refund_submitted"],
+    )
+
+    updated = await _await_support_case_customer(
+        request,
+        case=case,
+        intent=intent,
+        workflow_progress={
+            "goal_status": "awaiting_customer",
+            "next_action": "ASK_CHOICE",
+            "pending_choices": [
+                {"order_id": "SO-A", "product_name": "HUAWEI Mate70"},
+                {"order_id": "SO-B", "product_name": "HUAWEI Pura70"},
+            ],
+        },
+    )
+
+    assert updated is case
+    kwargs = service.await_customer.await_args.kwargs
+    assert kwargs["request_stack"] == [
+        {
+            "domain": "refund",
+            "operation": "status",
+            "desired_outcome": "",
+            "goal_modifier": "",
+            "subject_refs": [],
+            "customer_claims": ["refund_submitted"],
+            "ambiguities": [],
+            "missing_facts": [],
+            "next_step": "LOOKUP",
+            "required_tools": [],
+            "risk": "read_only",
+        }
+    ]
+    assert kwargs["pending"]["kind"] == "customer_choice"
+    assert [item["order_id"] for item in kwargs["pending"]["choices"]] == ["SO-A", "SO-B"]
+
 
 
 @pytest.mark.asyncio
@@ -183,3 +290,105 @@ async def test_refund_follow_up_transcript_keeps_subject_but_returns_safe_partia
     assert result.response_control["mode"] == "FACT"
     assert result.response_control["subject_id"] == "SO-AMD"
     assert result.response_control["fact_provenance"] == {"refund_status": "current"}
+
+
+@pytest.mark.asyncio
+async def test_trusted_subject_continuation_is_vetoed_by_fresh_unique_identity_contradiction(monkeypatch):
+    registry = SimpleNamespace(
+        execute=AsyncMock(return_value=ToolResult(name="track_order", status="success", data={"order_id": "SO-AMD"}))
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(registry=registry)))
+    monkeypatch.setattr(
+        "api.chat._customer_subject_choices",
+        AsyncMock(
+            return_value=[
+                {"order_id": "SO-HW", "product_name": "HUAWEI Mate 70", "recency_rank": 1},
+                {"order_id": "SO-AP", "product_name": "Apple iPhone Air 1TB", "recency_rank": 2},
+                {"order_id": "SO-AMD", "product_name": "Apple iPhone Air 512GB", "recency_rank": 3},
+            ]
+        ),
+    )
+    intent = Intent(
+        target="agent",
+        requests=[SupportRequest(domain="refund", operation="request")],
+        case_update="continue",
+        subject_relation="same",
+    )
+
+    inherited = await _immediate_trusted_subject_continuation(
+        request,
+        intent=intent,
+        recent_case=_completed_eligibility_case(),
+        raw_query="我问的是刚刚买的华为手机",
+        tool_context=ToolContext(user_id=7, role="customer"),
+    )
+
+    assert inherited is None
+    registry.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_trusted_subject_continuation_is_vetoed_when_fresh_identity_is_ambiguous(monkeypatch):
+    registry = SimpleNamespace(execute=AsyncMock())
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(registry=registry)))
+    monkeypatch.setattr(
+        "api.chat._customer_subject_choices",
+        AsyncMock(
+            return_value=[
+                {"order_id": "SO-HW-1", "product_name": "HUAWEI Mate 70", "recency_rank": 1},
+                {"order_id": "SO-HW-2", "product_name": "HUAWEI Pura 80", "recency_rank": 2},
+                {"order_id": "SO-AMD", "product_name": "Apple iPhone Air 512GB", "recency_rank": 3},
+            ]
+        ),
+    )
+    intent = Intent(
+        target="agent",
+        requests=[SupportRequest(domain="refund", operation="request")],
+        case_update="continue",
+        subject_relation="same",
+    )
+
+    inherited = await _immediate_trusted_subject_continuation(
+        request,
+        intent=intent,
+        recent_case=_completed_eligibility_case(),
+        raw_query="刚买的华为手机我想处理一下",
+        tool_context=ToolContext(user_id=7, role="customer"),
+    )
+
+    assert inherited is None
+    registry.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_trusted_subject_continuation_keeps_router_semantics_without_identity_evidence(monkeypatch):
+    registry = SimpleNamespace(
+        execute=AsyncMock(return_value=ToolResult(name="track_order", status="success", data={"order_id": "SO-AMD"}))
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(registry=registry)))
+    monkeypatch.setattr(
+        "api.chat._customer_subject_choices",
+        AsyncMock(
+            return_value=[
+                {"order_id": "SO-HW", "product_name": "HUAWEI Mate 70", "recency_rank": 1},
+                {"order_id": "SO-AMD", "product_name": "Apple iPhone Air 512GB", "recency_rank": 2},
+            ]
+        ),
+    )
+    intent = Intent(
+        target="agent",
+        requests=[SupportRequest(domain="refund", operation="status")],
+        case_update="continue",
+        subject_relation="same",
+    )
+
+    inherited = await _immediate_trusted_subject_continuation(
+        request,
+        intent=intent,
+        recent_case=_completed_eligibility_case(),
+        raw_query="退款现在怎么样了",
+        tool_context=ToolContext(user_id=7, role="customer"),
+    )
+
+    assert inherited == {"order_id": "SO-AMD"}
+    registry.execute.assert_awaited_once()

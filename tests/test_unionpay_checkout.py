@@ -15,6 +15,8 @@ from service.checkout_refund_service import RefundProviderUnavailableError, requ
 from service.checkout_service import (
     PaymentStatusUnavailableError,
     UnionPayCancellationUnavailableError,
+    UnionPayResumePaidError,
+    UnionPayResumePendingError,
     cancel_checkout_session,
     create_checkout_session,
     refresh_customer_payment_status,
@@ -157,7 +159,7 @@ async def test_cart_unionpay_checkout_is_provider_isolated_and_persists_txn_time
 
 
 @pytest.mark.asyncio
-async def test_resume_unionpay_reuses_original_payment_number_and_txn_time() -> None:
+async def test_resume_unionpay_pending_preflight_never_reopens_same_provider_transaction() -> None:
     pending = CustomerPendingPayment(
         merchant_payment_no="PMV2ORIGINAL",
         amount_cents=299900,
@@ -165,26 +167,29 @@ async def test_resume_unionpay_reuses_original_payment_number_and_txn_time() -> 
         provider="unionpay_test",
         provider_txn_time="20260831153000",
     )
-    client = MagicMock()
-    client.build_front_payment_form.return_value = _front_form()
     with (
         patch("service.checkout_service.get_customer_pending_payment", new=AsyncMock(return_value=pending)),
-        patch("service.checkout_service.UnionPayTestClient.from_settings", return_value=client),
-        patch.object(settings, "unionpay_public_base_url", "https://return.test"),
+        patch("service.checkout_service.refresh_customer_payment_status", new=AsyncMock(return_value=False)) as refresh,
+        pytest.raises(UnionPayResumePendingError),
     ):
-        session = await resume_checkout_session(
+        await resume_checkout_session(
             customer_user_id=101,
             order_no="SOORIGINAL",
             return_origin="http://localhost:5173",
         )
+    refresh.assert_awaited_once_with(customer_user_id=101, order_no="SOORIGINAL")
 
-    assert session.payment_provider == "unionpay_test"
-    client.build_front_payment_form.assert_called_once_with(
-        order_id="PMV2ORIGINAL",
-        txn_time="20260831153000",
-        txn_amt=299900,
-        front_url="https://return.test/api/v1/payments/unionpay/front-return",
-    )
+
+@pytest.mark.asyncio
+async def test_resume_unionpay_paid_preflight_converges_before_any_new_front_form() -> None:
+    pending = CustomerPendingPayment("PMV2ORIGINAL", 299900, "测试银联笔记本", "unionpay_test", "20260831153000")
+    with (
+        patch("service.checkout_service.get_customer_pending_payment", new=AsyncMock(return_value=pending)),
+        patch("service.checkout_service.refresh_customer_payment_status", new=AsyncMock(return_value=True)) as refresh,
+        pytest.raises(UnionPayResumePaidError),
+    ):
+        await resume_checkout_session(customer_user_id=101, order_no="SOORIGINAL", return_origin="http://127.0.0.1:5173")
+    refresh.assert_awaited_once_with(customer_user_id=101, order_no="SOORIGINAL")
 
 
 @pytest.mark.asyncio

@@ -49,6 +49,9 @@ _PAYMENT_STATUS_MESSAGES = {
     ),
 }
 _UNAVAILABLE_MESSAGES = {
+    "query_expected_ship_time": "当前已核验订单发货状态，但无法核验预计发货或预计送达时间。",
+    "query_pickup_status": "当前无法核验自提取货状态。",
+    "check_exchange_eligibility": "当前无法自动核验换货资格。",
     "query_refund_expected_arrival": "当前只能确认退款状态，无法核验具体到账时间。",
     "query_refund_processing_sla": "当前没有可核验的退款处理时长。",
     "query_refund_destination": "当前无法核验退款去向，不能仅根据支付方式推断。",
@@ -57,6 +60,7 @@ _UNAVAILABLE_MESSAGES = {
     "query_return_status": "当前无法核验退货状态。",
     "query_return_logistics": "当前无法核验退货物流状态。",
     "query_warehouse_receipt": "当前无法核验退货是否已回仓。",
+    "query_price_protection": "当前无法核验价保资格或状态。",
     "generate_refund_entry": "退款入口资格发生变化，当前无法生成可用退款入口。",
 }
 _UNAVAILABLE_STATUS_MESSAGES = {
@@ -102,6 +106,20 @@ _SUBJECT_SENSITIVE_OPERATIONS = {
     "destination",
     "delivery_after_refund",
 }
+_HISTORICAL_PROVENANCE_PATTERN = re.compile(
+    r"(?:"
+    r"(?:根据|从)(?:刚才|刚刚|前面|之前|此前|上一轮|上次)(?:的)?"
+    r"(?:查询|核验)(?:结果)?(?:看)?"
+    r"|(?:刚才|刚刚|前面|之前|此前|上一轮|上次)(?:系统)?"
+    r"(?:查到|查询到|核验到)(?:的是)?"
+    r"|(?:当时|此前|之前)(?:的)?(?:状态|结果|记录)"
+    r")"
+)
+_CURRENT_TRANSACTION_WORDING_PATTERN = re.compile(
+    r"(?:目前|当前|现在|最新|仍然|仍在|依然|还在|现已)"
+    r"[^。！？\n]{0,12}"
+    r"(?:等待(?:商家核验|确认)|处理中|已完成|退款成功|退款失败|退款记录)"
+)
 
 # 多订单结果常被模型写成 Markdown 表格或紧凑的“订单号 + 状态/金额”行。每次
 # 只在同一订单号到下一个订单号之前扫描，避免把相邻订单的事实串成一笔。
@@ -128,9 +146,15 @@ _REFUND_TRANSACTION_CLAIM_PATTERNS = (
         re.compile(r"(?:符合|不符合)(?:当前)?退款资格"),
     ),
     (
+        "refund_eligibility",
+        re.compile(r"(?:这笔|该笔|这单|该订单).{0,12}(?:肯定|一定|必然).{0,6}(?:能|可以|能够)退款"),
+    ),
+    (
         "refund_timing",
         re.compile(
             r"(?:\d+\s*[-—到至]\s*\d+\s*(?:个?工作日|天|小时)|(?:几|数)个工作日|"
+            r"[一二三四五六七八九十]+\s*(?:到|至)\s*[一二三四五六七八九十]+\s*(?:个?工作日|天|小时)|"
+            r"[一二三四五六七八九十]+\s*(?:个?工作日|天|小时)(?:内|后|左右)?|"
             r"一般需要.{0,20}(?:到账|审核|处理)|通常需要.{0,20}(?:到账|审核|处理))"
         ),
     ),
@@ -160,7 +184,10 @@ _REFUND_TRANSACTION_CLAIM_PATTERNS = (
     ),
     (
         "refund_submission",
-        re.compile(r"(?:退款申请已提交|退款已提交|已经提交退款|已为你申请退款|已替您申请退款)"),
+        re.compile(
+            r"(?:退款申请已提交|退款已提交|已经提交退款|已为你申请退款|已替您申请退款|提交退款申请|"
+            r"帮(?:您|你)申请退款)"
+        ),
     ),
 )
 
@@ -336,17 +363,41 @@ def _render_choice(
     result.response_control = {"mode": "ASK_CHOICE", "subject_id": None}
 
 
-def _render_unavailable(result: LoopResult, facts: Mapping[str, Any]) -> None:
+_DELIVERY_STATUS_MESSAGES = {
+    "PENDING": "尚未发货",
+    "NOT_SHIPPED": "尚未发货",
+    "SHIPPED": "已发货",
+    "IN_TRANSIT": "正在运输中",
+    "DELIVERING": "正在配送中",
+    "PICKED_UP": "已发出",
+    "DELIVERED": "已签收",
+    "SIGNED": "已签收",
+}
+
+
+def _render_unavailable(
+    result: LoopResult,
+    facts: Mapping[str, Any],
+    *,
+    fact_provenance: Mapping[str, str] | None = None,
+) -> None:
     progress = result.workflow_progress
     capabilities = [str(item) for item in progress.get("unavailable_capabilities", [])]
-    details = list(
-        dict.fromkeys(
-            _UNAVAILABLE_MESSAGES.get(capability, "当前无法核验相关业务信息。") for capability in capabilities
-        )
-    )
+    provenance = fact_provenance or {}
+    details: list[str] = []
+    for capability in capabilities:
+        if capability == "query_expected_ship_time":
+            shipping_status = str(facts.get("shipping_status") or "")
+            status_text = _DELIVERY_STATUS_MESSAGES.get(shipping_status)
+            if status_text and provenance.get("shipping_status") == "current":
+                details.append(f"已核验到：订单当前{status_text}。当前无法核验预计发货或预计送达时间。")
+                continue
+        details.append(_UNAVAILABLE_MESSAGES.get(capability, "当前无法核验相关业务信息。"))
+    details = list(dict.fromkeys(details))
     status = _UNAVAILABLE_STATUS_MESSAGES.get(str(facts.get("refund_status") or ""))
     prefix = f"已核验到：{status}。" if status else ""
-    result.answer = prefix + "".join(details) + "如需人工客服协助，请回复“转人工”。"
+    result.answer = prefix + "".join(details)
+    result.answer_source = "DETERMINISTIC_FALLBACK"
     # A missing capability is an explanation/offer, not proof that a real
     # staff queue has accepted the case.  Only ticket creation may emit the
     # STAFF_HANDOFF presentation mode.
@@ -379,16 +430,19 @@ def _render_blocked_missing(
         known.append(f"系统核验结果显示，这笔订单当前{eligibility}退款资格。")
     if facts.get("shipping_status") == "NOT_SHIPPED" and current_fact("shipping_status"):
         known.append("订单当前尚未发货。")
-    details = [_MISSING_FACT_MESSAGES[item] for item in missing if item in _MISSING_FACT_MESSAGES]
-    if not details:
-        reason = str(progress.get("reason") or "")
-        details = [
-            {
-                "capability_unavailable": "当前缺少可用的业务处理能力，暂时无法继续完成这项操作。",
-                "fact_tool_failed": "当前核验订单信息时遇到问题，暂时无法继续完成这项操作。",
-                "workflow_unsupported": "当前还没有可用的自动处理流程，暂时无法继续完成这项操作。",
-            }.get(reason, "当前还缺少完成这项操作所需的业务信息或能力。")
-        ]
+    # ``missing_facts`` is evaluator diagnostics, never customer copy.  The
+    # only customer-visible limitation is the concrete capability/error that
+    # prevented this request from continuing.
+    reason = str(progress.get("reason") or "")
+    subject_label = str(progress.get("selected_subject_label") or "").strip()
+    details = [
+        {
+            "capability_unavailable": "当前已核验的信息不足以继续完成这项操作，相关细节暂时无法由系统核验。",
+            "fact_tool_failed": "刚才核验订单信息时遇到问题，请稍后重试。",
+            "workflow_unsupported": "当前自动流程暂时不支持这项操作。",
+            "required_fact_missing": "我还需要先核验对应订单，才能继续处理这项请求。",
+        }.get(reason, "当前暂时无法继续完成这项操作。")
+    ]
     if (
         facts.get("refund_eligibility") is True
         and facts.get("shipping_status") == "NOT_SHIPPED"
@@ -397,11 +451,13 @@ def _render_blocked_missing(
         and "refund_entry" in missing_set
     ):
         result.answer = (
-            "这笔订单当前符合退款资格且尚未发货，但暂时无法生成退款入口。请从订单页稍后重试；如仍无法操作，可转人工。"
+            "这笔订单当前符合退款资格且尚未发货，但暂时无法生成退款入口，请从订单页稍后重试。"
         )
     elif known or details:
-        result.answer = "".join(known + details) + "如需人工客服协助，请回复“转人工”。"
+        prefix = f"我已经定位到“{subject_label}”这笔订单。" if subject_label else ""
+        result.answer = prefix + "".join(known + details)
     result.response_control = {"mode": "FACT", "subject_id": None}
+    result.answer_source = "DETERMINISTIC_FALLBACK"
 
 
 def _render_limited_refund_facts(
@@ -545,9 +601,26 @@ def _render_payment_facts(
 def _render_pending_payment_cancel_handoff(
     result: LoopResult,
     *,
+    facts: Mapping[str, Any],
     subject_id: str | None,
     fact_provenance: Mapping[str, str],
 ) -> None:
+    provider = str(facts.get("payment_provider") or "")
+    if facts.get("order_cancel_supported") is not True:
+        if provider == "unionpay_test":
+            message = (
+                "这笔订单当前尚未完成支付，但使用的是银联测试支付。"
+                "现有系统暂不支持在线撤销这笔待支付银联交易；请完成或放弃本次测试支付。"
+            )
+        else:
+            message = "这笔待支付订单当前没有可用的在线取消入口。"
+        result.answer = message
+        result.response_control = {
+            "mode": "FACT",
+            "subject_id": subject_id,
+            "fact_provenance": dict(fact_provenance),
+        }
+        return
     result.answer = (
         "这笔订单当前尚未完成支付，因此没有已支付款项需要退款。"
         "如果不再购买，可以前往订单页取消这笔待支付订单。"
@@ -573,6 +646,7 @@ def _render_order_cancel_facts(
     if order_status == "PENDING_PAYMENT":
         _render_pending_payment_cancel_handoff(
             result,
+            facts=facts,
             subject_id=subject_id,
             fact_provenance=fact_provenance,
         )
@@ -635,6 +709,163 @@ def _unverified_refund_claim(
     return None
 
 
+def _refund_prose_matches_known_facts(answer: str, facts: Mapping[str, Any]) -> bool:
+    """Reject prose that is fact-safe syntactically but stale semantically.
+
+    This is a validator only: it never decides the Goal or invents a customer
+    response.  It prevents an earlier "still need to check" answer, or the
+    wrong eligibility polarity, from surviving after current trusted facts have
+    already resolved that question.
+    """
+    eligibility = facts.get("refund_eligibility")
+    if isinstance(eligibility, bool):
+        positive = re.search(
+            r"(?:符合(?:当前)?退款资格|退款资格.{0,8}(?:核验通过|通过)|(?:可以|能|能够)退款)",
+            answer,
+        )
+        negative = re.search(
+            r"(?:不符合(?:当前)?退款资格|暂不符合退款资格|(?:不能|无法)退款)",
+            answer,
+        )
+        if eligibility and negative is not None:
+            return False
+        if not eligibility and positive is not None:
+            return False
+        unknown = re.search(
+            r"(?:退款资格.{0,16}(?:还需|需要|尚需|尚未|未能|无法|不能|不确定|核验失败|无法核验)"
+            r"|(?:还需|需要|尚需|尚未|未能|无法|不能|不确定|核验失败|无法核验).{0,16}退款资格"
+            r"|(?:无法|不能|不确定|尚未|未能).{0,10}(?:确认|判断).{0,8}(?:是否)?符合(?:退款)?条件)",
+            answer,
+        )
+        if unknown is not None:
+            return False
+    if isinstance(facts.get("refund_entry"), str) and re.search(
+        r"(?:当前|目前)?(?:暂时)?无法继续完成(?:这项|该项)?操作",
+        answer,
+    ):
+        return False
+    return True
+
+
+def _safe_operator_read_prose(
+    answer: str,
+    facts: Mapping[str, Any],
+    *,
+    fact_provenance: Mapping[str, str],
+    subject_id: str | None,
+) -> bool:
+    """Whether read-only operator prose can survive the response boundary.
+
+    The composer still owns factual safety.  It only preserves prose when it
+    does not add an unsupported claim and does not contradict the verified
+    refund state; otherwise a deterministic fact renderer remains the fallback.
+    """
+    if not answer.strip():
+        return False
+    if _unverified_refund_claim(answer, facts, trusted_subject_id=subject_id) is not None:
+        return False
+    if not _refund_prose_matches_known_facts(answer, facts):
+        return False
+    # Read-only prose may explain a verified refund state, but it cannot smuggle
+    # in a new eligibility condition as a natural-language aside.  These are
+    # transaction/fulfilment claims for which the current Control Plane has no
+    # corresponding verified fact.
+    if re.search(r"(?:未拆封|已拆封|商品(?:有|无)质量问题|已出库|已签收|商家已同意)", answer):
+        return False
+    status = str(facts.get("refund_status") or "")
+    status_terms = {
+        "PENDING_CONFIRMATION": ("等待确认",),
+        "PENDING_MERCHANT_REVIEW": ("等待商家核验",),
+        "PROCESSING": ("处理中",),
+        "COMPLETED": ("已完成", "退款成功"),
+        "FAILED": ("退款失败", "状态为失败"),
+    }
+    for candidate, terms in status_terms.items():
+        if candidate != status and any(term in answer for term in terms):
+            return False
+    if fact_provenance.get("refund_status") == "historical":
+        # Historical facts may support an explanation, but the prose must keep
+        # an explicit previous-query frame.  This is intentionally a small set
+        # of semantic forms rather than one required customer-facing phrase.
+        if _HISTORICAL_PROVENANCE_PATTERN.search(answer) is None:
+            return False
+        # A previous-query marker does not make a sentence such as “现在仍在”
+        # safe: that wording asserts a current/latest transaction state.
+        if _CURRENT_TRANSACTION_WORDING_PATTERN.search(answer) is not None:
+            return False
+    return True
+
+
+def _mark_safe_operator_prose(
+    result: LoopResult,
+    *,
+    subject_id: str | None,
+    fact_provenance: Mapping[str, str],
+    facts: Mapping[str, Any],
+    limitation: str | None = None,
+    mode: str = "FACT",
+) -> None:
+    control: dict[str, Any] = {
+        "mode": mode,
+        "subject_id": subject_id,
+        "fact_provenance": dict(fact_provenance),
+        "fact_keys": sorted(str(name) for name in facts),
+    }
+    if limitation:
+        control["limitation"] = limitation
+    result.response_control = control
+    result.answer_source = "OPERATOR_VALIDATED"
+
+
+def _safe_operator_delivery_prose(
+    answer: str,
+    facts: Mapping[str, Any],
+    *,
+    fact_provenance: Mapping[str, str],
+) -> bool:
+    """Permit a limited logistics explanation without inventing delivery facts."""
+    if not answer.strip() or fact_provenance.get("shipping_status") != "current":
+        return False
+    shipping_status = str(facts.get("shipping_status") or "")
+    if not shipping_status:
+        return False
+    # Exact delivery/arrival promises remain transaction claims.  The generic
+    # statement that ETA is unavailable is fine; dates and durations must be
+    # grounded in a corresponding fact.
+    if re.search(
+        r"(?:明天|后天|今天|\d+\s*(?:天|小时|工作日)|[一二三四五六七八九十]+\s*(?:天|小时|工作日)|"
+        r"预计.{0,16}(?:明天|后天|今天|将|会|在).{0,12}(?:到|送达|签收))",
+        answer,
+    ):
+        return False
+
+    shipping_claims = {
+        "not_shipped": ("尚未发货", "未发货", "待发货"),
+        "shipped": ("已发货", "已经发货"),
+        "in_transit": ("配送中", "运输中"),
+        "delivered": ("已签收", "已经签收"),
+    }
+    allowed_claims = {
+        "PENDING": {"not_shipped"},
+        "NOT_SHIPPED": {"not_shipped"},
+        "SHIPPED": {"shipped"},
+        "IN_TRANSIT": {"shipped", "in_transit"},
+        "DELIVERING": {"shipped", "in_transit"},
+        "PICKED_UP": {"shipped", "in_transit"},
+        "DELIVERED": {"shipped", "delivered"},
+        "SIGNED": {"shipped", "delivered"},
+    }.get(shipping_status, set())
+    for claim, terms in shipping_claims.items():
+        if claim not in allowed_claims and any(term in answer for term in terms):
+            return False
+
+    if shipping_status in {"PENDING", "NOT_SHIPPED"} and not any(
+        term in answer for term in shipping_claims["not_shipped"]
+    ):
+        return False
+    return True
+
+
 def compose_customer_response(
     result: LoopResult,
     requests: Sequence[Mapping[str, Any]] | None = None,
@@ -647,11 +878,11 @@ def compose_customer_response(
     selected_subjects: Mapping[str, Any] | None = None,
     enforce_refund_boundary: bool = False,
 ) -> None:
-    """按固定 precedence 生成客户答案。
+    """应用客户可见的控制状态和事实安全边界。
 
-    ``SELF_SERVICE_HANDOFF > ASK_CHOICE/AWAITING_CUSTOMER > BLOCKED/STAFF >
-    resolved facts > LLM``。函数可重复调用：后续出口只会重新确认更高优先级，
-    不会把选单或阻塞结果改写成普通退款状态。
+    需要客户选择、确认或执行受控动作的 presentation 具有确定性优先级；
+    通过 claim/provenance 校验的只读 Operator prose 会被保留，只有不安全、
+    缺失或与当前业务状态冲突时才回退到确定性文案。
     """
     progress = result.workflow_progress if isinstance(result.workflow_progress, dict) else {}
     requests_list = [item for item in (requests or []) if isinstance(item, Mapping)]
@@ -711,8 +942,22 @@ def compose_customer_response(
             if "generate_refund_entry" not in unavailable:
                 unavailable.append("generate_refund_entry")
             progress["unavailable_capabilities"] = unavailable
-            result.answer = "当前无法生成可用的官方退款入口。如需人工客服协助，请回复“转人工”。"
+            result.answer = "当前无法生成可用的官方退款入口，请从订单页稍后重试。"
             result.response_control = {"mode": "FACT", "subject_id": subject_id}
+            return
+        if _safe_operator_read_prose(
+            result.answer,
+            facts,
+            fact_provenance=fact_provenance,
+            subject_id=subject_id,
+        ):
+            _mark_safe_operator_prose(
+                result,
+                subject_id=subject_id,
+                fact_provenance=fact_provenance,
+                facts=facts,
+                mode="SELF_SERVICE_HANDOFF",
+            )
             return
         result.answer = (
             "退款资格已核验通过。\n\n"
@@ -737,9 +982,26 @@ def compose_customer_response(
             return
         _render_pending_payment_cancel_handoff(
             result,
+            facts=facts,
             subject_id=subject_id,
             fact_provenance=fact_provenance,
         )
+        return
+
+    if progress.get("resolution_type") == "ORDER_CANCEL_UNAVAILABLE":
+        provider = str(facts.get("payment_provider") or "")
+        if provider == "unionpay_test":
+            result.answer = (
+                "这笔订单当前尚未完成支付，但使用的是银联测试支付。"
+                "现有系统暂不支持在线撤销这笔待支付银联交易；请完成或放弃本次测试支付。"
+            )
+        else:
+            result.answer = "这笔待支付订单当前没有可用的在线取消入口。"
+        result.response_control = {
+            "mode": "FACT",
+            "subject_id": subject_id,
+            "fact_provenance": dict(fact_provenance),
+        }
         return
 
     # 选择框是控制状态，不允许被任何 fact renderer 覆盖。
@@ -792,8 +1054,39 @@ def compose_customer_response(
         "AWAITING_CONFIRMATION",
     }:
         if next_action == "ASK_CLARIFICATION":
-            result.answer = "为了继续处理，请说明您要查询退款状态、申请退款，还是处理其他退款问题。"
-            result.response_control = {"mode": "ASK_CLARIFICATION", "subject_id": None}
+            # Goal is already owned by the Router/Control Plane.  When only the
+            # subject is unresolved, preserve a fact-safe Operator question
+            # about that subject instead of re-asking which refund Goal the
+            # customer has.  This is a state-contract distinction, not a
+            # phrase-specific response rule.
+            if (
+                str(progress.get("reason") or "") == "subject_resolution_unknown"
+                and domain == "refund"
+                and _safe_operator_read_prose(
+                    result.answer,
+                    facts,
+                    fact_provenance=fact_provenance,
+                    subject_id=subject_id,
+                )
+            ):
+                _mark_safe_operator_prose(
+                    result,
+                    subject_id=subject_id,
+                    fact_provenance=fact_provenance,
+                    facts=facts,
+                    mode="ASK_CLARIFICATION",
+                )
+                return
+            if str(progress.get("reason") or "") == "subject_resolution_unknown":
+                result.answer = "请补充或确认需要处理的订单信息。"
+                result.response_control = {
+                    "mode": "ASK_CLARIFICATION",
+                    "subject_id": None,
+                    "reason": "subject_resolution_unknown",
+                }
+            else:
+                result.answer = "为了继续处理，请说明您要查询退款状态、申请退款，还是处理其他退款问题。"
+                result.response_control = {"mode": "ASK_CLARIFICATION", "subject_id": None}
         elif next_action == "AWAITING_CONFIRMATION":
             result.answer = "请确认是否继续当前操作。"
             result.response_control = {"mode": "AWAITING_CUSTOMER", "subject_id": subject_id}
@@ -803,6 +1096,33 @@ def compose_customer_response(
         return
 
     if goal_status == "resolved_with_limitation":
+        if domain == "refund" and _safe_operator_read_prose(
+            result.answer,
+            facts,
+            fact_provenance=fact_provenance,
+            subject_id=subject_id,
+        ):
+            _mark_safe_operator_prose(
+                result,
+                subject_id=subject_id,
+                fact_provenance=fact_provenance,
+                facts=facts,
+                limitation=operation,
+            )
+            return
+        if domain == "delivery" and _safe_operator_delivery_prose(
+            result.answer,
+            facts,
+            fact_provenance=fact_provenance,
+        ):
+            _mark_safe_operator_prose(
+                result,
+                subject_id=subject_id,
+                fact_provenance=fact_provenance,
+                facts=facts,
+                limitation=operation,
+            )
+            return
         if domain == "refund" and _render_limited_refund_facts(
             result,
             operation,
@@ -812,7 +1132,7 @@ def compose_customer_response(
         ):
             return
         if progress.get("unavailable_capabilities"):
-            _render_unavailable(result, facts)
+            _render_unavailable(result, facts, fact_provenance=fact_provenance)
             return
 
     # Actual staff handoff and hard transaction blocks have higher precedence.
@@ -828,8 +1148,40 @@ def compose_customer_response(
         or str(progress.get("control_state") or "") in {"BLOCKED", "NEED_FACT"}
     ) and has_control_envelope
     if blocked:
+        reason = str(progress.get("reason") or "")
+        if subject_id is not None and result.answer.strip() and reason in {
+            "fact_tool_failed",
+            "capability_unavailable",
+            "completion_criteria_not_satisfied",
+        }:
+            safe = (
+                _safe_operator_read_prose(
+                    result.answer,
+                    facts,
+                    fact_provenance=fact_provenance,
+                    subject_id=subject_id,
+                )
+                if domain == "refund"
+                else _safe_operator_delivery_prose(
+                    result.answer,
+                    facts,
+                    fact_provenance=fact_provenance,
+                )
+                if domain == "delivery"
+                else False
+            )
+            limitation_signal = re.search(r"(?:无法|不能|不能可靠|暂时|失败|核验|确认|不确定|缺少)", result.answer)
+            if safe and limitation_signal is not None:
+                _mark_safe_operator_prose(
+                    result,
+                    subject_id=subject_id,
+                    fact_provenance=fact_provenance,
+                    facts=facts,
+                    limitation=operation,
+                )
+                return
         if progress.get("unavailable_capabilities"):
-            _render_unavailable(result, facts)
+            _render_unavailable(result, facts, fact_provenance=fact_provenance)
         else:
             _render_blocked_missing(result, facts, fact_provenance=fact_provenance)
         return
@@ -851,6 +1203,24 @@ def compose_customer_response(
             "subject_id": None,
             "reason": "subject_not_resolved",
         }
+        return
+
+    if (
+        domain == "refund"
+        and operation in {"status", "expected_arrival", "processing_time", "anomaly", "destination", "eligibility"}
+        and _safe_operator_read_prose(
+            result.answer,
+            facts,
+            fact_provenance=fact_provenance,
+            subject_id=subject_id,
+        )
+    ):
+        _mark_safe_operator_prose(
+            result,
+            subject_id=subject_id,
+            fact_provenance=fact_provenance,
+            facts=facts,
+        )
         return
 
     if _render_refund_facts(

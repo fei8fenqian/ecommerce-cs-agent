@@ -73,15 +73,15 @@ async def _seed_test_data(conn: psycopg.AsyncConnection) -> None:
                  metadata, status, stock, warehouse, content_hash)
             VALUES
                 ('laptop-test-001', '联想拯救者Y9000P', '联想', 9999.00, '游戏本',
-                 '高性能游戏本 RTX4060 16GB', '{}'::jsonb, '在售', 50, '北京仓', 'test-hash-001'),
+                 '联想拯救者Y9000P 高性能游戏本 RTX4060 16GB', '{}'::jsonb, '在售', 50, '北京仓', 'test-hash-001'),
                 ('laptop-test-002', '联想拯救者R9000P', '联想', 8999.00, '游戏本',
-                 'AMD游戏本 RTX4060', '{}'::jsonb, '在售', 30, '上海仓', 'test-hash-002'),
+                 '联想拯救者R9000P AMD游戏本 RTX4060', '{}'::jsonb, '在售', 30, '上海仓', 'test-hash-002'),
                 ('laptop-test-003', '联想小新Pro16', '联想', 5999.00, '轻薄本',
-                 '轻薄办公本 16英寸', '{}'::jsonb, '在售', 100, '深圳仓', 'test-hash-003'),
+                 '联想小新Pro16 轻薄办公本 16英寸', '{}'::jsonb, '在售', 100, '深圳仓', 'test-hash-003'),
                 ('laptop-test-004', '华为MateBook X Pro', '华为', 8999.00, '轻薄本',
-                 '高端轻薄本 触屏', '{}'::jsonb, '在售', 20, '北京仓', 'test-hash-004'),
+                 '华为MateBook X Pro 高端轻薄本 触屏', '{}'::jsonb, '在售', 20, '北京仓', 'test-hash-004'),
                 ('laptop-test-005', '华为MateBook 14', '华为', 5999.00, '轻薄本',
-                 '中端轻薄本', '{}'::jsonb, '在售', 45, '上海仓', 'test-hash-005')
+                 '华为MateBook 14 中端轻薄本', '{}'::jsonb, '在售', 45, '上海仓', 'test-hash-005')
             """
         )
 

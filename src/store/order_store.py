@@ -6,6 +6,7 @@
 from typing import Any
 
 from infra.db_pool import get_connection, put_connection
+from service.checkout_service import is_checkout_cancel_supported
 from store.checkout_store import list_customer_checkout_orders
 
 _ORDER_QUERY = """
@@ -84,7 +85,7 @@ async def find_orders(
         legacy_orders = [
             {**order, "order_source": "legacy"} for order in await list_customer_orders(customer_user_id, limit=10)
         ]
-        checkout_orders = await list_customer_checkout_orders(customer_user_id, limit=10)
+        checkout_orders = await list_customer_checkout_orders(customer_user_id, limit=30)
         merged_orders = [_checkout_order_to_tool_order(order) for order in checkout_orders] + legacy_orders
         return sorted(merged_orders, key=lambda item: str(item.get("order_date", "")), reverse=True)
 
@@ -118,15 +119,38 @@ def _checkout_order_to_tool_order(order: object) -> dict[str, Any]:
     result: dict[str, Any] = {
         "order_id": order_no,
         "order_source": "checkout",
+        # ``status`` is kept as the historical delivery-facing field used by
+        # the shared order tool.  Keep the sales-order state separately so a
+        # paid order with a PENDING_FULFILLMENT row is not mistaken for an
+        # unpaid/unknown order by the Support Control Plane.
+        "order_status": str(getattr(order, "status")),
         "status": str(fulfillment_status or getattr(order, "status")),
         "tracking": {"company": tracking_company, "number": tracking_number},
         "total_amount": amount_cents / 100,
         "paid_amount": paid_amount,
         "payment_status": payment_status,
-        "payment_method": "支付宝沙箱",
+        "payment_provider": str(getattr(order, "provider", "alipay_sandbox")),
+        "payment_method": "银联测试支付"
+        if getattr(order, "provider", "alipay_sandbox") == "unionpay_test"
+        else "支付宝沙箱",
+        "order_cancel_supported": is_checkout_cancel_supported(
+            provider=getattr(order, "provider", "alipay_sandbox"),
+            order_status=str(getattr(order, "status")),
+        ),
         "order_date": str(getattr(order, "created_at")),
         "delivered_at": None,
         "items": [
+            {
+                "product_name": str(getattr(item, "product_name")),
+                "catalog_category": str(getattr(item, "catalog_category")),
+                "catalog_product_id": str(getattr(item, "catalog_product_id")),
+                "component_category": getattr(item, "component_category", None),
+                "price": int(getattr(item, "unit_amount_cents")) / 100,
+                "quantity": int(getattr(item, "quantity")),
+            }
+            for item in getattr(order, "items", ())
+        ]
+        or [
             {
                 "product_name": str(getattr(order, "product_name")),
                 "brand": None,
@@ -141,7 +165,7 @@ def _checkout_order_to_tool_order(order: object) -> dict[str, Any]:
 
     refund_status_text = str(refund_status)
     refund_amount_cents = getattr(order, "refund_amount_cents", None)
-    refund = {"status": refund_status_text}
+    refund: dict[str, Any] = {"status": refund_status_text}
     if refund_amount_cents is not None:
         refund["amount_cents"] = int(refund_amount_cents)
     result["refund"] = refund

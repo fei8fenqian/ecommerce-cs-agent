@@ -6,9 +6,11 @@ from uuid import uuid4
 
 import pytest
 
-from infra.unionpay_test import UnionPayQueryResult, UnionPayRefundResult
+from infra.unionpay_test import UnionPayGatewayError, UnionPayQueryResult, UnionPayRefundResult, UnionPaySignatureError
 from service.checkout_refund_service import (
     RefundGatewayUnavailableError,
+    UnionPayRefundValidationError,
+    _unionpay_failure_reason_code,
     confirm_customer_refund,
     refresh_customer_refund_status,
     request_customer_refund,
@@ -38,6 +40,7 @@ def _submitted(
     refund: CheckoutRefund,
     *,
     orig_qry_id: str | None = None,
+    txn_amt: str | None = None,
     signature_verified: bool = True,
     txn_time: str = "20260901090101",
     resp_code: str = "00",
@@ -47,8 +50,8 @@ def _submitted(
         resp_code=resp_code,
         order_id=refund.merchant_refund_no,
         txn_time=txn_time,
-        txn_amt=str(refund.amount_cents),
-        orig_qry_id=orig_qry_id if orig_qry_id is not None else refund.provider_trade_no,
+        txn_amt=txn_amt or "",
+        orig_qry_id=orig_qry_id,
     )
 
 
@@ -65,6 +68,15 @@ def _queried(refund: CheckoutRefund, **overrides: object) -> UnionPayQueryResult
     }
     values.update(overrides)
     return UnionPayQueryResult(**values)  # type: ignore[arg-type]
+
+
+def test_unionpay_failure_diagnostics_use_explicit_safe_reason_codes() -> None:
+    assert _unionpay_failure_reason_code(
+        UnionPayRefundValidationError("TXN_AMOUNT_MISMATCH", "金额不匹配")
+    ) == "TXN_AMOUNT_MISMATCH"
+    assert _unionpay_failure_reason_code(UnionPaySignatureError("验签失败")) == "SIGNATURE_VERIFICATION_FAILED"
+    assert _unionpay_failure_reason_code(UnionPayGatewayError("网关不可达")) == "TRANSPORT_FAILURE"
+    assert _unionpay_failure_reason_code(RefundGatewayUnavailableError("结果未知")) == "RESULT_UNAVAILABLE"
 
 
 @pytest.mark.asyncio
@@ -129,7 +141,7 @@ async def test_unionpay_confirmation_submits_then_queries_and_never_calls_alipay
 
 
 @pytest.mark.asyncio
-async def test_unionpay_amount_or_original_transaction_mismatch_stays_processing() -> None:
+async def test_unionpay_query_amount_mismatch_stays_processing() -> None:
     processing = _refund()
     client = AsyncMock()
     client.refund_transaction.return_value = _submitted(processing)
@@ -150,29 +162,67 @@ async def test_unionpay_amount_or_original_transaction_mismatch_stays_processing
         )
     marked.assert_not_awaited()
 
-    client.refund_transaction.return_value = _submitted(processing, orig_qry_id="OTHER-PAYMENT")
+
+@pytest.mark.asyncio
+async def test_unionpay_query_without_original_transaction_echo_can_succeed() -> None:
+    processing = _refund()
+    succeeded = CheckoutRefund(**{**processing.__dict__, "status": "SUCCEEDED"})
+    client = AsyncMock()
+    client.query_transaction.return_value = _queried(processing, orig_qry_id=None)
+    with (
+        patch("service.checkout_refund_service.get_customer_checkout_refund", new=AsyncMock(return_value=processing)),
+        patch("service.checkout_refund_service.UnionPayTestClient.from_settings", return_value=client),
+        patch(
+            "service.checkout_refund_service.mark_checkout_refund_succeeded",
+            new=AsyncMock(return_value=succeeded),
+        ) as marked,
+    ):
+        result = await refresh_customer_refund_status(customer_user_id=7, refund_id=processing.refund_id)
+
+    assert result.status == "SUCCEEDED"
+    marked.assert_awaited_once_with(
+        refund_id=processing.refund_id,
+        provider_refund_reference="REFUND-QUERY-1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_unionpay_sync_response_does_not_require_request_echo_fields() -> None:
+    processing = _refund()
+    succeeded = CheckoutRefund(**{**processing.__dict__, "status": "SUCCEEDED"})
+    client = AsyncMock()
+    client.refund_transaction.return_value = _submitted(processing)
+    client.query_transaction.return_value = _queried(processing, txn_amt="", orig_qry_id=None)
     with (
         patch(
             "service.checkout_refund_service.start_customer_refund_confirmation",
             new=AsyncMock(return_value=RefundConfirmationStart(processing, True)),
         ),
         patch("service.checkout_refund_service.UnionPayTestClient.from_settings", return_value=client),
-        patch("service.checkout_refund_service.mark_checkout_refund_succeeded", new=AsyncMock()) as marked_again,
-        pytest.raises(RefundGatewayUnavailableError),
+        patch(
+            "service.checkout_refund_service.mark_checkout_refund_succeeded",
+            new=AsyncMock(return_value=succeeded),
+        ),
     ):
-        await confirm_customer_refund(
+        result = await confirm_customer_refund(
             customer_user_id=7,
             refund_id=processing.refund_id,
-            confirmation_idempotency_key="unionpay-confirm-0003",
+            confirmation_idempotency_key="unionpay-confirm-no-echo-fields",
         )
-    marked_again.assert_not_awaited()
+
+    assert result.status == "SUCCEEDED"
+    client.refund_transaction.assert_awaited_once_with(
+        order_id=processing.merchant_refund_no,
+        txn_time="20260901090101",
+        txn_amt=processing.amount_cents,
+        orig_qry_id=processing.provider_trade_no,
+    )
 
 
 @pytest.mark.asyncio
-async def test_unionpay_missing_original_transaction_binding_stays_processing() -> None:
-    processing = _refund()
+async def test_unionpay_missing_original_payment_binding_stays_closed() -> None:
+    processing = CheckoutRefund(**{**_refund().__dict__, "provider_trade_no": ""})
     client = AsyncMock()
-    client.refund_transaction.return_value = _submitted(processing, orig_qry_id="")
     with (
         patch(
             "service.checkout_refund_service.start_customer_refund_confirmation",
@@ -188,6 +238,7 @@ async def test_unionpay_missing_original_transaction_binding_stays_processing() 
             confirmation_idempotency_key="unionpay-confirm-missing-original",
         )
 
+    client.refund_transaction.assert_not_awaited()
     client.query_transaction.assert_not_awaited()
     marked.assert_not_awaited()
 

@@ -23,6 +23,60 @@ _model: SentenceTransformer | None = None
 logger = logging.getLogger(__name__)
 
 
+def _product_display_title(product_name: object, brand: object) -> str:
+    """Build display text without losing, or duplicating, the canonical entity."""
+    name = str(product_name or "").strip()
+    brand_text = str(brand or "").strip()
+    if not brand_text or name.casefold().startswith(brand_text.casefold()):
+        return name
+    return f"{brand_text} {name}".strip()
+
+
+def _catalog_product_document(
+    *,
+    product_id: object,
+    product_name: object,
+    brand: object,
+    price: object,
+    description: object,
+    category: str,
+    metadata: object | None = None,
+    score: object | None = None,
+) -> dict:
+    """Keep canonical catalog identity alongside customer display fields."""
+    document = {
+        "id": str(product_id),
+        "product_id": str(product_id),
+        "product_name": str(product_name or ""),
+        "brand": str(brand or ""),
+        "category": category,
+        "display_title": _product_display_title(product_name, brand),
+        "title": _product_display_title(product_name, brand),
+        "content": str(description or ""),
+        "price": price,
+    }
+    source = metadata if isinstance(metadata, dict) else {}
+    comparison: dict[str, str] = {}
+    model = source.get("product_model") or source.get("model")
+    for key, value in (
+        ("brand", brand),
+        ("model", model),
+        ("storage", source.get("storage")),
+        ("screen_size", source.get("screen_size")),
+        ("ram", source.get("ram")),
+        ("capacity", source.get("capacity")),
+    ):
+        if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+            text = str(value).strip()
+            if text:
+                comparison[key] = text[:120]
+    if comparison:
+        document["comparison_metadata"] = comparison
+    if score is not None:
+        document["score"] = score
+    return document
+
+
 def _get_model() -> SentenceTransformer:
     """首次实际向量检索时加载 Embedding 模型。"""
     global _model
@@ -61,7 +115,7 @@ async def _fetch_documents_by_ids(
     if not ids:
         return []
     if table in ("laptop_products", "phone_products"):
-        cols = "id, product_name, brand, price, description"
+        cols = "id, product_name, brand, price, description, metadata"
     elif table == "knowledge_chunks":
         if runtime_sources is None:
             raise RuntimeError("知识检索缺少 runtime manifest 来源白名单")
@@ -75,6 +129,7 @@ async def _fetch_documents_by_ids(
     params: list[object] = [ids]
     where_filter = f" and ({where})" if where else ""
     if table == "knowledge_chunks":
+        assert runtime_sources is not None
         source_filter = " and source = any(%s)"
         params.append(sorted(runtime_sources))
     sql = f"select {cols} from {table} where id = any(%s){where_filter}{source_filter}"
@@ -87,8 +142,18 @@ async def _fetch_documents_by_ids(
         results: list[dict] = []
         async for row in cur:
             if table in ("laptop_products", "phone_products"):
-                id, product_name, brand, price, description = row
-                results.append({"id": id, "content": description, "title": f"{brand} {product_name}", "price": price})
+                id, product_name, brand, price, description, metadata = row
+                results.append(
+                    _catalog_product_document(
+                        product_id=id,
+                        product_name=product_name,
+                        brand=brand,
+                        price=price,
+                        description=description,
+                        category="laptops" if table == "laptop_products" else "phones",
+                        metadata=metadata,
+                    )
+                )
             elif table == "knowledge_chunks":
                 id, source, title, content = row
                 results.append({"id": id, "content": content, "title": title, "source": source})
@@ -96,11 +161,16 @@ async def _fetch_documents_by_ids(
                 id, product_name, category, price, description, normalized = row
                 results.append(
                     {
-                        "id": id,
-                        "content": description,
-                        "title": product_name,
-                        "category": category,
-                        "price": price,
+                        **_catalog_product_document(
+                            product_id=id,
+                            product_name=product_name,
+                            brand=(normalized or {}).get("brand", "") if isinstance(normalized, dict) else "",
+                            price=price,
+                            description=description,
+                            category="components",
+                            metadata=normalized,
+                        ),
+                        "component_category": category,
                         "normalized": normalized,
                     }
                 )
@@ -198,7 +268,7 @@ async def _vector_search(
     where = where or "1=1"  # 没有过滤条件时查全表
 
     if table in ("laptop_products", "phone_products"):
-        cols = "id, product_name, brand, price, description"
+        cols = "id, product_name, brand, price, description, metadata"
     elif table == "knowledge_chunks":
         cols = "id, source, title, content"
     elif table == "component_products":
@@ -211,6 +281,7 @@ async def _vector_search(
     if table == "knowledge_chunks":
         if runtime_sources is None:
             raise RuntimeError("知识检索缺少 runtime manifest 来源白名单")
+        assert runtime_sources is not None
         source_filter = " and source = any(%s)"
         params.append(sorted(runtime_sources))
     params.extend([q_vec_str, top_k])
@@ -232,15 +303,18 @@ async def _vector_search(
             cur = await conn.execute(sql, params)
             res = []
             async for row in cur:
-                id, product_name, brand, price, description, score = row
+                id, product_name, brand, price, description, metadata, score = row
                 res.append(
-                    {
-                        "id": id,
-                        "content": description,
-                        "score": score,
-                        "title": f"{brand} {product_name}",
-                        "price": price,
-                    }
+                    _catalog_product_document(
+                        product_id=id,
+                        product_name=product_name,
+                        brand=brand,
+                        price=price,
+                        description=description,
+                        category="laptops" if table == "laptop_products" else "phones",
+                        metadata=metadata,
+                        score=score,
+                    )
                 )
             return res
 
@@ -267,12 +341,17 @@ async def _vector_search(
                 id, product_name, category, price, description, normalized, score = row
                 res.append(
                     {
-                        "id": id,
-                        "content": description,
-                        "score": score,
-                        "title": product_name,
-                        "category": category,
-                        "price": price,
+                        **_catalog_product_document(
+                            product_id=id,
+                            product_name=product_name,
+                            brand=(normalized or {}).get("brand", "") if isinstance(normalized, dict) else "",
+                            price=price,
+                            description=description,
+                            category="components",
+                            metadata=normalized,
+                            score=score,
+                        ),
+                        "component_category": category,
                         "normalized": normalized,
                     }
                 )

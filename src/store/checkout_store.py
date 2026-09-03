@@ -110,6 +110,19 @@ class CustomerCheckoutOrder:
     refund_amount_cents: int | None = None
     provider: PaymentProviderName = "alipay_sandbox"
     refund_eligible: bool = False
+    items: tuple["CustomerCheckoutOrderItem", ...] = ()
+
+
+@dataclass(frozen=True)
+class CustomerCheckoutOrderItem:
+    """A canonical checkout line for server-side order subject discovery."""
+
+    product_name: str
+    catalog_category: str
+    catalog_product_id: str
+    quantity: int
+    unit_amount_cents: int
+    component_category: str | None = None
 
 
 @dataclass(frozen=True)
@@ -889,9 +902,21 @@ async def list_customer_checkout_orders(customer_user_id: int, limit: int = 30) 
                         AND r.id IS NULL
                         AND p.provider IN ('alipay_sandbox', 'unionpay_test')
                        THEN TRUE ELSE FALSE
-                   END
+                   END,
+                   jsonb_agg(
+                     jsonb_build_object(
+                       'product_name', i.product_name,
+                       'catalog_category', i.catalog_category,
+                       'catalog_product_id', i.catalog_product_id,
+                       'component_category', cp.category,
+                       'quantity', i.quantity,
+                       'unit_amount_cents', i.unit_amount_cents
+                     ) ORDER BY i.id
+                   )
             FROM sales_orders AS o
             JOIN sales_order_items AS i ON i.sales_order_id = o.id
+            LEFT JOIN component_products AS cp
+              ON i.catalog_category = 'components' AND cp.id = i.catalog_product_id
             JOIN payment_transactions AS p ON p.sales_order_id = o.id
             LEFT JOIN fulfillments AS f ON f.sales_order_id = o.id
             LEFT JOIN checkout_refunds AS r ON r.sales_order_id = o.id
@@ -929,6 +954,22 @@ async def list_customer_checkout_orders(customer_user_id: int, limit: int = 30) 
                     _payment_provider_from_row(row[13]) if len(row) > 13 and row[13] is not None else "alipay_sandbox"
                 ),
                 refund_eligible=bool(row[14]) if len(row) > 14 else False,
+                items=tuple(
+                    CustomerCheckoutOrderItem(
+                        product_name=str(item.get("product_name") or ""),
+                        catalog_category=str(item.get("catalog_category") or ""),
+                        catalog_product_id=str(item.get("catalog_product_id") or ""),
+                        quantity=int(item.get("quantity") or 0),
+                        unit_amount_cents=int(item.get("unit_amount_cents") or 0),
+                        component_category=(
+                            str(item.get("component_category"))
+                            if item.get("component_category") is not None
+                            else None
+                        ),
+                    )
+                    for item in (row[15] if len(row) > 15 and isinstance(row[15], list) else [])
+                    if isinstance(item, dict)
+                ),
             )
             for row in rows
         ]

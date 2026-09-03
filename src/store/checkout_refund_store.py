@@ -832,3 +832,23 @@ async def get_customer_checkout_refund(customer_user_id: int, refund_id: UUID) -
         return _refund_from_row(row) if row is not None else None
     finally:
         await put_connection(connection)
+
+
+async def get_checkout_refund(refund_id: UUID) -> CheckoutRefund | None:
+    """读取一笔退款用于受权的财务只读 reconciliation。"""
+    connection = await get_connection()
+    try:
+        cursor = await connection.execute(
+            f"""
+            SELECT {_REFUND_COLUMNS}
+            FROM checkout_refunds AS r
+            JOIN sales_orders AS o ON o.id = r.sales_order_id
+            JOIN payment_transactions AS p ON p.id = r.payment_transaction_id
+            WHERE r.id = %s
+            """,
+            (refund_id,),
+        )
+        row = await cursor.fetchone()
+        return _refund_from_row(row) if row is not None else None
+    finally:
+        await put_connection(connection)

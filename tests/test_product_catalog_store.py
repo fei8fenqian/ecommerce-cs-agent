@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from store.product_catalog_store import list_products
+from store.product_catalog_store import _catalog_query_tokens, list_products
 
 
 class _EmptyCursor:
@@ -45,3 +45,20 @@ async def test_laptop_catalog_keeps_its_native_product_type() -> None:
 
     sql = str(connection.execute.await_args.args[0])
     assert "description, product_type AS product_type" in sql
+
+
+@pytest.mark.asyncio
+async def test_catalog_search_normalizes_whitespace_case_and_duplicate_brand_tokens() -> None:
+    connection = type("Connection", (), {"execute": AsyncMock(return_value=_EmptyCursor())})()
+
+    with (
+        patch("store.product_catalog_store.get_connection", new=AsyncMock(return_value=connection)),
+        patch("store.product_catalog_store.put_connection", new=AsyncMock()),
+    ):
+        assert await list_products("laptops", "联想  联想拯救者 Y9000P") == []
+
+    sql, params = connection.execute.await_args.args
+    assert "regexp_replace(lower(product_name)" in str(sql)
+    assert "%联想%" in params
+    assert "%y9000p%" in params
+    assert _catalog_query_tokens("联想  联想拯救者 Y9000P") == ["联想", "联想拯救者", "y9000p"]

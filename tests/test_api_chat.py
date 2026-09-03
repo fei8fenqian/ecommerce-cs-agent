@@ -27,14 +27,22 @@ from agent.tools_registry import ToolContext, ToolResult
 from api.chat import (
     ChatRequest,
     _apply_subject_choice_interaction,
+    _attach_answer_trace,
     _await_support_case_customer,
     _build_ticket_issue,
+    _can_append_generic_customer_action,
     _claim_chat_run,
     _entities_from_retrieval,
     _is_confirmed_human_handoff,
     _is_current_chat_run,
+    _is_pending_case_reply,
     _merge_evidence_context,
+    _merge_last_entities,
+    _merge_new_support_request,
+    _operator_tool_context,
     _persist_support_case_progress,
+    _product_entity_for_turn,
+    _recent_subject_router_context,
     _record_support_case_facts,
     _resume_pending_case,
     _support_case_needs_customer_turn,
@@ -53,7 +61,12 @@ from store.support_case_store import SupportCase
 
 # 本文件只测试 HTTP 编排，避免 SessionManager 导入时为了下载 tokenizer
 # 访问外网。真实 tokenizer 由 SessionManager/集成环境单独验证。
-with patch.object(tiktoken, "get_encoding", return_value=object()):
+class _FakeEncoding:
+    def encode(self, text: str) -> list[int]:
+        return list(text.encode("utf-8"))
+
+
+with patch.object(tiktoken, "get_encoding", return_value=_FakeEncoding()):
     from agent.llm.session import SessionContext
 
 
@@ -127,8 +140,10 @@ class _MockAgentLoop:
     def __init__(self, answer: str = "Mock 回答"):
         self._answer = answer
         self.last_context = ""
+        self.last_query = ""
 
     async def run(self, query, *, context="", history=None, system_prompt_extra="", tool_context=None):
+        self.last_query = query
         self.last_context = context
         return LoopResult(
             answer=self._answer,
@@ -139,6 +154,7 @@ class _MockAgentLoop:
 
     async def run_stream(self, query, *, context="", history=None, system_prompt_extra="", tool_context=None):
         """模拟流式回答"""
+        self.last_query = query
         yield {"event": "start"}
         for char in self._answer:
             yield {"event": "token", "content": char}
@@ -167,6 +183,10 @@ class _MockSupportWorkflow:
         support_requests=None,
         tool_context=None,
         selected_subjects=None,
+        previous_subjects=None,
+        subject_relation="unknown",
+        historical_contexts=None,
+        allow_historical_explanation=False,
     ):
         self.calls.append(
             {
@@ -178,6 +198,10 @@ class _MockSupportWorkflow:
                 "support_requests": support_requests,
                 "tool_context": tool_context,
                 "selected_subjects": selected_subjects,
+                "previous_subjects": previous_subjects,
+                "subject_relation": subject_relation,
+                "historical_contexts": historical_contexts,
+                "allow_historical_explanation": allow_historical_explanation,
             }
         )
         return LoopResult(
@@ -237,6 +261,48 @@ def _awaiting_staff_case(*, ticket_id: str | None = "TK-REFUND-001") -> SupportC
             "pending": pending,
         }
     )
+
+
+def test_recent_completed_case_exposes_subject_without_old_goal_to_router():
+    case = SupportCase(
+        **{
+            **_support_case_fixture(status="COMPLETED").__dict__,
+            "request_stack": [{"domain": "refund", "operation": "request"}],
+            "selected_subjects": {"order_id": "SO-OLD"},
+        }
+    )
+
+    context = json.loads(_recent_subject_router_context(case))
+
+    assert context["recent_verified_subject"] == {"subject_type": "order", "subject_id": "SO-OLD"}
+    assert "recent_goal" not in context
+
+
+@pytest.mark.asyncio
+async def test_order_list_supersedes_old_non_list_task_frame_even_if_router_says_continue():
+    case = SupportCase(
+        **{
+            **_support_case_fixture(status="ACTIVE").__dict__,
+            "request_stack": [{"domain": "refund", "operation": "request"}],
+        }
+    )
+    service = SupportCaseService()
+    retired = SupportCase(**{**case.__dict__, "status": "CANCELLED"})
+    service.supersede_for_new_request = AsyncMock(return_value=retired)  # type: ignore[method-assign]
+    intent = Intent(
+        target="agent",
+        case_update="continue",
+        requests=[SupportRequest(domain="order", operation="list")],
+    )
+
+    result = await _merge_new_support_request(
+        _support_case_request(service),
+        case=case,
+        intent=intent,
+    )
+
+    assert result is None
+    service.supersede_for_new_request.assert_awaited_once_with(case)
 
 
 def _superseded_correction_cases() -> tuple[SupportCase, SupportCase, SupportCase, SupportCase]:
@@ -474,6 +540,7 @@ async def test_api_keeps_case_awaiting_when_pending_choice_is_ambiguous():
     service = SupportCaseService()
     service.select_customer_subject = AsyncMock()  # type: ignore[method-assign]
     service.resume_customer_response = AsyncMock()  # type: ignore[method-assign]
+    service.await_customer = AsyncMock(return_value=case)  # type: ignore[method-assign]
 
     resumed = await _resume_pending_case(
         _support_case_request(service),
@@ -484,6 +551,7 @@ async def test_api_keeps_case_awaiting_when_pending_choice_is_ambiguous():
     assert resumed is case
     service.select_customer_subject.assert_not_awaited()
     service.resume_customer_response.assert_not_awaited()
+    service.await_customer.assert_awaited_once()
 
 
 def _choice_case() -> SupportCase:
@@ -766,12 +834,123 @@ async def test_api_records_refund_self_service_handoff_as_completed_case_not_ref
     assert outcome["resolution_type"] == "SELF_SERVICE_HANDOFF"
 
 
-def test_product_retrieval_records_current_product_for_next_turn():
+def test_product_retrieval_does_not_promote_noncanonical_title_only_row():
     assert _entities_from_retrieval(
         "laptop_products",
         [{"title": "惠普 惠普锐Pro"}],
-    ) == {"product": "惠普 惠普锐Pro"}
+    ) == {}
     assert _entities_from_retrieval("knowledge_chunks", [{"title": "售后政策"}]) == {}
+
+
+def test_product_retrieval_preserves_server_owned_candidates_for_explicit_next_turn_selection():
+    entities = _entities_from_retrieval(
+        "component_products",
+        [
+            {
+                "id": "cooler-1",
+                "product_name": "玄冰500",
+                "display_title": "九州风神玄冰500",
+                "category": "components",
+                "component_category": "cooling_product",
+            },
+            {
+                "id": "cooler-2",
+                "product_name": "AK400",
+                "display_title": "九州风神 AK400",
+                "category": "components",
+                "component_category": "cooling_product",
+            },
+        ],
+        "推荐两款散热器",
+    )
+
+    assert _product_entity_for_turn("就选九州风神玄冰500这款", entities) == {
+        "product": "九州风神玄冰500",
+        "product_id": "cooler-1",
+        "product_category": "components",
+        "product_name": "玄冰500",
+        "component_category": "cooling_product",
+    }
+    assert _product_entity_for_turn("购买", entities) is None
+
+
+def test_router_candidate_ref_promotes_shortened_product_selection_server_side():
+    from api.chat import _product_entity_from_intent
+
+    entities = _entities_from_retrieval(
+        "component_products",
+        [
+            {
+                "id": "cooler-1",
+                "product_name": "利民Peerless Assassin 120 BLACK 逆重力热管散热器，支持双平台",
+                "display_title": "利民Peerless Assassin 120 BLACK 逆重力热管散热器，支持双平台",
+                "category": "components",
+                "component_category": "cooling_product",
+            },
+            {
+                "id": "cooler-2",
+                "product_name": "九州风神 AK400",
+                "display_title": "九州风神 AK400",
+                "category": "components",
+                "component_category": "cooling_product",
+            },
+        ],
+        "推荐两款散热器",
+    )
+    intent = Intent(
+        target="agent",
+        domain="product",
+        operation="purchase",
+        subject_refs=["candidate_1"],
+    )
+
+    assert _product_entity_from_intent(intent, "换一种说法也不影响选择", entities, None) == {
+        "product": "利民Peerless Assassin 120 BLACK 逆重力热管散热器，支持双平台",
+        "product_id": "cooler-1",
+        "product_category": "components",
+        "product_name": "利民Peerless Assassin 120 BLACK 逆重力热管散热器，支持双平台",
+        "component_category": "cooling_product",
+    }
+
+
+def test_customer_action_uses_canonical_product_detail_without_rag_table():
+    from api.chat import _customer_action_suffix
+
+    assert _customer_action_suffix(
+        "agent",
+        "",
+        "推荐一款散热器",
+        "利民 Frozen Magic 360",
+        "cooler-1",
+        "components",
+        "cooling_product",
+    ) == "\n\n[查看该商品](?page=product&category=components&product=cooler-1)"
+
+
+def test_canonical_product_action_removes_model_generic_catalog_fallback():
+    from api.chat import _append_customer_action_suffix
+
+    assert _append_customer_action_suffix(
+        "可以从目录查看。\n\n[去商品目录查看](?page=catalog)",
+        "agent",
+        "",
+        "购买",
+        "利民散热器",
+        "cooler-1",
+        "components",
+        "cooling_product",
+    ) == "可以从目录查看。\n\n[查看该商品](?page=product&category=components&product=cooler-1)"
+
+
+def test_server_owned_product_action_is_allowed_for_safe_fact_response_only():
+    assert _can_append_generic_customer_action(
+        LoopResult(answer="商品信息", response_control={"mode": "FACT"}),
+        trusted_navigation="product_detail_navigation",
+    ) is True
+    assert _can_append_generic_customer_action(
+        LoopResult(answer="请选择", response_control={"mode": "ASK_CHOICE"}),
+        trusted_navigation="product_detail_navigation",
+    ) is False
 
 
 def test_ticket_issue_keeps_recent_customer_context():
@@ -800,6 +979,97 @@ def test_selected_product_context_is_evidence_not_route_override():
     assert intent.domain == "refund"
     assert "Pallas II DDR5 6000 32G" in context
     assert "知识来源" in context
+
+
+def test_workflow_tool_context_is_not_semantically_cropped_twice():
+    """Workflow policy remains the sole semantic capability narrowing layer."""
+    context = ToolContext(
+        user_id=1,
+        role="customer",
+        allowed_tools=frozenset({"track_order", "query_refund_status", "check_refund_eligibility"}),
+    )
+    intent = Intent(
+        target="agent",
+        domain="refund",
+        operation="request",
+        requests=[SupportRequest(domain="refund", operation="request")],
+    )
+
+    shaped = _operator_tool_context(context, intent)
+
+    assert shaped.allowed_tools == context.allowed_tools
+
+
+def test_product_purchase_without_canonical_product_keeps_discovery_but_not_stock():
+    context = ToolContext(
+        user_id=1,
+        role="customer",
+        allowed_tools=frozenset({"search_product", "search_component", "check_stock"}),
+    )
+    intent = Intent(
+        target="agent",
+        domain="product",
+        operation="purchase",
+        requests=[SupportRequest(domain="product", operation="purchase")],
+    )
+
+    shaped = _operator_tool_context(context, intent, canonical_product=False)
+
+    assert shaped.allowed_tools == frozenset({"search_product", "search_component"})
+
+
+def test_product_purchase_with_canonical_product_needs_no_lookup_tool():
+    context = ToolContext(
+        user_id=1,
+        role="customer",
+        allowed_tools=frozenset({"search_product", "search_component", "check_stock"}),
+    )
+    intent = Intent(
+        target="agent",
+        domain="product",
+        operation="purchase",
+        requests=[SupportRequest(domain="product", operation="purchase")],
+    )
+
+    shaped = _operator_tool_context(context, intent, canonical_product=True)
+
+    assert shaped.allowed_tools == frozenset()
+
+
+@pytest.mark.parametrize(
+    "answer_source",
+    ["DETERMINISTIC_FALLBACK", "OPERATOR_VALIDATED", "CLARIFICATION", "CONTROLLED_ACTION"],
+)
+def test_answer_trace_does_not_overwrite_response_layer_source(answer_source):
+    result = LoopResult(answer="安全回答", answer_source=answer_source)
+    intent = Intent(target="agent", domain="refund", operation="status")
+
+    _attach_answer_trace(
+        result,
+        intent,
+        raw_query="为什么",
+        retrieval_query="为什么",
+        tool_context=ToolContext(user_id=1, role="customer", allowed_tools=frozenset()),
+    )
+
+    assert result.answer_source == answer_source
+    assert result.answer_trace["answer_source"] == answer_source
+
+
+def test_router_new_request_wins_over_old_pending_choice_match():
+    case = _choice_case()
+    intent = Intent(
+        target="agent",
+        domain="product",
+        operation="purchase",
+        requests=[SupportRequest(domain="product", operation="purchase")],
+        case_update="new_request",
+    )
+
+    # “Sony 耳机” is a valid old refund candidate, but the Router has already
+    # classified this turn as a new product-purchase Goal.  Pending choice is
+    # allowed to interpret continuations, never to resurrect the old refund.
+    assert _is_pending_case_reply(case, intent, "我想买 Sony 耳机") is False
 
 
 class _MockSessionManager:
@@ -914,8 +1184,8 @@ def _install_superseded_correction_case(client, *, query: str):
     service.get_active = AsyncMock(side_effect=[case, retired])  # type: ignore[method-assign]
     service.get_latest = AsyncMock(side_effect=[case, retired])  # type: ignore[method-assign]
     service.supersede_subject_correction_description = AsyncMock(return_value=retired)  # type: ignore[method-assign]
-    service.open_or_resume = AsyncMock(return_value=SimpleNamespace(case=retired))  # type: ignore[method-assign]
-    service.record_requests = AsyncMock(return_value=new_request)  # type: ignore[method-assign]
+    service.open_or_resume = AsyncMock(return_value=SimpleNamespace(case=new_request))  # type: ignore[method-assign]
+    service.supersede_for_new_request = AsyncMock(return_value=retired)  # type: ignore[method-assign]
     service.await_customer = AsyncMock(return_value=awaiting)  # type: ignore[method-assign]
     client.app.state.support_case_service = service
     client.app.state.agent = _MockAgentLoop(answer="这笔退款记录目前显示处理中，金额为 ¥8999.00。")
@@ -988,6 +1258,29 @@ class TestChatEndpoint:
 
         assert response.status_code == 200
         assert response.json()["answer"] == "这是测试回答"
+
+    @pytest.mark.asyncio
+    async def test_operator_receives_raw_query_not_retrieval_rewrite(self, client):
+        route = AsyncMock(
+            return_value=Intent(
+                target="agent",
+                query="检索辅助改写",
+                domain="product",
+                operation="answer",
+                confidence=1.0,
+            )
+        )
+        client.app.state.intent_router.route = route
+        transport = httpx.ASGITransport(app=client.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+            response = await http_client.post(
+                "/api/v1/chat",
+                json={"query": "我真正想问的是这款能不能装进我的机箱"},
+            )
+
+        assert response.status_code == 200
+        assert client.app.state.agent.last_query == "我真正想问的是这款能不能装进我的机箱"
+        assert route.await_args.args[0] == "我真正想问的是这款能不能装进我的机箱"
 
     @pytest.mark.asyncio
     async def test_plain_chat_replaces_unbound_refund_transaction_claim(self, client):
@@ -1168,9 +1461,7 @@ class TestChatEndpoint:
         assert later.status_code == 200
         lookup.assert_not_awaited()
         service.supersede_subject_correction_description.assert_awaited_once_with(case)
-        service.record_requests.assert_awaited_once()
-        assert service.record_requests.await_args.kwargs["request_stack"][0]["domain"] == "after_sales"
-        assert service.record_requests.await_args.kwargs["request_stack"][0]["operation"] == "after_sales_transition"
+        service.supersede_for_new_request.assert_awaited_once()
         assert client.app.state.support_workflow_agent.calls[-1]["selected_subjects"] is None
         assert "处理中" not in response.json()["answer"]
         assert "8999" not in response.json()["answer"]
@@ -1232,9 +1523,11 @@ class TestChatEndpoint:
 
         assert response.status_code == 200
         route.assert_awaited_once_with(
-            "查询 微星魔影15 的实时库存",
+            "需要",
             history=expected_history,
+            case_context="",
             knowledge_context="",
+            semantic_hints='{"resolved_reference_hint":"查询 微星魔影15 的实时库存"}',
         )
 
     @pytest.mark.asyncio
@@ -1450,9 +1743,81 @@ class TestChatEndpoint:
 
 
 # =============================================================================
+# Product entity lifecycle
+# =============================================================================
+def test_product_entity_lifecycle_preserves_candidates_after_server_selection():
+    entities = {
+        "product_candidates": [
+            {
+                "product": "Kingston NV2",
+                "product_id": "p-1",
+                "product_name": "NV2",
+                "product_category": "components",
+            },
+            {
+                "product": "Samsung 990 Pro",
+                "product_id": "p-2",
+                "product_name": "990 Pro",
+                "product_category": "components",
+            },
+        ]
+    }
+
+    _merge_last_entities(
+        entities,
+        {
+            "product": "Kingston NV2",
+            "product_id": "p-1",
+            "product_name": "NV2",
+            "product_category": "components",
+        },
+    )
+
+    assert len(entities["product_candidates"]) == 2
+    assert entities["product_id"] == "p-1"
+
+
+# =============================================================================
 # POST /chat/stream
 # =============================================================================
 class TestChatStreamEndpoint:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("correction_kind", ["description", "multiple", "none_found", "unavailable"])
+    async def test_stream_subject_correction_short_circuits_do_not_read_uninitialized_handoff_flags(
+        self, client, monkeypatch, correction_kind: str
+    ):
+        """All correction outcomes rejoin stream control flow without a 500 or ticket."""
+        case = SupportCase(
+            **{
+                **_support_case_fixture(status="ACTIVE").__dict__,
+                "request_stack": [{"domain": "refund", "operation": "request"}],
+                "selected_subjects": {"order_id": "SO-OLD"},
+            }
+        )
+        service = SupportCaseService()
+        service.get_active = AsyncMock(return_value=case)  # type: ignore[method-assign]
+        service.get_latest = AsyncMock(return_value=case)  # type: ignore[method-assign]
+        client.app.state.support_case_service = service
+        monkeypatch.setattr(
+            "api.chat._prepare_customer_subject_correction",
+            AsyncMock(
+                return_value=(
+                    correction_kind,
+                    case,
+                    None,
+                    [{"order_id": "SO-SSD", "product_name": "测试 SSD", "amount_cents": 66900}],
+                )
+            ),
+        )
+
+        transport = httpx.ASGITransport(app=client.app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+            response = await http_client.post("/api/v1/chat/stream", json={"query": "我想退 SSD"})
+
+        assert response.status_code == 200
+        assert '"event": "done"' in response.text
+        assert "create_ticket" not in response.text
+
     @pytest.mark.asyncio
     async def test_awaiting_staff_case_stream_allows_router_to_handle_new_customer_turn(self, client):
         """流式出口与普通出口都不能在 Router 前吞掉人工 Case 后续输入。"""
@@ -1697,9 +2062,11 @@ class TestChatStreamEndpoint:
 
         assert response.status_code == 200
         route.assert_awaited_once_with(
-            "查询 微星魔影15 的实时库存",
+            "需要",
             history=expected_history,
+            case_context="",
             knowledge_context="",
+            semantic_hints='{"resolved_reference_hint":"查询 微星魔影15 的实时库存"}',
         )
 
     @pytest.mark.asyncio
@@ -1865,3 +2232,542 @@ class TestChatStreamEndpoint:
         resp = client.post("/api/v1/chat/stream", json={"query": ""})
         assert resp.status_code == 400
         assert resp.json()["error"]["code"] == "INVALID_REQUEST"
+
+
+def test_semantic_product_candidates_expose_trusted_price_but_not_canonical_id():
+    from api.chat import _semantic_hint_payload
+
+    payload = json.loads(
+        _semantic_hint_payload(
+            resolved_query="从这两款里选一个",
+            entities={
+                "product_candidates": [
+                    {
+                        "product": "iPhone 17 512GB",
+                        "product_id": "phone-17",
+                        "product_name": "iPhone 17 512GB",
+                        "product_category": "phones",
+                        "price_cents": 799900,
+                        "brand": "Apple",
+                        "storage": "512GB",
+                        "screen_size": "6.3-inch",
+                    },
+                    {
+                        "product": "iPhone 16 128GB",
+                        "product_id": "phone-16",
+                        "product_name": "iPhone 16 128GB",
+                        "product_category": "phones",
+                        "price_cents": 599900,
+                        "brand": "Apple",
+                        "storage": "128GB",
+                        "screen_size": "6.1-inch",
+                    },
+                ]
+            },
+        )
+    )
+
+    assert payload["product_candidates"] == [
+        {
+            "ref": "candidate_1",
+            "name": "iPhone 17 512GB",
+            "product_category": "phones",
+            "component_category": "",
+            "price_cents": 799900,
+            "brand": "Apple",
+            "storage": "512GB",
+            "screen_size": "6.3-inch",
+        },
+        {
+            "ref": "candidate_2",
+            "name": "iPhone 16 128GB",
+            "product_category": "phones",
+            "component_category": "",
+            "price_cents": 599900,
+            "brand": "Apple",
+            "storage": "128GB",
+            "screen_size": "6.1-inch",
+        },
+    ]
+    assert "product_id" not in json.dumps(payload)
+
+
+def test_purchase_goal_reuses_server_promoted_product_without_query_phrase_matching():
+    from api.chat import _product_entity_from_intent
+
+    entities = {
+        "product": "iPhone 17 512GB",
+        "product_id": "phone-17",
+        "product_name": "iPhone 17 512GB",
+        "product_category": "phones",
+    }
+    intent = Intent(target="agent", domain="product", operation="purchase")
+
+    first = _product_entity_from_intent(intent, "继续吧", entities, None)
+    second = _product_entity_from_intent(intent, "按刚才确定的方案进行", entities, None)
+
+    assert first == second == entities
+
+
+def test_customer_chat_capability_snapshot_for_promoted_product_disallows_checkout_writes():
+    from api.chat import _customer_chat_capability_context
+
+    context = _customer_chat_capability_context(
+        ToolContext(
+            user_id=7,
+            role="customer",
+            allowed_tools=frozenset({"search_product", "check_stock"}),
+        ),
+        canonical_product=True,
+    )
+
+    assert '"product_detail_navigation":true' in context
+    assert '"create_order":false' in context
+    assert '"write_shipping_address":false' in context
+    assert '"select_payment_method":false' in context
+    assert '"submit_checkout":false' in context
+    assert '"pay_on_behalf_of_customer":false' in context
+
+
+def test_customer_product_action_depends_on_canonical_state_not_query_wording():
+    from api.chat import _customer_action_suffix
+
+    args = ("agent", "", "", "iPhone 17 512GB", "phone-17", "phones", "")
+    action_a = _customer_action_suffix(*args, intent_domain="product", intent_operation="purchase")
+    action_b = _customer_action_suffix(
+        "agent",
+        "",
+        "完全不同的自然语言表达",
+        "iPhone 17 512GB",
+        "phone-17",
+        "phones",
+        "",
+        intent_domain="product",
+        intent_operation="purchase",
+    )
+
+    assert action_a == action_b == "\n\n[查看该商品](?page=product&category=phones&product=phone-17)"
+
+
+def test_selected_product_semantic_hint_hides_canonical_product_id():
+    from api.chat import _semantic_hint_payload
+
+    payload = json.loads(
+        _semantic_hint_payload(
+            resolved_query="继续处理当前选中的商品",
+            entities={},
+            explicit_product={
+                "product": "iPhone 17 512GB",
+                "product_id": "phone-17",
+                "product_category": "phones",
+            },
+        )
+    )
+
+    assert payload["selected_product_context"] == {
+        "product": "iPhone 17 512GB",
+        "product_category": "phones",
+    }
+    assert "phone-17" not in json.dumps(payload)
+
+
+def test_previous_turn_outcome_is_a_state_contract_not_customer_copy():
+    from api.chat import _previous_outcome_operator_context, _router_case_context
+
+    messages = [
+        {
+            "role": "assistant",
+            "content": "当前暂时无法继续完成这项操作。",
+            "_answer_trace": {
+                "domain": "refund",
+                "operation": "request",
+                "selected_subject": "SO-IP17",
+                "subject_resolution_status": "resolved",
+                "required_facts": ["refund_eligibility"],
+                "known_facts": ["refund_status"],
+                "missing_facts": ["refund_eligibility"],
+                "failed_capabilities": ["check_refund_eligibility"],
+                "goal_status": "blocked",
+                "workflow_reason": "fact_tool_failed",
+                "next_action": "EXPLAIN_LIMITATION_OR_HANDOFF",
+                "next_actor": "NONE",
+                "answer_source": "DETERMINISTIC_FALLBACK",
+            },
+        }
+    ]
+
+    router_context = _router_case_context("case_status=ACTIVE", messages)
+    assert "previous_turn_outcome=" in router_context
+    assert "fact_tool_failed" in router_context
+    assert "当前暂时无法继续完成这项操作" not in router_context
+
+    explanation_intent = Intent(
+        target="agent",
+        domain="refund",
+        operation="request",
+        fact_scope="explain_previous",
+    )
+    operator_context = _previous_outcome_operator_context(explanation_intent, messages)
+    assert "fact_tool_failed" in operator_context
+    assert "check_refund_eligibility" in operator_context
+    assert "Provider/交易失败" in operator_context
+
+    current_intent = Intent(
+        target="agent",
+        domain="refund",
+        operation="request",
+        fact_scope="current",
+    )
+    assert _previous_outcome_operator_context(current_intent, messages) == ""
+
+
+@pytest.mark.asyncio
+async def test_catalog_evidence_plan_is_executed_for_product_goal_without_canonical_selection(monkeypatch):
+    from api.chat import _acquire_catalog_evidence
+
+    search = AsyncMock(
+        side_effect=lambda query, *, table, **kwargs: (
+            [
+                {
+                    "id": "phone-17",
+                    "product_id": "phone-17",
+                    "product_name": "iPhone 17 512GB",
+                    "display_title": "Apple iPhone 17 512GB",
+                    "category": "phones",
+                    "price": 7999,
+                    "comparison_metadata": {"brand": "Apple", "storage": "512GB", "screen_size": "6.3-inch"},
+                    "score": 0.9,
+                }
+            ]
+            if table == "phone_products"
+            else []
+        )
+    )
+    monkeypatch.setattr("api.chat.hybrid_search", search)
+    intent = Intent(target="agent", domain="product", operation="purchase")
+
+    docs, acquired = await _acquire_catalog_evidence(
+        required=True,
+        intent=intent,
+        query="按当前商品继续选择",
+        entities={},
+        canonical_product=False,
+    )
+
+    assert acquired is True
+    assert [doc["product_id"] for doc in docs] == ["phone-17"]
+    assert {call.kwargs["table"] for call in search.await_args_list} == {
+        "laptop_products",
+        "phone_products",
+        "component_products",
+    }
+
+
+def test_candidate_promotion_preserves_current_candidate_evidence_and_direct_action_cross_category():
+    from api.chat import _customer_action_suffix, _product_entity_from_intent
+
+    entities = {
+        "product_candidates": [
+            {
+                "product": "Kingston NV2 1TB",
+                "product_id": "ssd-nv2-1tb",
+                "product_name": "Kingston NV2 1TB",
+                "product_category": "components",
+                "component_category": "solid_state_drive",
+                "price_cents": 49900,
+                "brand": "Kingston",
+                "capacity": "1TB",
+            },
+            {
+                "product": "Samsung 990 PRO 2TB",
+                "product_id": "ssd-990pro-2tb",
+                "product_name": "Samsung 990 PRO 2TB",
+                "product_category": "components",
+                "component_category": "solid_state_drive",
+                "price_cents": 129900,
+                "brand": "Samsung",
+                "capacity": "2TB",
+            },
+        ]
+    }
+    intent = Intent(
+        target="agent",
+        domain="product",
+        operation="purchase",
+        subject_refs=["candidate_1"],
+    )
+
+    selected = _product_entity_from_intent(intent, "换一种表达", entities, None)
+    assert selected is not None
+    _merge_last_entities(entities, selected)
+
+    assert entities["product_id"] == "ssd-nv2-1tb"
+    assert len(entities["product_candidates"]) == 2
+    assert _customer_action_suffix(
+        "agent",
+        "",
+        "任意表达",
+        entities["product"],
+        entities["product_id"],
+        entities["product_category"],
+        entities["component_category"],
+        intent_domain="product",
+        intent_operation="purchase",
+    ) == "\n\n[查看该商品](?page=product&category=components&product=ssd-nv2-1tb)"
+
+
+def test_session_product_lifecycle_keeps_candidates_after_promotion_and_retires_selection_on_fresh_search():
+    from agent.llm.session import SessionManager
+
+    current = SessionManager._merge_entities(
+        {},
+        {
+            "product_candidates": [
+                {
+                    "product": "Acer Swift 14",
+                    "product_id": "laptop-acer-14",
+                    "product_name": "Acer Swift 14",
+                    "product_category": "laptops",
+                    "price_cents": 699900,
+                },
+                {
+                    "product": "Dell XPS 13",
+                    "product_id": "laptop-dell-13",
+                    "product_name": "Dell XPS 13",
+                    "product_category": "laptops",
+                    "price_cents": 899900,
+                },
+            ]
+        },
+    )
+    promoted = SessionManager._merge_entities(
+        current,
+        {
+            "product": "Dell XPS 13",
+            "product_id": "laptop-dell-13",
+            "product_name": "Dell XPS 13",
+            "product_category": "laptops",
+        },
+    )
+
+    assert promoted["product_id"] == "laptop-dell-13"
+    assert len(promoted["product_candidates"]) == 2
+
+    refreshed = SessionManager._merge_entities(
+        promoted,
+        {
+            "product_candidates": [
+                {
+                    "product": "Sony WH-1000XM6",
+                    "product_id": "audio-sony-xm6",
+                    "product_name": "Sony WH-1000XM6",
+                    "product_category": "components",
+                    "component_category": "audio",
+                }
+            ]
+        },
+    )
+    assert "product_id" not in refreshed
+    assert refreshed["product_candidates"][0]["product_id"] == "audio-sony-xm6"
+
+
+def test_orders_navigation_is_server_capability_for_safe_read_modes_not_query_wording():
+    from api.chat import _customer_action_suffix, _trusted_navigation_action
+
+    intent = Intent(target="agent", domain="order", operation="list")
+    navigation = _trusted_navigation_action(intent, canonical_product=False)
+
+    assert navigation == "orders_navigation"
+    for mode in ("FACT", "EXPLANATION", "READ_ONLY", "GENERIC"):
+        assert _can_append_generic_customer_action(
+            LoopResult(answer="订单说明", response_control={"mode": mode}),
+            trusted_navigation=navigation,
+        ) is True
+    for mode in ("ERROR", "ASK_CLARIFICATION", "ASK_CHOICE", "STAFF_HANDOFF"):
+        assert _can_append_generic_customer_action(
+            LoopResult(answer="受控状态", response_control={"mode": mode}),
+            trusted_navigation=navigation,
+        ) is False
+
+    first = _customer_action_suffix("agent", "", "我现在有什么订单", intent_domain="order", intent_operation="list")
+    second = _customer_action_suffix("agent", "", "换一种完全不同的表达", intent_domain="order", intent_operation="list")
+    assert first == second == "\n\n[查看我的订单](?page=orders)"
+
+
+def test_customer_capability_snapshot_declares_orders_navigation():
+    from api.chat import _customer_chat_capability_context
+
+    context = _customer_chat_capability_context(
+        ToolContext(user_id=7, role="customer", allowed_tools=frozenset({"track_order"})),
+        canonical_product=False,
+    )
+
+    assert '"orders_navigation":true' in context
+    assert '"create_order":false' in context
+
+
+@pytest.mark.asyncio
+async def test_real_chat_product_candidate_promotion_persists_canonical_action_across_preferences(client, monkeypatch):
+    catalog_docs = [
+        {
+            "id": "p2105475",
+            "product_id": "p2105475",
+            "product_name": "苹果iPhone 16 Pro Max（1TB）",
+            "display_title": "苹果iPhone 16 Pro Max（1TB）",
+            "category": "phones",
+            "price": 13999,
+            "comparison_metadata": {"brand": "苹果", "model": "iPhone 16 Pro Max", "storage": "1TB", "screen_size": "6.9英寸"},
+            "score": 0.99,
+        },
+        {
+            "id": "p2105471",
+            "product_id": "p2105471",
+            "product_name": "苹果iPhone 16 Pro（1TB）",
+            "display_title": "苹果iPhone 16 Pro（1TB）",
+            "category": "phones",
+            "price": 12999,
+            "comparison_metadata": {"brand": "苹果", "model": "iPhone 16 Pro", "storage": "1TB", "screen_size": "6.3英寸"},
+            "score": 0.98,
+        },
+        {
+            "id": "p2105470",
+            "product_id": "p2105470",
+            "product_name": "苹果iPhone 16 Pro（512GB）",
+            "display_title": "苹果iPhone 16 Pro（512GB）",
+            "category": "phones",
+            "price": 10999,
+            "comparison_metadata": {"brand": "苹果", "model": "iPhone 16 Pro", "storage": "512GB", "screen_size": "6.3英寸"},
+            "score": 0.97,
+        },
+    ]
+
+    async def fake_hybrid_search(query, *, table, **kwargs):
+        return catalog_docs if table == "phone_products" else []
+
+    monkeypatch.setattr("api.chat.hybrid_search", fake_hybrid_search)
+    intents = [
+        Intent(
+            target="agent",
+            domain="product",
+            operation="search_product",
+            requests=[SupportRequest(domain="product", operation="search_product")],
+        ),
+        Intent(
+            target="agent",
+            domain="product",
+            operation="search_product",
+            subject_refs=["candidate_1"],
+            requests=[SupportRequest(domain="product", operation="search_product", subject_refs=["candidate_1"])],
+        ),
+        Intent(
+            target="agent",
+            domain="product",
+            operation="search_product",
+            subject_refs=["candidate_2"],
+            requests=[SupportRequest(domain="product", operation="search_product", subject_refs=["candidate_2"])],
+        ),
+        Intent(
+            target="agent",
+            domain="product",
+            operation="search_product",
+            subject_refs=["candidate_2"],
+            requests=[SupportRequest(domain="product", operation="search_product", subject_refs=["candidate_2"])],
+        ),
+        Intent(
+            target="agent",
+            domain="product",
+            operation="purchase",
+            requests=[SupportRequest(domain="product", operation="purchase")],
+        ),
+        Intent(
+            target="agent",
+            domain="product",
+            operation="purchase",
+            requests=[SupportRequest(domain="product", operation="purchase")],
+        ),
+    ]
+    client.app.state.intent_router.route = AsyncMock(side_effect=intents)
+    prompts: list[str] = []
+
+    async def run_agent(query, *, context="", history=None, system_prompt_extra="", tool_context=None):
+        prompts.append(system_prompt_extra)
+        return LoopResult(
+            answer="我会按当前服务端候选继续处理。",
+            total_steps=1,
+            total_tokens=1,
+            response_control={"mode": "READ_ONLY"},
+        )
+
+    client.app.state.agent.run = run_agent
+    transport = httpx.ASGITransport(app=client.app)
+    queries = [
+        "给我推荐一台新的iphone",
+        "预算无上限",
+        "不用太大",
+        "1TB就行",
+        "直接把链接给我",
+        "就买这台",
+    ]
+    responses = []
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+        for query in queries:
+            responses.append(
+                await http_client.post(
+                    "/api/v1/chat",
+                    json={"session_id": "product-e2e", "query": query},
+                )
+            )
+
+    assert all(response.status_code == 200 for response in responses)
+    session_ctx = client.app.state.session._sessions["product-e2e"]
+    assert session_ctx.last_entities["product_id"] == "p2105471"
+    assert len(session_ctx.last_entities["product_candidates"]) == 3
+    assert responses[-2].json()["answer"].endswith(
+        "[查看该商品](?page=product&category=phones&product=p2105471)"
+    )
+    assert responses[-1].json()["answer"].endswith(
+        "[查看该商品](?page=product&category=phones&product=p2105471)"
+    )
+    assert '"product_detail_navigation":true' in prompts[-1]
+    assert '"create_order":false' in prompts[-1]
+    assert '"write_shipping_address":false' in prompts[-1]
+    assert '"select_payment_method":false' in prompts[-1]
+
+
+@pytest.mark.asyncio
+async def test_real_chat_order_list_safe_fact_response_gets_server_orders_navigation(client):
+    intent = Intent(
+        target="agent",
+        domain="order",
+        operation="list",
+        requests=[SupportRequest(domain="order", operation="list")],
+    )
+    client.app.state.intent_router.route = AsyncMock(side_effect=[intent, intent])
+    client.app.state.support_workflow_agent.run = AsyncMock(
+        return_value=LoopResult(
+            answer="这些是当前账户下可查询的订单。",
+            total_steps=1,
+            total_tokens=1,
+            response_control={"mode": "FACT"},
+            workflow_progress={"goal_status": "resolved", "next_actor": "NONE", "next_action": "ANSWER"},
+        )
+    )
+
+    transport = httpx.ASGITransport(app=client.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+        first = await http_client.post(
+            "/api/v1/chat",
+            json={"session_id": "order-nav-e2e", "query": "我现在有什么订单"},
+        )
+        second = await http_client.post(
+            "/api/v1/chat",
+            json={"session_id": "order-nav-e2e", "query": "那我怎么查看这些订单"},
+        )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    expected = "[查看我的订单](?page=orders)"
+    assert expected in first.json()["answer"]
+    assert expected in second.json()["answer"]
+    assert "手机号" not in first.json()["answer"]
+    assert "手机号" not in second.json()["answer"]

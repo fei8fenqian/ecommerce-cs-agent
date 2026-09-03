@@ -430,6 +430,25 @@ class SupportCaseService:
             event_payload=event_payload or {"request_count": len(request_stack)},
         )
 
+    async def supersede_for_new_request(self, case: SupportCase) -> SupportCase | None:
+        """Close an automated task frame before a distinct customer task starts.
+
+        Case history remains auditable, but a new request must not inherit this
+        Case's goal stack or selected subject.  Real staff-owned Cases are
+        deliberately left alone; their public lifecycle is independent from a
+        new automated conversation task.
+        """
+        if case.status not in {"ACTIVE", "AWAITING_CUSTOMER"}:
+            return case
+        return await self._replace(
+            case,
+            status="CANCELLED",
+            pending={},
+            pending_command={},
+            event_type="CASE_COMPLETED",
+            event_payload={"reason": "TASK_SUPERSEDED_BY_NEW_REQUEST"},
+        )
+
     async def await_customer(
         self,
         case: SupportCase,
@@ -636,6 +655,30 @@ class SupportCaseService:
             amount_cents = raw.get("amount_cents")
             if isinstance(amount_cents, int) and not isinstance(amount_cents, bool) and amount_cents >= 0:
                 item["amount_cents"] = amount_cents
+            for key in ("catalog_category", "catalog_product_id", "component_category"):
+                value = raw.get(key)
+                if isinstance(value, str) and value.strip():
+                    item[key] = value.strip()[:160]
+            raw_items = raw.get("items")
+            if isinstance(raw_items, list):
+                safe_items: list[dict[str, str]] = []
+                for raw_item in raw_items[:10]:
+                    if not isinstance(raw_item, dict):
+                        continue
+                    safe_item: dict[str, str] = {}
+                    for key in (
+                        "product_name",
+                        "catalog_category",
+                        "catalog_product_id",
+                        "component_category",
+                    ):
+                        value = raw_item.get(key)
+                        if isinstance(value, str) and value.strip():
+                            safe_item[key] = value.strip()[:160]
+                    if safe_item:
+                        safe_items.append(safe_item)
+                if safe_items:
+                    item["items"] = safe_items
             safe.append(item)
         return safe
 

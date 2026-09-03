@@ -14,8 +14,10 @@ import psycopg
 import pytest
 import pytest_asyncio
 
-from agent.engines.loop import LoopResult
+from agent.engines.loop import LoopResult, StepResult
 from agent.engines.support_workflow import SupportWorkflowAgent
+from agent.llm.llm_client import ToolCall
+from agent.support_subjects import match_subject_identity_choices
 from agent.tools.query_refund_status import QueryRefundStatus
 from agent.tools.track_order import TrackOrder
 from agent.tools_registry import ToolContext, ToolRegistry
@@ -30,10 +32,11 @@ from store.checkout_refund_store import (
     start_customer_refund_confirmation,
     start_finance_refund_approval,
 )
-from store.checkout_store import mark_fulfillment_shipped
+from store.checkout_store import list_customer_checkout_orders, mark_fulfillment_shipped
+from store.order_store import find_orders
 
 TARGET_DATABASE = "ecommerce_agent_refund_test"
-EXPECTED_REVISION = "c6f4a9e2b817"
+EXPECTED_REVISION = "d2e7a1c9b504"
 pytestmark = pytest.mark.skipif(
     settings.pg_dbname != TARGET_DATABASE,
     reason=f"checkout refund integration requires {TARGET_DATABASE}",
@@ -41,10 +44,40 @@ pytestmark = pytest.mark.skipif(
 
 
 class _WorkflowAnswerAgent:
-    """只固定最终话术，工具和状态判断仍走真实 SupportWorkflow。"""
+    """用真实 Registry 模拟已审计的 Operator 选择，只固定模型最终话术。
+
+    这个集成测试不依赖外部 LLM，但不能再假设生产图会在 Operator 之前预读
+    全部工具。第一次 invocation 做订单 discovery；subject control 绑定后，
+    下一次 invocation 再做退款状态读取。工具、ownership 和 PostgreSQL 仍是真实的。
+    """
+
+    def __init__(self, registry: ToolRegistry) -> None:
+        self.registry = registry
 
     async def run(self, query, *, context="", history=None, system_prompt_extra="", tool_context=None):
-        return LoopResult(answer="退款正在处理中，当前没有可信的预计到账时间。", total_steps=0)
+        assert isinstance(tool_context, ToolContext)
+        if tool_context.selected_order_id:
+            tool_name = "query_refund_status"
+            arguments = {"order_id": tool_context.selected_order_id}
+        else:
+            tool_name = "track_order"
+            arguments = {}
+        tool_result = await self.registry.execute(tool_name, tool_context=tool_context, **arguments)
+        call = ToolCall(id=f"integration-{tool_name}", name=tool_name, arguments=arguments)
+        result = LoopResult(
+            answer="退款正在处理中，当前没有可信的预计到账时间。",
+            steps=[StepResult(step=1, thought=None, tool_calls=[call], observation=tool_result.to_observation())],
+            total_steps=1,
+        )
+        if tool_result.is_success:
+            result.verified_facts = {
+                tool_name: {"status": "success", "data": dict(tool_result.data)},
+            }
+            result.decision_facts = dict(tool_result.decision_facts)
+            result.decision_contexts = list(tool_result.decision_contexts)
+        else:
+            result.verified_facts = {tool_name: {"status": tool_result.status, "error": tool_result.error}}
+        return result
 
 
 def _dsn() -> str:
@@ -229,6 +262,51 @@ async def test_refund_request_confirmation_and_success_are_atomic_and_idempotent
 
 
 @pytest.mark.asyncio
+async def test_checkout_component_subject_metadata_uses_real_components_schema(
+    refund_state: RefundIntegrationState,
+) -> None:
+    """A checkout line keeps table=components and receives its real subtype by join."""
+    component_id = f"component-ssd-{uuid4().hex[:16]}"
+    connection = await psycopg.AsyncConnection.connect(_dsn())
+    try:
+        await connection.execute(
+            """
+            INSERT INTO public.component_products
+                (id, product_name, category, price, url, normalized, params, description, metadata, content_hash, stock)
+            VALUES (%s, 'Acer宏碁N3500 NVME协议', 'solid_state_drive', 669.00, '', '{}'::jsonb,
+                    '{}'::jsonb, 'synthetic SSD', '{}'::jsonb, %s, 1)
+            """,
+            (component_id, uuid4().hex[:32]),
+        )
+        await connection.execute(
+            """
+            INSERT INTO public.sales_order_items
+                (sales_order_id, catalog_category, catalog_product_id, product_name, brand, unit_amount_cents, quantity)
+            VALUES (%s, 'components', %s, 'Acer宏碁N3500 NVME协议', 'Acer', 66900, 1)
+            """,
+            (refund_state.sales_order_id, component_id),
+        )
+        await connection.commit()
+
+        summaries = await list_customer_checkout_orders(refund_state.customer_user_id)
+        component = next(item for item in summaries[0].items if item.catalog_product_id == component_id)
+        assert component.catalog_category == "components"
+        assert component.component_category == "solid_state_drive"
+        candidates = await find_orders(refund_state.customer_user_id)
+        assert [choice["order_id"] for choice in match_subject_identity_choices("我想退 SSD", candidates)] == [
+            refund_state.order_no
+        ]
+    finally:
+        await connection.execute(
+            "DELETE FROM public.sales_order_items WHERE sales_order_id = %s AND catalog_product_id = %s",
+            (refund_state.sales_order_id, component_id),
+        )
+        await connection.execute("DELETE FROM public.component_products WHERE id = %s", (component_id,))
+        await connection.commit()
+        await connection.close()
+
+
+@pytest.mark.asyncio
 async def test_support_workflow_reads_real_processing_refund_and_resolves_without_eta(
     refund_state: RefundIntegrationState,
 ) -> None:
@@ -253,7 +331,7 @@ async def test_support_workflow_reads_real_processing_refund_and_resolves_withou
     registry = ToolRegistry()
     registry.register(TrackOrder())
     registry.register(QueryRefundStatus())
-    result = await SupportWorkflowAgent(_WorkflowAnswerAgent(), registry).run(
+    result = await SupportWorkflowAgent(_WorkflowAnswerAgent(registry), registry).run(
         "我申请的退款现在到哪了？",
         support_requests=[{"domain": "refund", "operation": "refund_status"}],
         tool_context=ToolContext(user_id=refund_state.customer_user_id, role="customer"),
@@ -306,8 +384,8 @@ async def test_unionpay_refund_persists_processing_time_and_converges_real_postg
             resp_code="00",
             order_id=str(kwargs["order_id"]),
             txn_time=str(kwargs["txn_time"]),
-            txn_amt=str(kwargs["txn_amt"]),
-            orig_qry_id=str(kwargs["orig_qry_id"]),
+            txn_amt="",
+            orig_qry_id=None,
         )
 
     async def query_transaction(*, order_id: str, txn_time: str) -> UnionPayQueryResult:
@@ -316,10 +394,10 @@ async def test_unionpay_refund_persists_processing_time_and_converges_real_postg
             resp_code="00",
             orig_resp_code="00",
             query_id="UP-REFUND-QUERY-1",
-            txn_amt="529900",
+            txn_amt="",
             order_id=order_id,
             txn_time=txn_time,
-            orig_qry_id="UP-ORIGINAL-QUERY-1",
+            orig_qry_id=None,
         )
 
     client.refund_transaction.side_effect = refund_transaction
