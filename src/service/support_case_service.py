@@ -13,6 +13,7 @@ from agent.decision_context import (
     historicalize_decision_contexts,
     merge_decision_contexts,
 )
+from agent.support_subjects import MAX_ORDER_CHOICE_OPTIONS
 from store.support_case_store import (
     OPEN_CASE_STATUSES,
     STAFF_CASE_STATUSES,
@@ -642,7 +643,7 @@ class SupportCaseService:
     def _safe_subject_choices(cls, choices: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """裁剪订单候选，保持 pending 只包含 customer-safe 选择字段。"""
         safe: list[dict[str, Any]] = []
-        for raw in choices[:3]:
+        for raw in choices[:MAX_ORDER_CHOICE_OPTIONS]:
             if not isinstance(raw, dict):
                 continue
             order_id = raw.get("order_id") or raw.get("order_no")

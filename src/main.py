@@ -22,6 +22,7 @@ from agent.tools import (
     check_stock,
     compare_products,
     create_ticket,
+    present_product_candidates,
     query_refund_status,
     search_component,
     search_knowledge,
@@ -141,6 +142,7 @@ async def lifespan(app: FastAPI):
     registry.register(check_after_sales.CheckAfterSales())
     registry.register(create_ticket.CreateTicket())
     registry.register(compare_products.CompareProducts())
+    registry.register(present_product_candidates.PresentProductCandidates())
     registry.register(search_component.SearchComponent())
     plan_execute_agent = PlanAndExecuteAgent(
         llm,

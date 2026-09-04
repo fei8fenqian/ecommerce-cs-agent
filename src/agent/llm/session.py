@@ -315,9 +315,7 @@ class SessionManager:
         if result.answer_trace:
             # Internal observability only; _model_safe_messages removes it
             # before any later model call and the API never returns this field.
-            assistant_message["_answer_trace"] = json.loads(
-                json.dumps(result.answer_trace, ensure_ascii=False)
-            )
+            assistant_message["_answer_trace"] = json.loads(json.dumps(result.answer_trace, ensure_ascii=False))
         new_messages.append(assistant_message)
 
         entities = self._merge_entities(ctx.last_entities, result.last_entities)
@@ -354,15 +352,13 @@ class SessionManager:
         candidates = incoming.get("product_candidates")
         selected = canonical_product_identity(incoming)
         if isinstance(candidates, list):
-            normalized_candidates = dedupe_product_candidates(
-                [item for item in candidates if isinstance(item, dict)]
-            )
-            if normalized_candidates and selected is None:
-                # A fresh catalog observation replaces the old selection and
-                # becomes the current server-owned comparison set.
-                for key in product_keys:
-                    result.pop(key, None)
-                result["product_candidates"] = normalized_candidates[:12]
+            normalized_candidates = dedupe_product_candidates([item for item in candidates if isinstance(item, dict)])
+            # Candidate-frame updates are authoritative even when empty.  They
+            # retire stale selections; when a validated selection is included
+            # in the same projection it is re-applied below.
+            for key in product_keys:
+                result.pop(key, None)
+            result["product_candidates"] = normalized_candidates[:12]
         if selected is not None:
             # Promotion validates one member of the current candidate set; it
             # does not make that evidence stale.  Keeping both lets a later

@@ -110,16 +110,17 @@ same 仅表示当前话仍指向该已验证 subject，changed 仅表示当前�
 当当前话的语义是在追问上一轮客服结果本身时，应使用 fact_scope=explain_previous 并保持原 Goal；
 只有 previous_turn_outcome 明确记录交易/Provider 失败时，才可把问题解释成交易失败原因。
 
-如果 semantic_hints 提供 product_candidates，它们是服务端拥有的当前候选；candidate_N 是唯一可返回的
-候选引用。price_cents 等 metadata 是当前 catalog observation 的可信比较属性。用户表达的是对当前候选集的
-偏好/约束时，应只在这些候选中根据 metadata 选择 candidate_N；metadata 不足时保持歧义或请求新的
-catalog 查询，不得用模型常识补出候选集中不存在的型号、价格或“更高配”商品。
+如果 semantic_hints 提供 ecommerce_context 或 product_choice_pending，它们只帮助判断本轮仍属于商品会话；
+Router 不选择具体商品，也不返回 candidate_N。商品候选、比较、Variant 选择由后续 ProductResolver 和 Server 完成。
+商品开放式发现/推荐/比较统一输出 product.search_product；商品详情/链接/规格查看统一输出 product.answer；购买意图输出 product.purchase。不要创造 product.recommend、product.provide_link 等新 operation。
+
+商品域额外输出 product_category：phones、laptops、components 或空字符串。这个字段描述商品目录类别，
+与 target/rag 的 table 解耦；明确是手机/笔记本/配件时应填写，无法判断则留空。它不选择具体商品。
 
 返回格式（只返回 JSON，不要其他文字。不要照抄示例的 confidence 值）。query 是检索辅助改写，
-必须始终按当前用户原话判断 Goal；如从服务端候选中选择商品，只返回 candidate_N 引用，不返回或猜测
-product_id/order_id：
-{"query":"改写后的完整问题","target":"rag","speech_act":"INFORMATION_QUERY","domain":"product","operation":"answer",
- "next_step":"ANSWER","required_tools":[],"requests":[{"domain":"product","operation":"answer","next_step":"ANSWER","required_tools":[],"risk":"read_only"}],"case_update":"none","subject_relation":"unknown","table":"laptop_products","confidence":0.98}
+必须始终按当前用户原话判断 Goal；不得选择具体商品或返回/猜测 candidate_N、product_id、order_id：
+{"query":"改写后的完整问题","target":"rag","speech_act":"INFORMATION_QUERY","domain":"product","operation":"answer","product_category":"phones",
+ "next_step":"ANSWER","required_tools":[],"requests":[{"domain":"product","operation":"answer","next_step":"ANSWER","required_tools":[],"risk":"read_only"}],"case_update":"none","subject_relation":"unknown","table":"phone_products","confidence":0.98}
 {"query":"怎么申请退款","target":"rag","speech_act":"INFORMATION_QUERY","domain":"refund","operation":"procedure",
  "next_step":"ANSWER","required_tools":[],"requests":[{"domain":"refund","operation":"procedure","next_step":"ANSWER","required_tools":[],"risk":"read_only"}],"table":"knowledge_chunks","confidence":0.95}
 {"query":"改写后的完整问题","target":"agent","speech_act":"INFORMATION_QUERY","domain":"delivery","operation":"track_order",
@@ -252,6 +253,7 @@ class Intent:
     raw_query: str = ""
     retrieval_query: str = ""
     semantic_hints: dict[str, Any] = field(default_factory=dict)
+    product_category: str = ""
     confidence: float = 0.0
     route_source: str = "llm"
     speech_act: str = "INFORMATION_QUERY"
@@ -402,9 +404,7 @@ class IntentRouter:
         messages.append(
             {
                 "role": "user",
-                "content": self._build_router_input(
-                    query, history, case_context, knowledge_context, semantic_hints
-                ),
+                "content": self._build_router_input(query, history, case_context, knowledge_context, semantic_hints),
             }
         )
 
@@ -433,6 +433,9 @@ class IntentRouter:
                 rewritten_query = self._safe_rewritten_query(result.get("query"), query)
                 target = result.get("target", "agent").strip().lower()
                 table = result.get("table", "").strip()
+                product_category = self._validated_route_value(
+                    result.get("product_category"), {"phones", "laptops", "components"}, ""
+                )
                 scenario = result.get("scenario", "").strip()
                 confidence = float(result.get("confidence", 0.0))
                 raw_domain = self._validated_text(result.get("domain"), max_length=80)
@@ -447,9 +450,7 @@ class IntentRouter:
                 required_tools = self._validated_tools(result.get("required_tools"))
                 requests = self._validated_support_requests(result.get("requests"))
                 subject_refs = self._validated_text_list(result.get("subject_refs"), max_items=6, max_length=120)
-                customer_claims = self._validated_text_list(
-                    result.get("customer_claims"), max_items=6, max_length=160
-                )
+                customer_claims = self._validated_text_list(result.get("customer_claims"), max_items=6, max_length=160)
                 case_update = self._validated_route_value(result.get("case_update"), _CASE_UPDATES, "none")
                 subject_relation = self._validated_route_value(
                     result.get("subject_relation"), _SUBJECT_RELATIONS, "unknown"
@@ -608,6 +609,14 @@ class IntentRouter:
                     raw_query=query,
                     retrieval_query=rewritten_query,
                     semantic_hints={"raw": semantic_hints} if semantic_hints else {},
+                    product_category=product_category
+                    or (
+                        {
+                            "phone_products": "phones",
+                            "laptop_products": "laptops",
+                            "component_products": "components",
+                        }.get(table, "")
+                    ),
                     subject_refs=subject_refs or (list(requests[0].subject_refs) if requests else []),
                     customer_claims=customer_claims or (list(requests[0].customer_claims) if requests else []),
                 )

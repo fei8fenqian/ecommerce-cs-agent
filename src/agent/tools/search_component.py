@@ -98,6 +98,9 @@ class SearchComponent(BaseTool):
                         "title": r.get("title"),
                         "category": r.get("category"),
                         "price": r.get("price"),
+                        "public_attributes": r.get("public_attributes")
+                        if isinstance(r.get("public_attributes"), dict)
+                        else (r.get("comparison_metadata") if isinstance(r.get("comparison_metadata"), dict) else {}),
                         "comparison_metadata": r.get("comparison_metadata")
                         if isinstance(r.get("comparison_metadata"), dict)
                         else {},

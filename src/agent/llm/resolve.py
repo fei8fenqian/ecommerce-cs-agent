@@ -4,7 +4,6 @@
 规则做指代消解，比 LLM 快且确定。
 """
 
-import re
 from typing import Any, Mapping
 
 PRONOUN_MAP: dict[str, str] = {
@@ -43,8 +42,11 @@ def resolve_pronouns(query: str, entities: Mapping[str, Any]) -> str:
             query = query.replace(pronoun, entity)
 
     product = entities.get("product", "")
-    if isinstance(product, str) and product and product not in query and any(
-        action in query for action in _IMPLICIT_PRODUCT_ACTIONS
+    if (
+        isinstance(product, str)
+        and product
+        and product not in query
+        and any(action in query for action in _IMPLICIT_PRODUCT_ACTIONS)
     ):
         query = f"{query}，商品为 {product}"
     return query
@@ -78,15 +80,12 @@ def resolve_stock_follow_up(
             and any(marker in content for marker in _INVENTORY_QUESTION_MARKERS)
             and any(marker in content for marker in _INVENTORY_OFFER_MARKERS)
         ):
-            product = entities.get("product", "").strip() or _extract_recommended_product(content)
-            return f"查询 {product or '上轮首选机型'} 的实时库存"
+            product = entities.get("product", "").strip()
+            if not product:
+                # Natural-language recommendation prose is presentation, not a
+                # product identity protocol.  Without a server-canonicalized
+                # selected product, keep the customer utterance unresolved.
+                return query
+            return f"查询 {product} 的实时库存"
         break
     return query
-
-
-def _extract_recommended_product(reply: str) -> str:
-    """从客服刚给出的推荐中提取首选商品，作为短确认的默认操作对象。"""
-    match = re.search(r"(?:首选推荐|推荐首选|首推|首选)\s*[：:]\s*([^\n（(]+)", reply)
-    if match is None:
-        return ""
-    return match.group(1).strip().strip("* ")

@@ -9,7 +9,7 @@ from typing import Any
 
 from agent.decision_context import merge_decision_contexts
 from agent.llm.llm_client import LLMClient, LLMResponse, ToolCall
-from agent.product_identity import canonical_product_identity, dedupe_product_candidates, product_match_names
+from agent.product_identity import canonical_product_identity, dedupe_product_candidates
 from agent.tools_registry import ToolContext, ToolRegistry
 from config import settings
 from exceptions import AgentLoopError, DependencyUnavailableError, LLMError
@@ -191,10 +191,7 @@ class AgentLoop:
                 temperature=settings.temperature,
                 max_tokens=settings.max_tokens,
             )
-            if (
-                not response.has_tool_calls
-                and _contains_internal_tool_protocol(response.content)
-            ):
+            if not response.has_tool_calls and _contains_internal_tool_protocol(response.content):
                 logger.warning("rejected internal tool protocol from model content")
                 if tools and not protocol_retry_used:
                     protocol_retry_used = True
@@ -553,39 +550,19 @@ class AgentLoop:
         verified_facts: dict[str, Any],
         answer: str,
     ) -> dict[str, str]:
-        """Project canonical product identity from trusted search observations.
+        """Promote only a uniquely returned server-owned product.
 
-        Tool arguments contain the user's query, not necessarily the product the
-        model recommended.  Only identity fields returned by the server-owned
-        search tools are eligible here.  When several products were returned,
-        select one only if exactly one candidate is mentioned in the final
-        answer; otherwise leave the product unbound instead of guessing.
+        The final Operator answer is deliberately ignored.  Natural-language
+        prose is presentation, never a product-selection protocol.
         """
+        del answer
         candidates = AgentLoop._product_candidates_from_observations(verified_facts)
-        if not candidates:
+        if len(candidates) != 1:
             return {}
-
-        normalized_answer = re.sub(r"\s+", "", answer).casefold()
-        mentioned = []
-        for candidate in candidates:
-            if any(
-                re.sub(r"\s+", "", name).casefold() in normalized_answer
-                for name in product_match_names(candidate)
-            ):
-                mentioned.append(candidate)
-        selected = mentioned[0] if len(mentioned) == 1 else candidates[0] if len(candidates) == 1 else None
-        if selected is None:
-            return {}
-        identity = canonical_product_identity(selected)
+        identity = canonical_product_identity(candidates[0])
         if identity is None:
             return {}
-        # Keep the historical flat entity contract for pronoun resolution; the
-        # richer product_name is retained inside product_candidates below.
-        return {
-            key: value
-            for key, value in identity.items()
-            if key != "product_name"
-        }
+        return {key: value for key, value in identity.items() if key != "product_name"}
 
     @staticmethod
     def _product_candidates_from_observations(

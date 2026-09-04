@@ -40,7 +40,53 @@ _CATALOG_BRAND_ALIASES: dict[str, tuple[str, ...]] = {
     "xiaomi": ("xiaomi", "小米"),
 }
 
-_COMPARISON_METADATA_FIELDS = ("brand", "model", "storage", "screen_size", "ram", "capacity")
+_COMPARISON_METADATA_FIELDS = (
+    "brand",
+    "model",
+    "storage",
+    "screen_size",
+    "ram",
+    "capacity",
+    "weight",
+    "cpu",
+    "battery_capacity",
+    "wired_charging",
+    "rear_camera_pixels",
+    "stabilization",
+    "zoom",
+    "screen_material",
+    "refresh_rate",
+    "brightness",
+    "resolution",
+    "scene",
+)
+
+
+def _trusted_public_attributes(value: Mapping[str, Any]) -> dict[str, str]:
+    """Project bounded public scalar attributes from a server-owned catalog row.
+
+    Attribute names describe catalog data, not recommendation logic.  This lets
+    the resolver reason about future fields (GPU/VRAM/color gamut/etc.) without
+    adding a new business branch for each customer preference.
+    """
+    raw = value.get("public_attributes")
+    if not isinstance(raw, Mapping):
+        raw = value.get("comparison_metadata")
+    attributes: dict[str, str] = {}
+    if isinstance(raw, Mapping):
+        for raw_key, raw_value in raw.items():
+            key = str(raw_key).strip()
+            if not key or key.startswith("_"):
+                continue
+            if not isinstance(raw_value, (str, int, float)) or isinstance(raw_value, bool):
+                continue
+            text = str(raw_value).strip()
+            if not text:
+                continue
+            attributes[key[:80]] = text[:240]
+            if len(attributes) >= 48:
+                break
+    return attributes
 
 
 def normalize_product_text(value: object) -> str:
@@ -83,10 +129,7 @@ def canonical_product_identity(value: Mapping[str, Any]) -> dict[str, str] | Non
     category = value.get("product_category") or value.get("category")
     product_name = value.get("product_name") or value.get("title") or value.get("display_title") or value.get("product")
     display_title = value.get("display_title") or value.get("title") or value.get("product") or product_name
-    if not all(
-        isinstance(item, str) and item.strip()
-        for item in (product_id, category, product_name, display_title)
-    ):
+    if not all(isinstance(item, str) and item.strip() for item in (product_id, category, product_name, display_title)):
         return None
     if category not in PRODUCT_CATEGORIES:
         return None
@@ -136,14 +179,18 @@ def canonical_product_candidate(value: Mapping[str, Any]) -> dict[str, Any] | No
     price_cents = _trusted_price_cents(value)
     if price_cents is not None:
         candidate["price_cents"] = price_cents
-    comparison = value.get("comparison_metadata")
-    comparison_source = comparison if isinstance(comparison, Mapping) else value
+    summary = value.get("content") or value.get("description")
+    if isinstance(summary, str) and summary.strip():
+        candidate["summary"] = summary.strip()[:700]
+    public_attributes = _trusted_public_attributes(value)
+    if public_attributes:
+        candidate["public_attributes"] = public_attributes
+    # Transitional flat fields keep older presentation/tests compatible while
+    # the semantic resolver consumes the generic public-attribute map.
     for key in _COMPARISON_METADATA_FIELDS:
-        metadata_value = comparison_source.get(key)
-        if isinstance(metadata_value, (str, int, float)) and not isinstance(metadata_value, bool):
-            text = str(metadata_value).strip()
-            if text:
-                candidate[key] = text[:120]
+        metadata_value = public_attributes.get(key)
+        if metadata_value:
+            candidate[key] = metadata_value[:120]
     return candidate
 
 
@@ -212,10 +259,7 @@ def match_product_candidate(
         if key in seen:
             continue
         names = product_match_names(identity)
-        if any(
-            normalize_product_text(name) in normalized_query
-            for name in names
-        ):
+        if any(normalize_product_text(name) in normalized_query for name in names):
             seen.add(key)
             matches.append(identity)
     return matches[0] if len(matches) == 1 else None

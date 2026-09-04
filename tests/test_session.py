@@ -80,7 +80,7 @@ class TestResolvePronouns:
         )
         assert result == "需要"
 
-    def test_stock_confirmation_uses_recommendation_when_entity_is_missing(self):
+    def test_stock_confirmation_does_not_parse_recommendation_prose_when_entity_is_missing(self):
         result = resolve_stock_follow_up(
             "需要",
             {},
@@ -91,7 +91,7 @@ class TestResolvePronouns:
                 }
             ],
         )
-        assert result == "查询 微星魔影15 的实时库存"
+        assert result == "需要"
 
     def test_replace_ta_male(self):
         result = resolve_pronouns("他有什么颜色", {"product": "iPhone 15"})

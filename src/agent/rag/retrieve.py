@@ -56,21 +56,55 @@ def _catalog_product_document(
         "price": price,
     }
     source = metadata if isinstance(metadata, dict) else {}
+    # Preserve generic public catalog facts for semantic recommendation.  This
+    # is a data projection, not a preference taxonomy: future attributes such
+    # as GPU/VRAM/color gamut/waterproofing can participate without new routing
+    # branches.
     comparison: dict[str, str] = {}
-    model = source.get("product_model") or source.get("model")
-    for key, value in (
-        ("brand", brand),
-        ("model", model),
-        ("storage", source.get("storage")),
-        ("screen_size", source.get("screen_size")),
-        ("ram", source.get("ram")),
-        ("capacity", source.get("capacity")),
-    ):
+    ignored = {
+        "id",
+        "url",
+        "text",
+        "source_url",
+        "name",
+        "brand",
+        "price",
+        "product_name",
+        "category",
+        "embedding",
+        "vector",
+        "stock",
+        "warehouse",
+        "status",
+        "image_url",
+        "thumbnail_url",
+    }
+    for raw_key, value in source.items():
+        key = str(raw_key).strip()
+        if (
+            not key
+            or key in ignored
+            or key.startswith("_")
+            or "embedding" in key.casefold()
+            or "vector" in key.casefold()
+        ):
+            continue
         if isinstance(value, (str, int, float)) and not isinstance(value, bool):
             text = str(value).strip()
             if text:
-                comparison[key] = text[:120]
+                comparison[key[:80]] = text[:240]
+                if len(comparison) >= 48:
+                    break
+    brand_text = str(brand or "").strip()
+    if brand_text:
+        comparison.setdefault("brand", brand_text[:240])
+    model = source.get("product_model") or source.get("model")
+    if isinstance(model, (str, int, float)) and not isinstance(model, bool):
+        model_text = str(model).strip()
+        if model_text:
+            comparison.setdefault("model", model_text[:240])
     if comparison:
+        document["public_attributes"] = comparison
         document["comparison_metadata"] = comparison
     if score is not None:
         document["score"] = score

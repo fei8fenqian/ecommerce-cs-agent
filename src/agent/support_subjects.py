@@ -12,6 +12,8 @@ from typing import Any
 
 from agent.product_identity import catalog_brand_aliases, catalog_brand_keys
 
+MAX_ORDER_CHOICE_OPTIONS = 12
+
 _ORDINALS = {
     "1": 1,
     "一": 1,
@@ -32,10 +34,7 @@ _SUBJECT_IDENTITY_COMPARATIVE_MARKERS = ("贵一点", "贵的", "金额高", "�
 # a brand such as ``Sony`` cannot be mistaken for an order identifier.
 _SUBJECT_ORDER_ID = re.compile(r"SO(?:[A-Z0-9]*\d[A-Z0-9_-]*|[-_][A-Z0-9_-]+)", re.IGNORECASE)
 _SUBJECT_MODEL = re.compile(r"(?=[a-z0-9_-]*\d)[a-z][a-z0-9_-]*$", re.IGNORECASE)
-_SUBJECT_BRANDS = "|".join(
-    re.escape(alias)
-    for alias in (*catalog_brand_aliases(), "iphone", "macbook")
-)
+_SUBJECT_BRANDS = "|".join(re.escape(alias) for alias in (*catalog_brand_aliases(), "iphone", "macbook"))
 _SUBJECT_CATEGORIES = (
     "电脑|笔记本|手机|耳机|平板|相机|显示器|键盘|鼠标|手表|路由器|处理器|显卡|电视|主机|打印机|硬盘|内存"
 )
@@ -99,18 +98,11 @@ def _model_tokens(value: str) -> set[str]:
     """
 
     raw = value.casefold()
-    separated = {
-        re.sub(r"[^a-z0-9]", "", token)
-        for token in re.findall(r"[a-z]+[\s_-]*\d+", raw)
-    }
+    separated = {re.sub(r"[^a-z0-9]", "", token) for token in re.findall(r"[a-z]+[\s_-]*\d+", raw)}
     if separated:
         return {token for token in separated if len(token) >= 2}
     normalized = _normalize(value)
-    return {
-        token
-        for token in re.findall(r"[a-z]+\d[a-z0-9_-]*|\d+[a-z][a-z0-9_-]*", normalized)
-        if len(token) >= 2
-    }
+    return {token for token in re.findall(r"[a-z]+\d[a-z0-9_-]*|\d+[a-z][a-z0-9_-]*", normalized) if len(token) >= 2}
 
 
 def _choice_identity_values(choice: dict[str, Any]) -> list[str]:
@@ -165,11 +157,7 @@ def _matching_choices(query: str, choices: list[dict[str, Any]]) -> list[dict[st
         # not sufficient evidence.  ``iphone16`` must not match iPhone 17.
         if query_has_model_number:
             continue
-        identity_brand_keys = frozenset(
-            brand_key
-            for value in identities
-            for brand_key in catalog_brand_keys(value)
-        )
+        identity_brand_keys = frozenset(brand_key for value in identities for brand_key in catalog_brand_keys(value))
         if query_brand_keys and query_brand_keys.intersection(identity_brand_keys):
             matches.append(choice)
             continue

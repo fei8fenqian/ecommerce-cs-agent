@@ -153,7 +153,7 @@ class TestStepResult:
 # AgentLoop.run — 正常场景
 # =============================================================================
 class TestAgentLoopRun:
-    def test_product_identity_is_projected_from_trusted_search_observation(self):
+    def test_product_identity_is_not_projected_from_ambiguous_operator_prose(self):
         facts = {
             "search_component": {
                 "status": "success",
@@ -177,15 +177,13 @@ class TestAgentLoopRun:
             }
         }
 
-        assert AgentLoop._product_entities_from_observations(
-            facts,
-            "推荐利民 Peerless Assassin 120，这款适合高性能散热。",
-        ) == {
-            "product": "利民 Peerless Assassin 120",
-            "product_id": "cooler-1",
-            "product_category": "components",
-            "component_category": "cooling_product",
-        }
+        assert (
+            AgentLoop._product_entities_from_observations(
+                facts,
+                "推荐利民 Peerless Assassin 120，这款适合高性能散热。",
+            )
+            == {}
+        )
 
     def test_product_identity_does_not_guess_ambiguous_search_results(self):
         facts = {
@@ -740,6 +738,7 @@ class TestAgentLoopRunStream:
                 answer += event["content"]
 
         assert answer == "安全回答"
+
 
 @pytest.mark.asyncio
 async def test_internal_tool_protocol_content_is_rejected_and_retried_without_execution():

@@ -109,6 +109,10 @@ class ToolContext:
     # directly querying it.  The workflow's controlled subject resolver must
     # bind it first.
     require_bound_subject: bool = False
+    # Current Ecommerce candidate-frame refs.  These are opaque candidate_N
+    # handles only; canonical product ids remain server-side.  Declarative
+    # presentation tools use this set for membership validation.
+    product_candidate_refs: frozenset[str] = field(default_factory=frozenset)
 
 
 # =============================================================================

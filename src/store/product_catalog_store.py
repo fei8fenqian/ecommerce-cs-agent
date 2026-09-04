@@ -66,6 +66,48 @@ _SPEC_LABELS = {
 
 _DETAIL_IGNORED_FIELDS = {"id", "url", "text", "source_url", "name", "brand", "price", "product_name", "category"}
 
+# Public catalog attributes are facts the storefront may expose to the semantic
+# recommender.  This is deliberately a data-boundary allow-by-shape rather than
+# a recommendation taxonomy: CPU/GPU/RAM/camera/battery/etc. are whatever the
+# current catalog record actually contains.  Internal/identity fields remain
+# server-side.
+_PUBLIC_ATTRIBUTE_IGNORED_FIELDS = _DETAIL_IGNORED_FIELDS | {
+    "embedding",
+    "vector",
+    "stock",
+    "warehouse",
+    "status",
+    "image_url",
+    "thumbnail_url",
+}
+
+
+def _public_catalog_attributes(metadata: Any, category: ProductCategory) -> dict[str, str]:
+    if not isinstance(metadata, dict):
+        return {}
+    nested = metadata.get("normalized") if category == "components" else None
+    source = nested if isinstance(nested, dict) else metadata
+    attributes: dict[str, str] = {}
+    for raw_key, value in source.items():
+        key = str(raw_key).strip()
+        if (
+            not key
+            or key in _PUBLIC_ATTRIBUTE_IGNORED_FIELDS
+            or key.startswith("_")
+            or "embedding" in key.casefold()
+            or "vector" in key.casefold()
+        ):
+            continue
+        if not isinstance(value, (str, int, float)) or isinstance(value, bool):
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        attributes[key[:80]] = text[:240]
+        if len(attributes) >= 48:
+            break
+    return attributes
+
 
 def _catalog_query_tokens(query: str) -> list[str]:
     """Normalize customer catalog input into bounded, duplicate-free tokens."""
@@ -368,3 +410,84 @@ def build_public_product_context(product: Mapping[str, Any]) -> str:
             if name and value:
                 lines.append(f"{name}：{value}")
     return "\n".join(lines)
+
+
+async def list_product_candidates(
+    category: ProductCategory,
+    *,
+    min_price_cents: int | None = None,
+    max_price_cents: int | None = None,
+    target_price_cents: int | None = None,
+    limit: int = 48,
+) -> list[dict[str, Any]]:
+    """Return a bounded authoritative candidate pool for the ecommerce role.
+
+    Only deterministic eligibility filters live here.  Semantic preferences
+    such as "适合拍板书" are intentionally handled after this query by the
+    ProductResolver.
+    """
+    table = _PRODUCT_TABLES[category]
+    conditions = ["TRUE"]
+    params: list[Any] = []
+    if isinstance(min_price_cents, int):
+        conditions.append("price >= %s")
+        params.append(min_price_cents / 100)
+    if isinstance(max_price_cents, int):
+        conditions.append("price <= %s")
+        params.append(max_price_cents / 100)
+    if category in {"laptops", "phones"}:
+        conditions.append("COALESCE(status, '在售') = '在售'")
+    where_sql = " AND ".join(conditions)
+    if isinstance(target_price_cents, int):
+        order_sql = "ORDER BY ABS(price - %s) ASC, price DESC, product_name ASC"
+        params.append(target_price_cents / 100)
+    elif isinstance(min_price_cents, int) or isinstance(max_price_cents, int):
+        order_sql = "ORDER BY price DESC, product_name ASC"
+    else:
+        order_sql = "ORDER BY product_name ASC"
+    params.append(max(1, min(int(limit), 100)))
+
+    if category == "components":
+        cols = "id, product_name, COALESCE(metadata->>'brand', '') AS brand, price, description, normalized"
+    else:
+        cols = "id, product_name, brand, price, description, metadata"
+
+    connection = await get_connection()
+    try:
+        cursor = await connection.execute(
+            f"SELECT {cols} FROM {table} WHERE {where_sql} {order_sql} LIMIT %s",
+            tuple(params),
+        )
+        rows: list[dict[str, Any]] = []
+        async for row in cursor:
+            product_id, product_name, brand, price, description, metadata = row
+            source = metadata if isinstance(metadata, dict) else {}
+            public_attributes = _public_catalog_attributes(source, category)
+            # Keep brand/model visible even when they live in table columns rather
+            # than metadata.  They remain ordinary public catalog facts.
+            if str(brand or "").strip():
+                public_attributes.setdefault("brand", str(brand).strip()[:240])
+            model = source.get("product_model") or source.get("model")
+            if isinstance(model, (str, int, float)) and not isinstance(model, bool):
+                model_text = str(model).strip()
+                if model_text:
+                    public_attributes.setdefault("model", model_text[:240])
+            rows.append(
+                {
+                    "id": str(product_id),
+                    "product_id": str(product_id),
+                    "product_name": str(product_name or ""),
+                    "display_title": str(product_name or ""),
+                    "title": str(product_name or ""),
+                    "brand": str(brand or ""),
+                    "price": float(price) if price is not None else None,
+                    "content": str(description or ""),
+                    "category": category,
+                    "public_attributes": public_attributes,
+                    # Transitional compatibility for older tool/RAG projections.
+                    "comparison_metadata": public_attributes,
+                }
+            )
+        return rows
+    finally:
+        await put_connection(connection)

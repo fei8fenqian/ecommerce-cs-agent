@@ -80,6 +80,9 @@ class SearchProduct(BaseTool):
                         # products actually returned by the server.  The model
                         # still never supplies or promotes a product id.
                         "price": c.get("price"),
+                        "public_attributes": c.get("public_attributes")
+                        if isinstance(c.get("public_attributes"), dict)
+                        else (c.get("comparison_metadata") if isinstance(c.get("comparison_metadata"), dict) else {}),
                         "comparison_metadata": c.get("comparison_metadata")
                         if isinstance(c.get("comparison_metadata"), dict)
                         else {},

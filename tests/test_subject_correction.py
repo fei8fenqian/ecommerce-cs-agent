@@ -768,7 +768,7 @@ async def test_structured_correction_choice_uses_the_same_transition_path():
 
 
 @pytest.mark.asyncio
-async def test_customer_subject_choices_use_checkout_scope_and_limit_thirty(monkeypatch):
+async def test_customer_subject_choices_use_checkout_scope_and_limit_twelve(monkeypatch):
     from api.chat import _customer_subject_choices
 
     checkout_orders = AsyncMock(
@@ -789,7 +789,7 @@ async def test_customer_subject_choices_use_checkout_scope_and_limit_thirty(monk
 
 
 @pytest.mark.asyncio
-async def test_customer_subject_choices_can_reach_the_thirtieth_checkout_order(monkeypatch):
+async def test_customer_subject_choices_are_bounded_to_twelve_checkout_orders(monkeypatch):
     from api.chat import _customer_subject_choices
 
     checkout_orders = AsyncMock(
@@ -799,9 +799,9 @@ async def test_customer_subject_choices_can_reach_the_thirtieth_checkout_order(m
 
     choices = await _customer_subject_choices(101)
 
-    assert len(choices) == 30
+    assert len(choices) == 12
     assert choices[10]["order_id"] == "SO-11"
-    assert choices[29]["order_id"] == "SO-30"
+    assert choices[11]["order_id"] == "SO-12"
     checkout_orders.assert_awaited_once_with(101, limit=30)
 
 

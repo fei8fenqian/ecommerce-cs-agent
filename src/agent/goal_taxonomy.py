@@ -150,6 +150,16 @@ LEGACY_GOAL_ALIASES: dict[tuple[str, str], tuple[str, str]] = {
     ("refund", "query_refund_status"): ("refund", "status"),
     ("refund", "refund_detail"): ("refund", "amount"),
     ("refund", "refund_request"): ("refund", "request"),
+    # Product discovery/link wording is intentionally normalized at the Router
+    # boundary instead of expanding the business Goal taxonomy for every natural
+    # language variant.  ``search_product`` owns open-ended discovery/recommendation;
+    # ``answer`` owns read-only inspection/navigation of an already discussed item.
+    ("product", "recommend"): ("product", "search_product"),
+    ("product", "discover"): ("product", "search_product"),
+    ("product", "search"): ("product", "search_product"),
+    ("product", "provide_link"): ("product", "answer"),
+    ("product", "view_detail"): ("product", "answer"),
+    ("product", "inspect"): ("product", "answer"),
 }
 
 # Historical annotation/model operation names that are safe to collapse into a current

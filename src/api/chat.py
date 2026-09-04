@@ -6,7 +6,7 @@ import re
 import time
 import uuid
 from dataclasses import replace
-from typing import Any, Literal
+from typing import Any, Literal, Mapping, Sequence
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
@@ -31,6 +31,15 @@ from agent.llm.intent_router import Intent, IntentRouter, build_route_instructio
 from agent.llm.resolve import resolve_stock_follow_up
 from agent.llm.sentiment import build_escalation_prompt, detect_sentiment
 from agent.order_subject_resolver import resolve_order_subject
+from agent.product_context import (
+    attach_candidate_frame,
+    filter_candidates_by_context,
+    ordinal_choice_ref,
+    product_context_entity,
+    product_context_from_entities,
+    set_choice_refs,
+    update_product_context,
+)
 from agent.product_identity import (
     canonical_product_candidate,
     canonical_product_identity,
@@ -38,6 +47,7 @@ from agent.product_identity import (
     match_product_candidate,
     stored_product_identity,
 )
+from agent.product_resolver import ProductResolution, ProductResolver, candidate_for_ref
 from agent.rag.knowledge_context import format_knowledge_context
 from agent.rag.retrieve import hybrid_search, pre_retrieve_knowledge
 from agent.subject_correction import (
@@ -47,6 +57,7 @@ from agent.subject_correction import (
 )
 from agent.support_control import confirmation_required
 from agent.support_subjects import (
+    MAX_ORDER_CHOICE_OPTIONS,
     looks_like_bare_subject_description,
     looks_like_pending_subject_choice,
     match_pending_subject_choices,
@@ -65,7 +76,7 @@ from service.customer_support_policy import (
 from service.support_case_service import SupportCaseService
 from service.ticket_escalation import TicketEscalationReason, classify_ticket_escalation
 from store.checkout_store import list_customer_checkout_orders
-from store.product_catalog_store import build_public_product_context, get_product_detail
+from store.product_catalog_store import build_public_product_context, get_product_detail, list_product_candidates
 from store.support_case_store import SupportCase
 from store.ticket_store import enqueue_human_ticket
 
@@ -127,6 +138,7 @@ _CUSTOMER_CHAT_READ_TOOLS = frozenset(
         "check_refund_eligibility",
         "check_after_sales",
         "compare_products",
+        "present_product_candidates",
         "search_component",
     }
 )
@@ -138,38 +150,27 @@ def _semantic_hint_payload(
     entities: dict[str, Any],
     explicit_product: dict[str, str] | None = None,
 ) -> str:
-    """Build non-authoritative hints for the Router without rewriting user language."""
+    """Build non-authoritative hints for the Router without giving it ProductResolver authority."""
     payload: dict[str, Any] = {}
     if resolved_query and resolved_query != entities.get("_raw_query"):
         payload["resolved_reference_hint"] = resolved_query[:2000]
-    candidates = entities.get("product_candidates")
-    if isinstance(candidates, list):
-        safe_candidates = []
-        for index, item in enumerate(candidates[:12], start=1):
-            candidate = canonical_product_candidate(item) if isinstance(item, dict) else None
-            if candidate is not None:
-                # Candidate refs are opaque to the model; the server validates
-                # any selected ref against this exact server-owned list later.
-                candidate_payload = {
-                    "ref": f"candidate_{index}",
-                    "name": candidate["product"],
-                    "product_category": candidate["product_category"],
-                    "component_category": candidate.get("component_category", ""),
-                }
-                if isinstance(candidate.get("price_cents"), int):
-                    candidate_payload["price_cents"] = candidate["price_cents"]
-                for key in ("brand", "model", "storage", "screen_size", "ram", "capacity"):
-                    value = candidate.get(key)
-                    if isinstance(value, str) and value.strip():
-                        candidate_payload[key] = value.strip()[:120]
-                safe_candidates.append(candidate_payload)
-        if safe_candidates:
-            payload["product_candidates"] = safe_candidates
-    if explicit_product is not None:
+    product_context = product_context_from_entities(entities)
+    if product_context:
+        payload["ecommerce_context"] = {
+            key: product_context.get(key)
+            for key in ("category", "min_price_cents", "max_price_cents", "target_price_cents", "brand_keys")
+            if product_context.get(key) not in (None, "", [])
+        }
+        if product_context.get("choice_refs"):
+            # Router may know a product choice is pending so a bare ordinal is
+            # routed back to Ecommerce Role, but it never sees or selects refs.
+            payload["product_choice_pending"] = True
+    selected_hint = explicit_product or stored_product_identity(entities)
+    if selected_hint is not None:
         payload["selected_product_context"] = {
-            key: explicit_product[key]
+            key: selected_hint[key]
             for key in ("product", "product_category", "component_category")
-            if explicit_product.get(key)
+            if selected_hint.get(key)
         }
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":")) if payload else ""
 
@@ -211,9 +212,7 @@ def _finalize_intent_channels(
     """Attach explicit query channels to both real and compatibility Intents."""
     intent.raw_query = raw_query
     intent.retrieval_query = retrieval_query or raw_query
-    intent.semantic_hints = (
-        {"raw": semantic_hints} if semantic_hints else {}
-    )
+    intent.semantic_hints = {"raw": semantic_hints} if semantic_hints else {}
     return intent
 
 
@@ -244,10 +243,7 @@ def _attach_answer_trace(
         else:
             result.answer_source = "OPERATOR"
     actual_tools = [
-        str(call.name)
-        for step in result.steps
-        for call in (step.tool_calls or [])
-        if getattr(call, "name", None)
+        str(call.name) for step in result.steps for call in (step.tool_calls or []) if getattr(call, "name", None)
     ]
     progress = result.workflow_progress if isinstance(result.workflow_progress, dict) else {}
     # A bounded Control Plane recovery is executed outside the final AgentLoop
@@ -264,11 +260,7 @@ def _attach_answer_trace(
         else tool_context.selected_order_id
     )
     pending_candidates = [
-        {
-            key: choice[key]
-            for key in ("order_id", "product_name", "recency_rank")
-            if key in choice
-        }
+        {key: choice[key] for key in ("order_id", "product_name", "recency_rank") if key in choice}
         for choice in progress.get("pending_choices", [])[:12]
         if isinstance(choice, dict)
     ]
@@ -327,11 +319,19 @@ def _goal_relevant_tools(intent: Intent, *, canonical_product: bool = False) -> 
         # is the Router-owned Goal.
         if canonical_product:
             return frozenset()
-        return frozenset({"search_product", "search_component"})
+        return frozenset({"search_product", "search_component", "present_product_candidates"})
     relevant: set[str] = set()
     for domain, operation in keys:
         if domain == "product":
-            relevant.update({"search_product", "search_component", "compare_products", "search_knowledge"})
+            relevant.update(
+                {
+                    "search_product",
+                    "search_component",
+                    "compare_products",
+                    "search_knowledge",
+                    "present_product_candidates",
+                }
+            )
         elif domain == "inventory":
             relevant.update({"check_stock", "search_product", "search_component"})
         elif domain in {"order", "delivery"}:
@@ -364,43 +364,47 @@ def _operator_tool_context(
     return replace(tool_context, allowed_tools=frozenset(tool_context.allowed_tools) & relevant)
 
 
+def _ecommerce_operator_tool_context(
+    tool_context: ToolContext,
+    intent: Intent,
+    *,
+    canonical_product: bool,
+    catalog_bound: bool,
+    candidate_refs: Sequence[str] = (),
+) -> ToolContext:
+    """Keep catalog acquisition in the Ecommerce Procedure, not the Operator loop.
+
+    The Operator may declare an ordered presentation over opaque candidate refs,
+    but cannot search a second catalog once the server has already formed the
+    authoritative candidate frame.
+    """
+    narrowed = _operator_tool_context(tool_context, intent, canonical_product=canonical_product)
+    narrowed = replace(
+        narrowed,
+        product_candidate_refs=frozenset(str(ref) for ref in candidate_refs if str(ref)),
+    )
+    if not catalog_bound or intent.domain != "product" or narrowed.allowed_tools is None:
+        return narrowed
+    return replace(
+        narrowed,
+        allowed_tools=frozenset(narrowed.allowed_tools) - {"search_product", "search_component", "compare_products"},
+    )
+
+
 def _product_entity_from_intent(
     intent: Intent,
     query: str,
     entities: dict[str, Any],
     explicit_product: dict[str, str] | None,
 ) -> dict[str, str] | None:
-    """Resolve a model candidate ref only through the server-owned candidate set."""
+    """Return only already-canonical product continuity.
+
+    Candidate selection belongs to ProductResolver + server validation.  The
+    Router and Operator prose are not product-subject authorities.
+    """
+    del query
     if explicit_product is not None:
         return explicit_product
-    candidates = entities.get("product_candidates")
-    if isinstance(candidates, list):
-        refs = list(intent.subject_refs)
-        for request in intent.support_requests:
-            refs.extend(request.subject_refs)
-        selected_refs = [ref for ref in refs if re.fullmatch(r"candidate_[1-9][0-9]*", ref)]
-        if len(set(selected_refs)) == 1:
-            index = int(selected_refs[0].split("_", 1)[1]) - 1
-            if 0 <= index < len(candidates) and isinstance(candidates[index], dict):
-                identity = canonical_product_identity(candidates[index])
-                if identity is not None:
-                    return identity
-        # Deterministic identity normalization may bind a uniquely named
-        # server-owned candidate.  It does not infer a business Goal or select
-        # among semantic preferences.
-        matched = _product_entity_for_turn(query, entities)
-        if matched is not None:
-            return matched
-        # Purchase intent belongs to the Router.  If only one server-owned
-        # candidate exists, the server can promote it without inspecting raw
-        # purchase wording.
-        if len(candidates) == 1 and intent.domain == "product" and intent.operation == "purchase":
-            candidate = candidates[0]
-            return canonical_product_identity(candidate) if isinstance(candidate, dict) else None
-
-    # A previously promoted canonical product is persistent server state.  The
-    # Router-owned purchase Goal is sufficient to reuse it; no raw-query
-    # substring is allowed to decide whether the product is current.
     if intent.domain == "product" and intent.operation == "purchase":
         return stored_product_identity(entities)
     return None
@@ -415,6 +419,7 @@ def _customer_chat_capability_context(
     tool_context: ToolContext,
     *,
     canonical_product: bool,
+    recommended_product_actions: bool = False,
 ) -> str:
     """Expose the real Customer Chat capability boundary to the Operator."""
     if tool_context.role != "customer":
@@ -423,7 +428,8 @@ def _customer_chat_capability_context(
     snapshot = {
         "read_capabilities": readable,
         "server_actions": {
-            "product_detail_navigation": canonical_product,
+            "product_detail_navigation": canonical_product or recommended_product_actions,
+            "recommended_product_navigation": recommended_product_actions,
             "orders_navigation": True,
             "create_order": False,
             "write_shipping_address": False,
@@ -435,7 +441,11 @@ def _customer_chat_capability_context(
     return (
         "Customer Chat 当前能力快照（服务端可信；只描述能力，不是业务事实）：\n"
         + json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
-        + "\n如果 product_detail_navigation=true，可以自然告诉客户下方会提供该商品入口；"
+        + "\n如果 product_detail_navigation=true，服务端一定会在本轮最终回答附上真实商品详情入口；"
+        "此时不得声称无法提供/生成商品链接，也不要让客户再去目录里手动搜索。"
+        "recommended_product_navigation=true 表示当前候选帧支持推荐详情入口；当你实际推荐商品时，"
+        "必须先调用 present_product_candidates(mode=recommend, candidate_refs=[...]) 声明你将展示的候选及顺序，"
+        "服务端随后会为这些候选附上真实详情入口；这不等于客户已经选中商品。"
         "orders_navigation=true 表示服务端可以提供当前登录客户的订单页入口。"
         "但不要自己生成 URL。create_order/address/payment/checkout 能力为 false 时，不得索要这些信息，"
         "也不得声称会代客户下单或付款。具体当前在售商品只能来自本轮 catalog/tool 观察或服务端已选商品。"
@@ -460,12 +470,11 @@ def _selected_product_operator_context(
             candidate = canonical_product_candidate(item) if isinstance(item, dict) else None
             if candidate is None:
                 continue
-            if (
-                candidate.get("product_id") == selected_product.get("product_id")
-                and candidate.get("product_category") == selected_product.get("product_category")
-            ):
+            if candidate.get("product_id") == selected_product.get("product_id") and candidate.get(
+                "product_category"
+            ) == selected_product.get("product_category"):
                 if isinstance(candidate.get("price_cents"), int):
-                    payload["price_cents"] = candidate["price_cents"]
+                    payload["price_yuan"] = candidate["price_cents"] / 100
                 break
     return (
         "本轮服务端已完成 canonical product promotion。Operator 只能把下面这件商品当作当前选中商品；"
@@ -491,9 +500,14 @@ def _can_append_generic_customer_action(
     return bool(trusted_navigation) and mode in {"FACT", "EXPLANATION", "READ_ONLY"}
 
 
-def _trusted_navigation_action(intent: Intent, *, canonical_product: bool) -> str:
+def _trusted_navigation_action(
+    intent: Intent,
+    *,
+    canonical_product: bool,
+    recommended_product_actions: bool = False,
+) -> str:
     """Return a server-owned navigation capability, never a model-generated URL."""
-    if canonical_product:
+    if canonical_product or recommended_product_actions:
         return "product_detail_navigation"
     if intent.domain in {"order", "delivery", "payment", "refund"}:
         return "orders_navigation"
@@ -1103,11 +1117,7 @@ async def _immediate_trusted_subject_continuation(
             trusted_exclusion_applied=True,
         )
         if identity_matches:
-            matched_ids = {
-                str(choice.get("order_id") or "")
-                for choice in identity_matches
-                if isinstance(choice, dict)
-            }
+            matched_ids = {str(choice.get("order_id") or "") for choice in identity_matches if isinstance(choice, dict)}
             if len(matched_ids) != 1 or selected_order_id not in matched_ids:
                 return None
     if not await _verify_customer_order_subject(
@@ -1169,9 +1179,7 @@ async def _workflow_subject_context_kwargs(
     """
     if structured_interaction and support_case is not None and support_case.selected_subjects:
         return {"selected_subjects": support_case.selected_subjects}
-    subject_context_case = (
-        support_case if support_case is not None and support_case.selected_subjects else recent_case
-    )
+    subject_context_case = support_case if support_case is not None and support_case.selected_subjects else recent_case
     previous_subjects = await _trusted_previous_subject_for_resolution(
         request,
         intent=intent,
@@ -1574,7 +1582,7 @@ async def _customer_subject_choices(customer_user_id: int) -> list[dict[str, obj
         if getattr(order, "created_at", None) or getattr(order, "order_date", None):
             choice["recency_rank"] = recency_rank
         choices.append(choice)
-    return choices[:30]
+    return choices[:MAX_ORDER_CHOICE_OPTIONS]
 
 
 async def _resolve_pending_order_choice(
@@ -1606,9 +1614,7 @@ async def _resolve_pending_order_choice(
         [item for item in pool if isinstance(item, dict)],
     )
     by_ref = {
-        f"order_candidate_{index}": choice
-        for index, choice in enumerate(pool, start=1)
-        if isinstance(choice, dict)
+        f"order_candidate_{index}": choice for index, choice in enumerate(pool, start=1) if isinstance(choice, dict)
     }
     if resolution.status == "resolved":
         choice = by_ref.get(resolution.selected_ref)
@@ -1641,9 +1647,7 @@ async def _resolve_subject_description_semantically(
         [item for item in pool if isinstance(item, dict)],
     )
     by_ref = {
-        f"order_candidate_{index}": choice
-        for index, choice in enumerate(pool, start=1)
-        if isinstance(choice, dict)
+        f"order_candidate_{index}": choice for index, choice in enumerate(pool, start=1) if isinstance(choice, dict)
     }
     if resolution.status == "resolved":
         selected = by_ref.get(resolution.selected_ref)
@@ -2046,7 +2050,7 @@ async def _await_support_case_customer(
         "operation": primary.operation,
         "next_step": next_action,
         "missing_facts": ([str(item) for item in missing_facts] if isinstance(missing_facts, list) else []),
-        "options_limit": 3,
+        "options_limit": MAX_ORDER_CHOICE_OPTIONS,
     }
     if workflow_progress:
         pending["execution"] = workflow_progress
@@ -2056,7 +2060,7 @@ async def _await_support_case_customer(
             # 这个顺序就是 SupportWorkflow 实际展示给客户的顺序，后续序号解析
             # 只能读取这一帧，不能重新查询或排序。
             pending["subject_type"] = "order"
-            pending["choices"] = choices[:3]
+            pending["choices"] = choices[:MAX_ORDER_CHOICE_OPTIONS]
     pending_command: dict[str, object] = {}
     if requires_confirmation and execution_status == "awaiting_confirmation":
         pending_command = {
@@ -2395,14 +2399,15 @@ _CATALOG_TABLE_BY_CATEGORY = {
 
 def _catalog_tables_for_evidence(intent: Intent, entities: dict[str, Any]) -> tuple[str, ...]:
     """Choose catalog sources from server state, never from raw-query keywords."""
+    category_table = _CATALOG_TABLE_BY_CATEGORY.get(getattr(intent, "product_category", ""))
+    if category_table:
+        return (category_table,)
     if intent.table in _CATALOG_TABLES:
         return (intent.table,)
     candidates = entities.get("product_candidates")
     if isinstance(candidates, list):
         categories = {
-            str(candidate.get("product_category") or "")
-            for candidate in candidates
-            if isinstance(candidate, dict)
+            str(candidate.get("product_category") or "") for candidate in candidates if isinstance(candidate, dict)
         }
         categories.discard("")
         if len(categories) == 1:
@@ -2419,21 +2424,123 @@ async def _acquire_catalog_evidence(
     query: str,
     entities: dict[str, Any],
     canonical_product: bool,
+    product_context: dict[str, Any] | None = None,
+    reuse_existing_frame: bool = False,
 ) -> tuple[list[dict[str, Any]], bool]:
-    """Execute the existing catalog evidence contract when current facts require it.
+    """Acquire one authoritative ecommerce candidate pool.
 
-    Existing server-owned candidates already satisfy acquisition for a later
-    preference/selection turn.  Otherwise the server reads one known catalog
-    table or, when category is unknown, searches the bounded product-table
-    whitelist.  No raw phrase is mapped to a category here.
+    Hard eligibility lives in Product Context and is applied before semantic
+    recommendation.  Natural ecommerce turns acquire a fresh bounded frame so
+    new preference/model evidence can change ranking; only an ordinal choice
+    reuses the exact frame the customer previously saw.  Semantic search may
+    rank eligible products but can never add an ineligible product.
     """
     if not required or canonical_product:
         return [], False
     candidates = entities.get("product_candidates")
-    if isinstance(candidates, list) and dedupe_product_candidates(
-        [candidate for candidate in candidates if isinstance(candidate, dict)]
+    if (
+        reuse_existing_frame
+        and isinstance(candidates, list)
+        and dedupe_product_candidates([candidate for candidate in candidates if isinstance(candidate, dict)])
     ):
+        # Ordinal/structured follow-ups must resolve against exactly the frame
+        # the customer saw.  Natural recommendation/refinement turns acquire a
+        # fresh frame so new semantic evidence cannot be trapped in stale top-N.
         return [], True
+
+    context = product_context or {}
+    category = str(context.get("category") or "")
+    has_structured_budget = any(
+        isinstance(context.get(key), int) for key in ("min_price_cents", "max_price_cents", "target_price_cents")
+    )
+    has_structured_filter = has_structured_budget or bool(context.get("brand_keys"))
+    if category in {"laptops", "phones", "components"} and has_structured_filter:
+        try:
+            rows = await list_product_candidates(
+                category,
+                min_price_cents=context.get("min_price_cents")
+                if isinstance(context.get("min_price_cents"), int)
+                else None,
+                max_price_cents=context.get("max_price_cents")
+                if isinstance(context.get("max_price_cents"), int)
+                else None,
+                target_price_cents=context.get("target_price_cents")
+                if isinstance(context.get("target_price_cents"), int)
+                else None,
+                # This is the authoritative eligibility pool, not the prompt
+                # frame.  Keep it broad enough that semantic pre-ranking can
+                # still surface an eligible model such as a mid-range variant.
+                limit=100,
+            )
+        except Exception as exc:
+            _chat_logger.warning(
+                "catalog candidate acquisition unavailable category=%s error_type=%s",
+                category,
+                type(exc).__name__,
+            )
+            rows = []
+        filtered = filter_candidates_by_context([row for row in rows if isinstance(row, dict)], context)
+        if filtered:
+            # Hard constraints decide eligibility.  Within that authoritative
+            # pool, reuse the existing Catalog retrieval only as a semantic
+            # pre-ranker so a bounded ProductResolver frame does not accidentally
+            # omit a clearly relevant eligible model.  Retrieval can reorder but
+            # can never add an ineligible product.
+            ranked: list[dict[str, Any]] = []
+            if len(filtered) > 12:
+                preference_turns = [
+                    str(item).strip()
+                    for item in context.get("preference_turns", [])[-4:]
+                    if isinstance(item, str) and item.strip()
+                ]
+                semantic_query = "；".join(preference_turns)[-1800:] or query
+                table = _CATALOG_TABLE_BY_CATEGORY.get(category, "")
+                if table and semantic_query.strip():
+                    try:
+                        evidence_rows = await hybrid_search(
+                            semantic_query,
+                            table=table,
+                            top_k=max(24, min(settings.retrieval_top_k * 2, 50)),
+                            use_rerank=_should_rerank(semantic_query, table),
+                        )
+                    except Exception as exc:
+                        _chat_logger.warning(
+                            "catalog candidate ranking unavailable table=%s error_type=%s",
+                            table,
+                            type(exc).__name__,
+                        )
+                        evidence_rows = []
+                    eligible_by_key = {
+                        (
+                            str(candidate.get("product_category") or ""),
+                            str(candidate.get("product_id") or ""),
+                        ): candidate
+                        for candidate in filtered
+                    }
+                    seen_ranked: set[tuple[str, str]] = set()
+                    for evidence in evidence_rows:
+                        candidate = canonical_product_candidate(evidence) if isinstance(evidence, dict) else None
+                        if candidate is None:
+                            continue
+                        key = (str(candidate.get("product_category") or ""), str(candidate.get("product_id") or ""))
+                        eligible = eligible_by_key.get(key)
+                        if eligible is None or key in seen_ranked:
+                            continue
+                        seen_ranked.add(key)
+                        ranked.append(eligible)
+                    ranked.extend(
+                        candidate
+                        for candidate in filtered
+                        if (str(candidate.get("product_category") or ""), str(candidate.get("product_id") or ""))
+                        not in seen_ranked
+                    )
+            # Candidate order is server-owned and becomes the stable ordinal
+            # frame used by the resolver and later customer choice.
+            return (ranked or filtered)[:12], True
+        # Explicit hard constraints that produce no products are themselves an
+        # authoritative empty result.  Do not silently broaden the search.
+        if any(context.get(key) not in (None, "", []) for key in ("min_price_cents", "max_price_cents", "brand_keys")):
+            return [], True
 
     docs: list[dict[str, Any]] = []
     for table in _catalog_tables_for_evidence(intent, entities):
@@ -2458,7 +2565,9 @@ async def _acquire_catalog_evidence(
 
     unique: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
-    for doc in sorted(docs, key=lambda item: float(item.get("score") or 0), reverse=True):
+    # hybrid_search already owns ranking (vector/BM25/RRF/rerank).  Preserve
+    # that order rather than re-sorting by one component score.
+    for doc in docs:
         candidate = canonical_product_candidate(doc)
         if candidate is None:
             continue
@@ -2472,9 +2581,384 @@ async def _acquire_catalog_evidence(
     return unique, bool(unique)
 
 
+def _candidate_refs(candidates: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {f"candidate_{index}": candidate for index, candidate in enumerate(candidates, start=1)}
+
+
+def _visible_product_refs(
+    candidates: list[dict[str, Any]],
+    resolution: ProductResolution,
+) -> list[str]:
+    """Return the only opaque refs the Operator may act on this turn."""
+    by_ref = _candidate_refs(candidates)
+    if resolution.status == "selected" and resolution.selected_ref in by_ref:
+        return [resolution.selected_ref]
+    if resolution.status == "ambiguous" and resolution.ambiguous_refs:
+        return [ref for ref in resolution.ambiguous_refs if ref in by_ref]
+    return list(by_ref.keys())
+
+
+def _product_procedure_context(
+    *,
+    product_context: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    resolution: ProductResolution,
+) -> str:
+    """Expose one authoritative catalog frame to the Ecommerce Operator.
+
+    ProductResolver owns only subject resolution.  When no product subject is
+    selected, the Operator may recommend freely *inside* this server-owned
+    frame.  Any ordered list it presents must be declared through the
+    ``present_product_candidates`` tool so the server can validate refs, persist
+    ordinal continuity, and generate detail actions without parsing prose.
+    """
+    by_ref = _candidate_refs(candidates)
+    visible_refs = _visible_product_refs(candidates, resolution)
+
+    public_candidates: list[dict[str, Any]] = []
+    for source_index, ref in enumerate(visible_refs[:12], start=1):
+        raw = by_ref.get(ref)
+        candidate = canonical_product_candidate(raw) if raw is not None else None
+        if candidate is None:
+            continue
+        item: dict[str, Any] = {
+            "source_index": source_index,
+            "ref": ref,
+            "name": candidate["product"],
+        }
+        if isinstance(candidate.get("price_cents"), int):
+            item["price_yuan"] = candidate["price_cents"] / 100
+        attributes = candidate.get("public_attributes")
+        if isinstance(attributes, Mapping) and attributes:
+            item["attributes"] = {
+                str(key)[:80]: str(value)[:240]
+                for key, value in list(attributes.items())[:48]
+                if str(key).strip() and str(value).strip()
+            }
+        summary = candidate.get("summary")
+        if isinstance(summary, str) and summary.strip():
+            item["summary"] = summary[:700]
+        public_candidates.append(item)
+
+    payload = {
+        "constraints": {
+            **({"category": product_context.get("category")} if product_context.get("category") else {}),
+            **(
+                {"min_price_yuan": product_context["min_price_cents"] / 100}
+                if isinstance(product_context.get("min_price_cents"), int)
+                else {}
+            ),
+            **(
+                {"max_price_yuan": product_context["max_price_cents"] / 100}
+                if isinstance(product_context.get("max_price_cents"), int)
+                else {}
+            ),
+            **(
+                {"target_price_yuan": product_context["target_price_cents"] / 100}
+                if isinstance(product_context.get("target_price_cents"), int)
+                else {}
+            ),
+            **({"brand_keys": product_context.get("brand_keys")} if product_context.get("brand_keys") else {}),
+        },
+        "preference_turns": product_context.get("preference_turns", [])[-6:],
+        "subject_resolution": {
+            "status": resolution.status,
+            "selected_ref": resolution.selected_ref or None,
+            "ambiguous_refs": resolution.ambiguous_refs,
+        },
+        "eligible_candidate_count": len(candidates),
+        "candidates": public_candidates,
+    }
+    return (
+        "Ecommerce Role 当前商品候选帧（服务端可信）。price_yuan/attributes/summary 来自当前 Catalog，"
+        "不得编造缺失的价格、库存或规格，也不得推荐 candidates 之外的商品。"
+        "ProductResolver 这里只负责商品指代，不负责推荐。"
+        "subject_resolution.status=ambiguous 时，只展示给出的 candidates 并让客户选择；"
+        "status=selected 时只能把唯一 candidate 当作当前选中商品；"
+        "status=unknown 时表示尚未选中具体商品，不代表不能推荐。"
+        "开放式导购（例如‘性能最好’、‘性价比高’、‘随便推荐几款’）由你根据客户原话和候选真实属性自行判断，"
+        "不要求存在唯一客观最优，也不要仅因为存在多个合理选项就反复追问。"
+        "当你准备向客户展示任何有顺序的商品列表时，必须先调用 present_product_candidates："
+        "推荐列表用 mode=recommend，需要客户在多个配置/选项中继续选择时用 mode=choice；"
+        "candidate_refs 必须严格按你随后向客户展示的顺序提交。工具成功后按同一顺序回答。"
+        "这个工具只声明展示顺序，不代表客户已经选择商品。"
+        "如果客户明确要求列出全部候选，可以展示全部；如果某个主观维度缺少可靠属性，可说明比较依据有限，"
+        "但不要因此把正常导购变成无限澄清。eligible_candidate_count=0 才能说明当前目录没有满足硬约束的商品。\n"
+        + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    )
+
+
+async def _resolve_product_turn(
+    *,
+    resolver: ProductResolver | None,
+    query: str,
+    candidates: list[dict[str, Any]],
+    product_context: dict[str, Any],
+    history: list[dict[str, Any]],
+    previous_selected: dict[str, str] | None = None,
+    purpose: str = "auto",
+) -> tuple[ProductResolution, dict[str, str] | None, dict[str, Any]]:
+    """Resolve product semantics inside one authoritative candidate frame."""
+    if not candidates:
+        return ProductResolution(), None, set_choice_refs(product_context, [])
+    ordinal_ref = ordinal_choice_ref(query, product_context)
+    if ordinal_ref:
+        selected = candidate_for_ref(ordinal_ref, candidates)
+        if selected is not None:
+            identity = canonical_product_identity(selected)
+            return (
+                ProductResolution(status="selected", selected_ref=ordinal_ref),
+                identity,
+                set_choice_refs(product_context, []),
+            )
+
+    matched = match_product_candidate(query, candidates)
+    if matched is not None:
+        for ref, raw in _candidate_refs(candidates).items():
+            identity = canonical_product_identity(raw)
+            if identity and (identity["product_category"], identity["product_id"]) == (
+                matched["product_category"],
+                matched["product_id"],
+            ):
+                return (
+                    ProductResolution(status="selected", selected_ref=ref),
+                    matched,
+                    set_choice_refs(product_context, []),
+                )
+
+    if resolver is None:
+        return ProductResolution(), None, set_choice_refs(product_context, [])
+    resolution = await resolver.resolve(
+        query=query,
+        candidates=candidates,
+        product_context=product_context,
+        history=history,
+        previous_selected=previous_selected,
+        purpose=purpose,
+    )
+    selected: dict[str, str] | None = None
+    choice_refs: list[str] = []
+    if resolution.status == "selected":
+        candidate = candidate_for_ref(resolution.selected_ref, candidates)
+        selected = canonical_product_identity(candidate) if candidate is not None else None
+    elif resolution.status == "ambiguous":
+        choice_refs = resolution.ambiguous_refs
+    return resolution, selected, set_choice_refs(product_context, choice_refs)
+
+
+async def _prepare_ecommerce_role(
+    *,
+    intent: Intent,
+    raw_query: str,
+    retrieval_query: str,
+    entities: dict[str, Any],
+    history: list[dict[str, Any]],
+    explicit_product: dict[str, str] | None,
+    catalog_required: bool,
+    resolver: ProductResolver | None,
+) -> tuple[list[dict[str, Any]], bool, dict[str, Any], ProductResolution, dict[str, str] | None, dict[str, Any]]:
+    """Run the bounded Ecommerce Role before Operator generation."""
+    existing_context = product_context_from_entities(entities)
+    pending_ordinal_choice = ordinal_choice_ref(raw_query, existing_context) is not None
+    is_product_turn = (
+        intent.domain == "product"
+        or intent.table in _CATALOG_TABLES
+        or getattr(intent, "product_category", "") in {"phones", "laptops", "components"}
+        or pending_ordinal_choice
+    )
+    if not is_product_turn:
+        # Service/other roles may keep ecommerce history in the shared session,
+        # but this turn must not mutate ProductContext, refresh candidates, or
+        # create a product-navigation authority.
+        return [], False, existing_context, ProductResolution(), None, {}
+
+    product_context, hard_changed = update_product_context(
+        existing_context,
+        query=raw_query,
+        table=intent.table,
+        category=getattr(intent, "product_category", ""),
+        is_product_turn=True,
+    )
+
+    if explicit_product is not None:
+        product_context["category"] = explicit_product.get("product_category", product_context.get("category", ""))
+        return (
+            [],
+            False,
+            product_context,
+            ProductResolution(status="selected"),
+            explicit_product,
+            {
+                **product_context_entity(product_context),
+                **explicit_product,
+            },
+        )
+
+    # A previously selected product is trusted continuity for a product purchase/navigation
+    # turn.  It is retired automatically below when hard constraints refresh the candidate frame.
+    stored = stored_product_identity(entities)
+    if stored is not None and not hard_changed and intent.domain == "product" and intent.operation == "purchase":
+        return (
+            [],
+            False,
+            product_context,
+            ProductResolution(status="selected"),
+            stored,
+            {
+                **product_context_entity(product_context),
+                **stored,
+            },
+        )
+
+    catalog_docs, catalog_acquired = await _acquire_catalog_evidence(
+        required=catalog_required and is_product_turn,
+        intent=intent,
+        query=retrieval_query,
+        entities=entities,
+        canonical_product=False,
+        product_context=product_context,
+        reuse_existing_frame=pending_ordinal_choice and not hard_changed,
+    )
+    if catalog_docs:
+        candidates = dedupe_product_candidates(catalog_docs)[:12]
+    else:
+        candidates = dedupe_product_candidates(
+            [item for item in entities.get("product_candidates", []) if isinstance(item, dict)]
+        )[:12]
+        if hard_changed:
+            # Hard constraints changed but acquisition returned an authoritative
+            # empty set; stale candidates must not survive into this turn.
+            candidates = []
+    # Keep a previously server-validated selected product inside the semantic
+    # frame while hard eligibility is unchanged.  This gives ProductResolver a
+    # bounded previous_selected_ref for pronouns/navigation without making the
+    # old selection authoritative over a new recommendation request.
+    if stored is not None and not hard_changed and candidates:
+        stored_key = (stored.get("product_category"), stored.get("product_id"))
+        candidate_keys = {(candidate.get("product_category"), candidate.get("product_id")) for candidate in candidates}
+        if stored_key not in candidate_keys:
+            previous_candidates = dedupe_product_candidates(
+                [item for item in entities.get("product_candidates", []) if isinstance(item, dict)]
+            )
+            previous_candidate = next(
+                (
+                    candidate
+                    for candidate in previous_candidates
+                    if (candidate.get("product_category"), candidate.get("product_id")) == stored_key
+                ),
+                None,
+            )
+            if previous_candidate is not None and filter_candidates_by_context([previous_candidate], product_context):
+                candidates = [previous_candidate, *candidates[:11]]
+
+    product_context = attach_candidate_frame(product_context, candidates)
+
+    resolution = ProductResolution()
+    selected: dict[str, str] | None = None
+    if is_product_turn and candidates:
+        resolution, selected, product_context = await _resolve_product_turn(
+            resolver=resolver,
+            query=raw_query,
+            candidates=candidates,
+            product_context=product_context,
+            history=history,
+            previous_selected=stored,
+            purpose={
+                "answer": "inspect",
+                "purchase": "purchase",
+            }.get(intent.operation, "auto"),
+        )
+
+    entity_projection: dict[str, Any] = product_context_entity(product_context)
+    if candidates:
+        entity_projection["product_candidates"] = candidates
+    elif hard_changed:
+        # An empty authoritative frame must clear prior product candidates.
+        entity_projection["product_candidates"] = []
+    if selected is not None:
+        entity_projection.update(selected)
+    return catalog_docs, catalog_acquired, product_context, resolution, selected, entity_projection
+
+
 def _merge_evidence_context(*contexts: str) -> str:
     """保留来源边界地合并产品上下文和知识上下文。"""
     return "\n\n".join(context.strip() for context in contexts if context and context.strip())
+
+
+def _presented_product_refs(
+    verified_facts: Mapping[str, Any] | None,
+    candidates: list[dict[str, Any]],
+    *,
+    allowed_refs: Sequence[str] | None = None,
+) -> tuple[str, list[str]]:
+    """Read the Operator's structured presentation declaration and revalidate refs.
+
+    The declaration tool is only a structured output channel.  This function is
+    still the final server membership check against the current candidate frame.
+    """
+    if not isinstance(verified_facts, Mapping):
+        return "", []
+    raw = verified_facts.get("present_product_candidates")
+    if not isinstance(raw, Mapping) or raw.get("status") != "success":
+        return "", []
+    data = raw.get("data")
+    if not isinstance(data, Mapping):
+        return "", []
+    mode = str(data.get("mode") or "")
+    if mode not in {"recommend", "choice"}:
+        return "", []
+    refs = data.get("candidate_refs")
+    if not isinstance(refs, list):
+        return "", []
+    allowed = set(allowed_refs) if allowed_refs is not None else set(_candidate_refs(candidates))
+    validated: list[str] = []
+    for ref in refs[:12]:
+        ref = str(ref)
+        if ref in allowed and ref not in validated:
+            validated.append(ref)
+    return (mode, validated) if validated else ("", [])
+
+
+def _recommended_products_from_refs(
+    refs: Sequence[str],
+    candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Resolve validated recommendation refs back to canonical catalog candidates."""
+    products: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for ref in list(refs)[:12]:
+        candidate = candidate_for_ref(str(ref), candidates)
+        if candidate is None:
+            continue
+        key = (str(candidate.get("product_category") or ""), str(candidate.get("product_id") or ""))
+        if not all(key) or key in seen:
+            continue
+        seen.add(key)
+        products.append(candidate)
+    return products
+
+
+def _recommended_product_action_suffix(products: list[dict[str, Any]]) -> str:
+    actions: list[str] = []
+    for product in products[:12]:
+        candidate = canonical_product_candidate(product)
+        if candidate is None:
+            continue
+        category = str(candidate.get("product_category") or "")
+        product_id = str(candidate.get("product_id") or "")
+        if category not in {"laptops", "phones", "components"} or not product_id:
+            continue
+        name = str(candidate.get("product") or candidate.get("product_name") or "这款商品").strip()
+        # Catalog text is trusted business data, but escape Markdown link-label
+        # delimiters so unusual product names cannot break presentation syntax.
+        label = name.replace("[", "［").replace("]", "］")[:120]
+        href = f"?page=product&category={quote(category)}&product={quote(product_id)}"
+        actions.append(f"[查看 {label}]({href})")
+    if not actions:
+        return ""
+    if len(actions) == 1:
+        return "\n\n" + actions[0]
+    return "\n\n" + "\n".join(f"- {action}" for action in actions)
 
 
 def _customer_action_suffix(
@@ -2486,6 +2970,7 @@ def _customer_action_suffix(
     product_category: str = "",
     component_category: str = "",
     trusted_refund_entry: str = "",
+    recommended_products: list[dict[str, Any]] | None = None,
     *,
     intent_domain: str = "",
     intent_operation: str = "",
@@ -2504,6 +2989,9 @@ def _customer_action_suffix(
     # the detail page directly; never fall back to the default laptop search.
     if product_id and product_category in {"laptops", "phones", "components"}:
         return f"\n\n[查看该商品](?page=product&category={quote(product_category)}&product={quote(product_id)})"
+    recommended_suffix = _recommended_product_action_suffix(recommended_products or [])
+    if recommended_suffix:
+        return recommended_suffix
     if intent_domain in {"order", "delivery", "payment", "refund"}:
         return "\n\n[查看我的订单](?page=orders)"
     if table in {"laptop_products", "phone_products", "component_products"} or intent_domain == "product":
@@ -2532,12 +3020,13 @@ def _append_customer_action_suffix(
     product_id: str = "",
     product_category: str = "",
     component_category: str = "",
+    recommended_products: list[dict[str, Any]] | None = None,
     *,
     intent_domain: str = "",
     intent_operation: str = "",
 ) -> str:
     """追加稳定的站内链接，但不重复模型已经生成的同一链接。"""
-    if product_id and product_category in {"laptops", "phones", "components"}:
+    if (product_id and product_category in {"laptops", "phones", "components"}) or recommended_products:
         # A model may still emit the legacy generic catalog link even after a
         # server-owned product was selected.  Keeping both links makes the
         # stale/default laptop route look equally authoritative.  The direct
@@ -2556,6 +3045,7 @@ def _append_customer_action_suffix(
         product_id,
         product_category,
         component_category,
+        recommended_products=recommended_products,
         intent_domain=intent_domain,
         intent_operation=intent_operation,
     )
@@ -2565,58 +3055,14 @@ def _append_customer_action_suffix(
 
 
 def _entities_from_catalog_docs(docs: list[dict], answer: str = "") -> dict[str, Any]:
-    """Project canonical candidates from server-owned catalog observations."""
-    if not docs:
-        return {}
-    candidates: list[tuple[dict[str, Any], tuple[str, ...]]] = []
-    for doc in docs:
-        if not isinstance(doc, dict):
-            continue
-        title = str(doc.get("display_title") or doc.get("title") or doc.get("product_name") or "").strip()
-        if not title:
-            continue
-        candidate = canonical_product_candidate(doc)
-        if candidate is None:
-            continue
-        match_names = tuple(
-            value.strip()
-            for value in (
-                candidate["product"],
-                str(candidate.get("product_name") or doc.get("product_name") or "").strip(),
-                str(doc.get("title") or "").strip(),
-            )
-            if value and value.strip()
-        )
-        candidates.append((candidate, match_names))
+    """Project only server-owned candidates from catalog observations.
 
-    unique = dedupe_product_candidates([candidate for candidate, _match_names in candidates])
-    if not unique:
-        return {}
-    if len(unique) == 1:
-        selected = canonical_product_identity(unique[0])
-        return {key: value for key, value in (selected or {}).items() if key != "product_name"}
-
-    normalized_answer = re.sub(r"\s+", "", answer).casefold()
-    mentioned: list[dict[str, Any]] = []
-    for candidate, match_names in candidates:
-        if any(re.sub(r"\s+", "", name).casefold() in normalized_answer for name in match_names):
-            matching_key = (candidate.get("product_category", ""), candidate.get("product_id", candidate["product"]))
-            selected = next(
-                (
-                    item
-                    for item in unique
-                    if (item.get("product_category", ""), item.get("product_id", item["product"])) == matching_key
-                ),
-                None,
-            )
-            if selected is not None and selected not in mentioned:
-                mentioned.append(selected)
-    if len(mentioned) == 1:
-        selected = canonical_product_identity(mentioned[0])
-        return {key: value for key, value in (selected or {}).items() if key != "product_name"}
-    if len(unique) > 1:
-        return {"product_candidates": unique[:12]}
-    return {}
+    ``answer`` is intentionally ignored: natural-language output is not a
+    business protocol and cannot promote a canonical product.
+    """
+    del answer
+    unique = dedupe_product_candidates([doc for doc in docs if isinstance(doc, dict)])
+    return {"product_candidates": unique[:12]} if unique else {}
 
 
 def _entities_from_retrieval(table: str, docs: list[dict], answer: str = "") -> dict[str, Any]:
@@ -2633,15 +3079,12 @@ def _merge_last_entities(target: dict[str, Any], incoming: object) -> None:
     product_keys = {"product", "product_id", "product_name", "product_category", "component_category"}
     selected = canonical_product_identity(incoming)
     candidates = incoming.get("product_candidates")
-    if isinstance(candidates, list) and selected is None:
-        normalized_candidates = dedupe_product_candidates(
-            [item for item in candidates if isinstance(item, dict)]
-        )
-        if normalized_candidates:
-            for key in product_keys:
-                target.pop(key, None)
-            target["product_candidates"] = normalized_candidates[:12]
-    elif selected is not None:
+    if isinstance(candidates, list):
+        normalized_candidates = dedupe_product_candidates([item for item in candidates if isinstance(item, dict)])
+        for key in product_keys:
+            target.pop(key, None)
+        target["product_candidates"] = normalized_candidates[:12]
+    if selected is not None:
         # A server-validated candidate may become the current canonical product
         # while the same trusted candidate set remains useful for later
         # preference refinement.  A subsequent fresh candidate observation
@@ -2653,6 +3096,9 @@ def _merge_last_entities(target: dict[str, Any], incoming: object) -> None:
         if not isinstance(key, str):
             continue
         if key in product_keys or key == "product_candidates":
+            continue
+        if key == "product_context" and isinstance(value, dict):
+            target[key] = dict(value)
             continue
         if isinstance(value, str) and value.strip():
             target[key] = value.strip()
@@ -2860,31 +3306,54 @@ async def chat(chat_req: ChatRequest, request: Request):
             retrieval_query=retrieval_query,
             semantic_hints=semantic_hints,
         )
-        turn_product_entity = _product_entity_from_intent(
-            intent,
-            chat_req.query,
-            ctx.last_entities,
-            explicit_product_entity,
-        )
-        operator_tool_context = _operator_tool_context(
-            tool_context, intent, canonical_product=turn_product_entity is not None
-        )
         evidence_plan = resolve_evidence(
             domain=intent.domain,
             operation=intent.operation,
             target=intent.target,
             table=intent.table,
         )
-        catalog_docs, catalog_acquired = await _acquire_catalog_evidence(
-            required=evidence_plan.catalog,
+        resolver_llm = getattr(intent_router, "llm", None) or getattr(agent, "llm", None)
+        product_resolver = ProductResolver(resolver_llm) if resolver_llm is not None else None
+        (
+            catalog_docs,
+            catalog_acquired,
+            product_context,
+            product_resolution,
+            turn_product_entity,
+            product_entity_projection,
+        ) = await _prepare_ecommerce_role(
             intent=intent,
-            query=retrieval_query,
+            raw_query=chat_req.query,
+            retrieval_query=retrieval_query,
             entities=ctx.last_entities,
-            canonical_product=turn_product_entity is not None,
+            history=ctx.history,
+            explicit_product=explicit_product_entity,
+            catalog_required=evidence_plan.catalog,
+            resolver=product_resolver,
         )
+        product_candidates_for_turn = dedupe_product_candidates(
+            [item for item in product_entity_projection.get("product_candidates", []) if isinstance(item, dict)]
+        )
+        operator_tool_context = _ecommerce_operator_tool_context(
+            tool_context,
+            intent,
+            canonical_product=turn_product_entity is not None,
+            catalog_bound=catalog_acquired,
+            candidate_refs=_visible_product_refs(product_candidates_for_turn, product_resolution),
+        )
+        recommended_products_for_turn: list[dict[str, Any]] = []
         catalog_context = (
-            _build_context(catalog_docs, customer_view=tool_context.role == "customer")
-            if catalog_docs
+            _product_procedure_context(
+                product_context=product_context,
+                candidates=product_candidates_for_turn,
+                resolution=product_resolution,
+            )
+            if (
+                intent.domain == "product"
+                or intent.table in _CATALOG_TABLES
+                or intent.product_category
+                or product_resolution.status != "unknown"
+            )
             else ""
         )
         # `rag/knowledge_chunks` 兼容路径会在下方复用原有检索；其他路径可同时携带
@@ -2900,10 +3369,11 @@ async def chat(chat_req: ChatRequest, request: Request):
         capability_ctx = _customer_chat_capability_context(
             operator_tool_context,
             canonical_product=turn_product_entity is not None,
+            recommended_product_actions=bool(product_candidates_for_turn and intent.domain == "product"),
         )
         selected_product_ctx = _selected_product_operator_context(
             turn_product_entity,
-            ctx.last_entities,
+            {**ctx.last_entities, **product_entity_projection},
         )
         agent_prompt_extra = _compose_prompt_extras(
             sentiment_ctx,
@@ -3112,14 +3582,19 @@ async def chat(chat_req: ChatRequest, request: Request):
                 loop_result=loop_result,
             )
         elif intent.target == "rag":
-            docs = catalog_docs if catalog_docs and intent.table in _CATALOG_TABLES else await hybrid_search(
-                retrieval_query,
-                table=intent.table,
-                use_rerank=_should_rerank(retrieval_query, intent.table),
-            )
+            if catalog_acquired and (intent.domain == "product" or intent.product_category):
+                docs = catalog_docs
+            else:
+                docs = await hybrid_search(
+                    retrieval_query,
+                    table=intent.table,
+                    use_rerank=_should_rerank(retrieval_query, intent.table),
+                )
             context = _merge_evidence_context(
                 selected_product_context,
-                _build_context(docs, customer_view=tool_context.role == "customer"),
+                catalog_context
+                if (intent.domain == "product" or intent.product_category)
+                else _build_context(docs, customer_view=tool_context.role == "customer"),
                 knowledge_context,
             )
             loop_result = await agent.run(
@@ -3148,11 +3623,21 @@ async def chat(chat_req: ChatRequest, request: Request):
                 catalog_entities = _entities_from_catalog_docs(catalog_docs, loop_result.answer)
                 loop_result.last_entities = {**catalog_entities, **loop_result.last_entities}
 
-        if turn_product_entity is not None:
-            # The identity came from an explicit product context or a prior
-            # server-owned candidate set.  It may be carried into this turn,
-            # but never from an LLM-generated order/product ID.
-            loop_result.last_entities = {**loop_result.last_entities, **turn_product_entity}
+        presentation_mode, presented_refs = _presented_product_refs(
+            loop_result.verified_facts,
+            product_candidates_for_turn,
+            allowed_refs=_visible_product_refs(product_candidates_for_turn, product_resolution),
+        )
+        if presented_refs:
+            product_context = set_choice_refs(product_context, presented_refs)
+            product_entity_projection.update(product_context_entity(product_context))
+            if presentation_mode == "recommend":
+                recommended_products_for_turn = _recommended_products_from_refs(
+                    presented_refs, product_candidates_for_turn
+                )
+
+        if product_entity_projection:
+            _merge_last_entities(loop_result.last_entities, product_entity_projection)
 
         if catalog_acquired:
             loop_result.answer_trace.setdefault("catalog_acquired", True)
@@ -3187,6 +3672,7 @@ async def chat(chat_req: ChatRequest, request: Request):
                     trusted_navigation=_trusted_navigation_action(
                         intent,
                         canonical_product=canonical_product_identity(loop_result.last_entities) is not None,
+                        recommended_product_actions=bool(recommended_products_for_turn),
                     ),
                 )
             )
@@ -3200,6 +3686,7 @@ async def chat(chat_req: ChatRequest, request: Request):
                 loop_result.last_entities.get("product_id", ""),
                 loop_result.last_entities.get("product_category", ""),
                 loop_result.last_entities.get("component_category", ""),
+                recommended_products=recommended_products_for_turn,
                 intent_domain=intent.domain,
                 intent_operation=intent.operation,
             )
@@ -3393,31 +3880,54 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
             retrieval_query=retrieval_query,
             semantic_hints=semantic_hints,
         )
-        turn_product_entity = _product_entity_from_intent(
-            intent,
-            chat_req.query,
-            session_ctx.last_entities,
-            explicit_product_entity,
-        )
-        operator_tool_context = _operator_tool_context(
-            tool_context, intent, canonical_product=turn_product_entity is not None
-        )
         evidence_plan = resolve_evidence(
             domain=intent.domain,
             operation=intent.operation,
             target=intent.target,
             table=intent.table,
         )
-        catalog_docs, catalog_acquired = await _acquire_catalog_evidence(
-            required=evidence_plan.catalog,
+        resolver_llm = getattr(intent_router, "llm", None) or getattr(agent, "llm", None)
+        product_resolver = ProductResolver(resolver_llm) if resolver_llm is not None else None
+        (
+            catalog_docs,
+            catalog_acquired,
+            product_context,
+            product_resolution,
+            turn_product_entity,
+            product_entity_projection,
+        ) = await _prepare_ecommerce_role(
             intent=intent,
-            query=retrieval_query,
+            raw_query=chat_req.query,
+            retrieval_query=retrieval_query,
             entities=session_ctx.last_entities,
-            canonical_product=turn_product_entity is not None,
+            history=history,
+            explicit_product=explicit_product_entity,
+            catalog_required=evidence_plan.catalog,
+            resolver=product_resolver,
         )
+        product_candidates_for_turn = dedupe_product_candidates(
+            [item for item in product_entity_projection.get("product_candidates", []) if isinstance(item, dict)]
+        )
+        operator_tool_context = _ecommerce_operator_tool_context(
+            tool_context,
+            intent,
+            canonical_product=turn_product_entity is not None,
+            catalog_bound=catalog_acquired,
+            candidate_refs=_visible_product_refs(product_candidates_for_turn, product_resolution),
+        )
+        recommended_products_for_turn: list[dict[str, Any]] = []
         catalog_context = (
-            _build_context(catalog_docs, customer_view=tool_context.role == "customer")
-            if catalog_docs
+            _product_procedure_context(
+                product_context=product_context,
+                candidates=product_candidates_for_turn,
+                resolution=product_resolution,
+            )
+            if (
+                intent.domain == "product"
+                or intent.table in _CATALOG_TABLES
+                or intent.product_category
+                or product_resolution.status != "unknown"
+            )
             else ""
         )
         knowledge_context = await _deep_knowledge_context(
@@ -3432,23 +3942,29 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
             _customer_chat_capability_context(
                 operator_tool_context,
                 canonical_product=turn_product_entity is not None,
+                recommended_product_actions=bool(product_candidates_for_turn and intent.domain == "product"),
             ),
             _selected_product_operator_context(
                 turn_product_entity,
-                session_ctx.last_entities,
+                {**session_ctx.last_entities, **product_entity_projection},
             ),
             _previous_outcome_operator_context(intent, session_ctx.messages),
         )
         context = _merge_evidence_context(selected_product_context, catalog_context, knowledge_context)
         if intent.target == "rag":
-            docs = catalog_docs if catalog_docs and intent.table in _CATALOG_TABLES else await hybrid_search(
-                retrieval_query,
-                table=intent.table,
-                use_rerank=_should_rerank(retrieval_query, intent.table),
-            )
+            if catalog_acquired and (intent.domain == "product" or intent.product_category):
+                docs = catalog_docs
+            else:
+                docs = await hybrid_search(
+                    retrieval_query,
+                    table=intent.table,
+                    use_rerank=_should_rerank(retrieval_query, intent.table),
+                )
             context = _merge_evidence_context(
                 selected_product_context,
-                _build_context(docs, customer_view=tool_context.role == "customer"),
+                catalog_context
+                if (intent.domain == "product" or intent.product_category)
+                else _build_context(docs, customer_view=tool_context.role == "customer"),
                 knowledge_context,
             )
             # 检索排序本身不是商品选择；在 done 时结合 Operator 的最终回答再投影实体。
@@ -3458,10 +3974,8 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                 if chat_req.product_id and chat_req.product_category:
                     last_entities["product_id"] = chat_req.product_id
                     last_entities["product_category"] = chat_req.product_category
-        elif catalog_docs:
-            _merge_last_entities(last_entities, _entities_from_catalog_docs(catalog_docs))
-        if turn_product_entity is not None:
-            last_entities.update(turn_product_entity)
+        if product_entity_projection:
+            _merge_last_entities(last_entities, product_entity_projection)
     except DependencyUnavailableError:
         raise
     except LLMError as exc:
@@ -3897,6 +4411,29 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                         retrieved_entities = _entities_from_retrieval(intent.table, docs, answer)
                     if retrieved_entities:
                         _merge_last_entities(last_entities, retrieved_entities)
+
+                    verified_facts = event.get("verified_facts", {})
+                    presentation_mode, presented_refs = _presented_product_refs(
+                        verified_facts if isinstance(verified_facts, Mapping) else {},
+                        product_candidates_for_turn,
+                        allowed_refs=_visible_product_refs(product_candidates_for_turn, product_resolution),
+                    )
+                    if presented_refs:
+                        updated_product_context = set_choice_refs(product_context, presented_refs)
+                        product_entity_projection.update(product_context_entity(updated_product_context))
+                        if presentation_mode == "recommend":
+                            recommended_products_for_turn.clear()
+                            recommended_products_for_turn.extend(
+                                _recommended_products_from_refs(presented_refs, product_candidates_for_turn)
+                            )
+
+                    # Match the synchronous path: retrieval/tool observations
+                    # are evidence, while the Ecommerce Procedure's validated
+                    # candidate-frame/selection projection is authoritative and
+                    # must be applied last.  Otherwise a stream done event can
+                    # accidentally retire a product selected earlier this turn.
+                    if product_entity_projection:
+                        _merge_last_entities(last_entities, product_entity_projection)
                     decision_facts = event.get("decision_facts", {})
                     if not isinstance(decision_facts, dict):
                         decision_facts = {}
@@ -3927,18 +4464,17 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                         decision_facts=decision_facts,
                         decision_contexts=decision_contexts,
                     )
-                    suffix = ""
-                    if (
-                        tool_context.role == "customer"
-                        and _can_append_generic_customer_action(
-                            presentation_result,
-                            trusted_navigation=_trusted_navigation_action(
-                                intent,
-                                canonical_product=canonical_product_identity(last_entities) is not None,
-                            ),
-                        )
+                    final_answer = answer
+                    if tool_context.role == "customer" and _can_append_generic_customer_action(
+                        presentation_result,
+                        trusted_navigation=_trusted_navigation_action(
+                            intent,
+                            canonical_product=canonical_product_identity(last_entities) is not None,
+                            recommended_product_actions=bool(recommended_products_for_turn),
+                        ),
                     ):
-                        suffix = _customer_action_suffix(
+                        final_answer = _append_customer_action_suffix(
+                            answer,
                             intent.target,
                             intent.table,
                             chat_req.query,
@@ -3946,14 +4482,20 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                             last_entities.get("product_id", ""),
                             last_entities.get("product_category", ""),
                             last_entities.get("component_category", ""),
+                            recommended_products=recommended_products_for_turn,
                             intent_domain=intent.domain,
                             intent_operation=intent.operation,
                         )
-                        if suffix and suffix.strip() in answer:
-                            suffix = ""
-                    if suffix:
-                        answer += suffix
-                        yield f"data: {json.dumps({'event': 'token', 'content': suffix}, ensure_ascii=False)}\n\n"
+                    if final_answer != answer:
+                        # Streaming may already have emitted the model prose.  Emit
+                        # only a pure suffix incrementally; if stale generic prose
+                        # had to be removed, the authoritative done event below
+                        # replaces the visible final answer atomically.
+                        if final_answer.startswith(answer):
+                            suffix = final_answer[len(answer) :]
+                            if suffix:
+                                yield f"data: {json.dumps({'event': 'token', 'content': suffix}, ensure_ascii=False)}\n\n"
+                        answer = final_answer
                     presentation_result.answer = answer
                     presentation = _customer_presentation(
                         presentation_result,

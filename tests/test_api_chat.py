@@ -59,6 +59,7 @@ from exceptions import BaseAppException, DependencyUnavailableError, LLMError
 from service.support_case_service import SupportCaseService
 from store.support_case_store import SupportCase
 
+
 # 本文件只测试 HTTP 编排，避免 SessionManager 导入时为了下载 tokenizer
 # 访问外网。真实 tokenizer 由 SessionManager/集成环境单独验证。
 class _FakeEncoding:
@@ -835,10 +836,13 @@ async def test_api_records_refund_self_service_handoff_as_completed_case_not_ref
 
 
 def test_product_retrieval_does_not_promote_noncanonical_title_only_row():
-    assert _entities_from_retrieval(
-        "laptop_products",
-        [{"title": "惠普 惠普锐Pro"}],
-    ) == {}
+    assert (
+        _entities_from_retrieval(
+            "laptop_products",
+            [{"title": "惠普 惠普锐Pro"}],
+        )
+        == {}
+    )
     assert _entities_from_retrieval("knowledge_chunks", [{"title": "售后政策"}]) == {}
 
 
@@ -874,7 +878,7 @@ def test_product_retrieval_preserves_server_owned_candidates_for_explicit_next_t
     assert _product_entity_for_turn("购买", entities) is None
 
 
-def test_router_candidate_ref_promotes_shortened_product_selection_server_side():
+def test_router_candidate_ref_is_not_product_selection_authority():
     from api.chat import _product_entity_from_intent
 
     entities = _entities_from_retrieval(
@@ -882,8 +886,8 @@ def test_router_candidate_ref_promotes_shortened_product_selection_server_side()
         [
             {
                 "id": "cooler-1",
-                "product_name": "利民Peerless Assassin 120 BLACK 逆重力热管散热器，支持双平台",
-                "display_title": "利民Peerless Assassin 120 BLACK 逆重力热管散热器，支持双平台",
+                "product_name": "利民Peerless Assassin 120 BLACK",
+                "display_title": "利民Peerless Assassin 120 BLACK",
                 "category": "components",
                 "component_category": "cooling_product",
             },
@@ -895,62 +899,67 @@ def test_router_candidate_ref_promotes_shortened_product_selection_server_side()
                 "component_category": "cooling_product",
             },
         ],
-        "推荐两款散热器",
     )
     intent = Intent(
         target="agent",
         domain="product",
-        operation="purchase",
+        operation="search_product",
         subject_refs=["candidate_1"],
     )
 
-    assert _product_entity_from_intent(intent, "换一种说法也不影响选择", entities, None) == {
-        "product": "利民Peerless Assassin 120 BLACK 逆重力热管散热器，支持双平台",
-        "product_id": "cooler-1",
-        "product_category": "components",
-        "product_name": "利民Peerless Assassin 120 BLACK 逆重力热管散热器，支持双平台",
-        "component_category": "cooling_product",
-    }
+    assert _product_entity_from_intent(intent, "换一种说法", entities, None) is None
 
 
 def test_customer_action_uses_canonical_product_detail_without_rag_table():
     from api.chat import _customer_action_suffix
 
-    assert _customer_action_suffix(
-        "agent",
-        "",
-        "推荐一款散热器",
-        "利民 Frozen Magic 360",
-        "cooler-1",
-        "components",
-        "cooling_product",
-    ) == "\n\n[查看该商品](?page=product&category=components&product=cooler-1)"
+    assert (
+        _customer_action_suffix(
+            "agent",
+            "",
+            "推荐一款散热器",
+            "利民 Frozen Magic 360",
+            "cooler-1",
+            "components",
+            "cooling_product",
+        )
+        == "\n\n[查看该商品](?page=product&category=components&product=cooler-1)"
+    )
 
 
 def test_canonical_product_action_removes_model_generic_catalog_fallback():
     from api.chat import _append_customer_action_suffix
 
-    assert _append_customer_action_suffix(
-        "可以从目录查看。\n\n[去商品目录查看](?page=catalog)",
-        "agent",
-        "",
-        "购买",
-        "利民散热器",
-        "cooler-1",
-        "components",
-        "cooling_product",
-    ) == "可以从目录查看。\n\n[查看该商品](?page=product&category=components&product=cooler-1)"
+    assert (
+        _append_customer_action_suffix(
+            "可以从目录查看。\n\n[去商品目录查看](?page=catalog)",
+            "agent",
+            "",
+            "购买",
+            "利民散热器",
+            "cooler-1",
+            "components",
+            "cooling_product",
+        )
+        == "可以从目录查看。\n\n[查看该商品](?page=product&category=components&product=cooler-1)"
+    )
 
 
 def test_server_owned_product_action_is_allowed_for_safe_fact_response_only():
-    assert _can_append_generic_customer_action(
-        LoopResult(answer="商品信息", response_control={"mode": "FACT"}),
-        trusted_navigation="product_detail_navigation",
-    ) is True
-    assert _can_append_generic_customer_action(
-        LoopResult(answer="请选择", response_control={"mode": "ASK_CHOICE"}),
-        trusted_navigation="product_detail_navigation",
-    ) is False
+    assert (
+        _can_append_generic_customer_action(
+            LoopResult(answer="商品信息", response_control={"mode": "FACT"}),
+            trusted_navigation="product_detail_navigation",
+        )
+        is True
+    )
+    assert (
+        _can_append_generic_customer_action(
+            LoopResult(answer="请选择", response_control={"mode": "ASK_CHOICE"}),
+            trusted_navigation="product_detail_navigation",
+        )
+        is False
+    )
 
 
 def test_ticket_issue_keeps_recent_customer_context():
@@ -2234,61 +2243,38 @@ class TestChatStreamEndpoint:
         assert resp.json()["error"]["code"] == "INVALID_REQUEST"
 
 
-def test_semantic_product_candidates_expose_trusted_price_but_not_canonical_id():
+def test_router_semantic_hints_expose_product_context_but_not_candidate_frame():
     from api.chat import _semantic_hint_payload
 
     payload = json.loads(
         _semantic_hint_payload(
-            resolved_query="从这两款里选一个",
+            resolved_query="从当前商品会话继续",
             entities={
+                "product_context": {
+                    "category": "phones",
+                    "min_price_cents": 400000,
+                    "max_price_cents": 500000,
+                    "choice_refs": ["candidate_1", "candidate_2"],
+                },
                 "product_candidates": [
                     {
-                        "product": "iPhone 17 512GB",
-                        "product_id": "phone-17",
-                        "product_name": "iPhone 17 512GB",
+                        "product": "vivo S60 16+512",
+                        "product_id": "phone-s60",
+                        "product_name": "vivo S60 16+512",
                         "product_category": "phones",
-                        "price_cents": 799900,
-                        "brand": "Apple",
-                        "storage": "512GB",
-                        "screen_size": "6.3-inch",
-                    },
-                    {
-                        "product": "iPhone 16 128GB",
-                        "product_id": "phone-16",
-                        "product_name": "iPhone 16 128GB",
-                        "product_category": "phones",
-                        "price_cents": 599900,
-                        "brand": "Apple",
-                        "storage": "128GB",
-                        "screen_size": "6.1-inch",
-                    },
-                ]
+                    }
+                ],
             },
         )
     )
 
-    assert payload["product_candidates"] == [
-        {
-            "ref": "candidate_1",
-            "name": "iPhone 17 512GB",
-            "product_category": "phones",
-            "component_category": "",
-            "price_cents": 799900,
-            "brand": "Apple",
-            "storage": "512GB",
-            "screen_size": "6.3-inch",
-        },
-        {
-            "ref": "candidate_2",
-            "name": "iPhone 16 128GB",
-            "product_category": "phones",
-            "component_category": "",
-            "price_cents": 599900,
-            "brand": "Apple",
-            "storage": "128GB",
-            "screen_size": "6.1-inch",
-        },
-    ]
+    assert payload["ecommerce_context"] == {
+        "category": "phones",
+        "min_price_cents": 400000,
+        "max_price_cents": 500000,
+    }
+    assert payload["product_choice_pending"] is True
+    assert "product_candidates" not in payload
     assert "product_id" not in json.dumps(payload)
 
 
@@ -2463,57 +2449,58 @@ async def test_catalog_evidence_plan_is_executed_for_product_goal_without_canoni
     }
 
 
-def test_candidate_promotion_preserves_current_candidate_evidence_and_direct_action_cross_category():
-    from api.chat import _customer_action_suffix, _product_entity_from_intent
+@pytest.mark.asyncio
+async def test_product_selection_binds_server_candidate_and_preserves_detail_action():
+    from api.chat import _customer_action_suffix, _resolve_product_turn
 
-    entities = {
-        "product_candidates": [
-            {
-                "product": "Kingston NV2 1TB",
-                "product_id": "ssd-nv2-1tb",
-                "product_name": "Kingston NV2 1TB",
-                "product_category": "components",
-                "component_category": "solid_state_drive",
-                "price_cents": 49900,
-                "brand": "Kingston",
-                "capacity": "1TB",
-            },
-            {
-                "product": "Samsung 990 PRO 2TB",
-                "product_id": "ssd-990pro-2tb",
-                "product_name": "Samsung 990 PRO 2TB",
-                "product_category": "components",
-                "component_category": "solid_state_drive",
-                "price_cents": 129900,
-                "brand": "Samsung",
-                "capacity": "2TB",
-            },
-        ]
-    }
-    intent = Intent(
-        target="agent",
-        domain="product",
-        operation="purchase",
-        subject_refs=["candidate_1"],
+    candidates = [
+        {
+            "product": "Kingston NV2 1TB",
+            "product_id": "ssd-nv2-1tb",
+            "product_name": "Kingston NV2 1TB",
+            "product_category": "components",
+            "component_category": "solid_state_drive",
+            "price_cents": 49900,
+            "brand": "Kingston",
+            "capacity": "1TB",
+        },
+        {
+            "product": "Samsung 990 PRO 2TB",
+            "product_id": "ssd-990pro-2tb",
+            "product_name": "Samsung 990 PRO 2TB",
+            "product_category": "components",
+            "component_category": "solid_state_drive",
+            "price_cents": 129900,
+            "brand": "Samsung",
+            "capacity": "2TB",
+        },
+    ]
+    resolution, selected, context = await _resolve_product_turn(
+        resolver=None,
+        query="就选 Kingston NV2 1TB",
+        candidates=candidates,
+        product_context={},
+        history=[],
     )
 
-    selected = _product_entity_from_intent(intent, "换一种表达", entities, None)
+    assert resolution.status == "selected"
     assert selected is not None
-    _merge_last_entities(entities, selected)
-
-    assert entities["product_id"] == "ssd-nv2-1tb"
-    assert len(entities["product_candidates"]) == 2
-    assert _customer_action_suffix(
-        "agent",
-        "",
-        "任意表达",
-        entities["product"],
-        entities["product_id"],
-        entities["product_category"],
-        entities["component_category"],
-        intent_domain="product",
-        intent_operation="purchase",
-    ) == "\n\n[查看该商品](?page=product&category=components&product=ssd-nv2-1tb)"
+    assert selected["product_id"] == "ssd-nv2-1tb"
+    assert "choice_refs" not in context
+    assert (
+        _customer_action_suffix(
+            "agent",
+            "",
+            "任意表达",
+            selected["product"],
+            selected["product_id"],
+            selected["product_category"],
+            selected["component_category"],
+            intent_domain="product",
+            intent_operation="purchase",
+        )
+        == "\n\n[查看该商品](?page=product&category=components&product=ssd-nv2-1tb)"
+    )
 
 
 def test_session_product_lifecycle_keeps_candidates_after_promotion_and_retires_selection_on_fresh_search():
@@ -2579,18 +2566,26 @@ def test_orders_navigation_is_server_capability_for_safe_read_modes_not_query_wo
 
     assert navigation == "orders_navigation"
     for mode in ("FACT", "EXPLANATION", "READ_ONLY", "GENERIC"):
-        assert _can_append_generic_customer_action(
-            LoopResult(answer="订单说明", response_control={"mode": mode}),
-            trusted_navigation=navigation,
-        ) is True
+        assert (
+            _can_append_generic_customer_action(
+                LoopResult(answer="订单说明", response_control={"mode": mode}),
+                trusted_navigation=navigation,
+            )
+            is True
+        )
     for mode in ("ERROR", "ASK_CLARIFICATION", "ASK_CHOICE", "STAFF_HANDOFF"):
-        assert _can_append_generic_customer_action(
-            LoopResult(answer="受控状态", response_control={"mode": mode}),
-            trusted_navigation=navigation,
-        ) is False
+        assert (
+            _can_append_generic_customer_action(
+                LoopResult(answer="受控状态", response_control={"mode": mode}),
+                trusted_navigation=navigation,
+            )
+            is False
+        )
 
     first = _customer_action_suffix("agent", "", "我现在有什么订单", intent_domain="order", intent_operation="list")
-    second = _customer_action_suffix("agent", "", "换一种完全不同的表达", intent_domain="order", intent_operation="list")
+    second = _customer_action_suffix(
+        "agent", "", "换一种完全不同的表达", intent_domain="order", intent_operation="list"
+    )
     assert first == second == "\n\n[查看我的订单](?page=orders)"
 
 
@@ -2604,134 +2599,6 @@ def test_customer_capability_snapshot_declares_orders_navigation():
 
     assert '"orders_navigation":true' in context
     assert '"create_order":false' in context
-
-
-@pytest.mark.asyncio
-async def test_real_chat_product_candidate_promotion_persists_canonical_action_across_preferences(client, monkeypatch):
-    catalog_docs = [
-        {
-            "id": "p2105475",
-            "product_id": "p2105475",
-            "product_name": "苹果iPhone 16 Pro Max（1TB）",
-            "display_title": "苹果iPhone 16 Pro Max（1TB）",
-            "category": "phones",
-            "price": 13999,
-            "comparison_metadata": {"brand": "苹果", "model": "iPhone 16 Pro Max", "storage": "1TB", "screen_size": "6.9英寸"},
-            "score": 0.99,
-        },
-        {
-            "id": "p2105471",
-            "product_id": "p2105471",
-            "product_name": "苹果iPhone 16 Pro（1TB）",
-            "display_title": "苹果iPhone 16 Pro（1TB）",
-            "category": "phones",
-            "price": 12999,
-            "comparison_metadata": {"brand": "苹果", "model": "iPhone 16 Pro", "storage": "1TB", "screen_size": "6.3英寸"},
-            "score": 0.98,
-        },
-        {
-            "id": "p2105470",
-            "product_id": "p2105470",
-            "product_name": "苹果iPhone 16 Pro（512GB）",
-            "display_title": "苹果iPhone 16 Pro（512GB）",
-            "category": "phones",
-            "price": 10999,
-            "comparison_metadata": {"brand": "苹果", "model": "iPhone 16 Pro", "storage": "512GB", "screen_size": "6.3英寸"},
-            "score": 0.97,
-        },
-    ]
-
-    async def fake_hybrid_search(query, *, table, **kwargs):
-        return catalog_docs if table == "phone_products" else []
-
-    monkeypatch.setattr("api.chat.hybrid_search", fake_hybrid_search)
-    intents = [
-        Intent(
-            target="agent",
-            domain="product",
-            operation="search_product",
-            requests=[SupportRequest(domain="product", operation="search_product")],
-        ),
-        Intent(
-            target="agent",
-            domain="product",
-            operation="search_product",
-            subject_refs=["candidate_1"],
-            requests=[SupportRequest(domain="product", operation="search_product", subject_refs=["candidate_1"])],
-        ),
-        Intent(
-            target="agent",
-            domain="product",
-            operation="search_product",
-            subject_refs=["candidate_2"],
-            requests=[SupportRequest(domain="product", operation="search_product", subject_refs=["candidate_2"])],
-        ),
-        Intent(
-            target="agent",
-            domain="product",
-            operation="search_product",
-            subject_refs=["candidate_2"],
-            requests=[SupportRequest(domain="product", operation="search_product", subject_refs=["candidate_2"])],
-        ),
-        Intent(
-            target="agent",
-            domain="product",
-            operation="purchase",
-            requests=[SupportRequest(domain="product", operation="purchase")],
-        ),
-        Intent(
-            target="agent",
-            domain="product",
-            operation="purchase",
-            requests=[SupportRequest(domain="product", operation="purchase")],
-        ),
-    ]
-    client.app.state.intent_router.route = AsyncMock(side_effect=intents)
-    prompts: list[str] = []
-
-    async def run_agent(query, *, context="", history=None, system_prompt_extra="", tool_context=None):
-        prompts.append(system_prompt_extra)
-        return LoopResult(
-            answer="我会按当前服务端候选继续处理。",
-            total_steps=1,
-            total_tokens=1,
-            response_control={"mode": "READ_ONLY"},
-        )
-
-    client.app.state.agent.run = run_agent
-    transport = httpx.ASGITransport(app=client.app)
-    queries = [
-        "给我推荐一台新的iphone",
-        "预算无上限",
-        "不用太大",
-        "1TB就行",
-        "直接把链接给我",
-        "就买这台",
-    ]
-    responses = []
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
-        for query in queries:
-            responses.append(
-                await http_client.post(
-                    "/api/v1/chat",
-                    json={"session_id": "product-e2e", "query": query},
-                )
-            )
-
-    assert all(response.status_code == 200 for response in responses)
-    session_ctx = client.app.state.session._sessions["product-e2e"]
-    assert session_ctx.last_entities["product_id"] == "p2105471"
-    assert len(session_ctx.last_entities["product_candidates"]) == 3
-    assert responses[-2].json()["answer"].endswith(
-        "[查看该商品](?page=product&category=phones&product=p2105471)"
-    )
-    assert responses[-1].json()["answer"].endswith(
-        "[查看该商品](?page=product&category=phones&product=p2105471)"
-    )
-    assert '"product_detail_navigation":true' in prompts[-1]
-    assert '"create_order":false' in prompts[-1]
-    assert '"write_shipping_address":false' in prompts[-1]
-    assert '"select_payment_method":false' in prompts[-1]
 
 
 @pytest.mark.asyncio
@@ -2771,3 +2638,346 @@ async def test_real_chat_order_list_safe_fact_response_gets_server_orders_naviga
     assert expected in second.json()["answer"]
     assert "手机号" not in first.json()["answer"]
     assert "手机号" not in second.json()["answer"]
+
+
+def test_recommended_product_actions_use_real_detail_links_without_selection():
+    from api.chat import _customer_action_suffix
+
+    recommended = [
+        {
+            "product_id": "laptop-4070",
+            "product_name": "神舟战神T8 Pro E73",
+            "display_title": "神舟战神T8 Pro E73",
+            "category": "laptops",
+            "price": 7088,
+        }
+    ]
+    assert (
+        _customer_action_suffix(
+            "agent",
+            "laptop_products",
+            "8000以内显卡优先",
+            recommended_products=recommended,
+            intent_domain="product",
+            intent_operation="search_product",
+        )
+        == "\n\n[查看 神舟战神T8 Pro E73](?page=product&category=laptops&product=laptop-4070)"
+    )
+
+
+def test_product_procedure_unknown_exposes_full_server_frame_for_open_recommendation():
+    from agent.product_resolver import ProductResolution
+    from api.chat import _product_procedure_context
+
+    candidates = [
+        {
+            "product_id": "r7-512",
+            "product_name": "机械革命蛟龙15K R7 512G",
+            "display_title": "机械革命蛟龙15K R7 512G",
+            "category": "laptops",
+            "price": 4299,
+        },
+        {
+            "product_id": "r5-1t",
+            "product_name": "机械革命蛟龙15K R5 1T",
+            "display_title": "机械革命蛟龙15K R5 1T",
+            "category": "laptops",
+            "price": 5199,
+        },
+    ]
+    context = _product_procedure_context(
+        product_context={"category": "laptops"},
+        candidates=candidates,
+        resolution=ProductResolution(),
+    )
+
+    assert '"eligible_candidate_count":2' in context
+    assert '"ref":"candidate_1"' in context
+    assert '"ref":"candidate_2"' in context
+    assert "status=unknown 时表示尚未选中具体商品，不代表不能推荐" in context
+    assert "不要求存在唯一客观最优" in context
+    assert "present_product_candidates" in context
+
+
+def test_product_procedure_ambiguous_exposes_only_subject_candidates():
+    from agent.product_resolver import ProductResolution
+    from api.chat import _product_procedure_context
+
+    candidates = [
+        {
+            "product_id": "other",
+            "product_name": "其他型号",
+            "display_title": "其他型号",
+            "category": "laptops",
+            "price": 3999,
+        },
+        {
+            "product_id": "r5-1t",
+            "product_name": "机械革命蛟龙15K R5 1T",
+            "display_title": "机械革命蛟龙15K R5 1T",
+            "category": "laptops",
+            "price": 5199,
+        },
+        {
+            "product_id": "r7-512",
+            "product_name": "机械革命蛟龙15K R7 512G",
+            "display_title": "机械革命蛟龙15K R7 512G",
+            "category": "laptops",
+            "price": 4299,
+        },
+    ]
+    context = _product_procedure_context(
+        product_context={"category": "laptops"},
+        candidates=candidates,
+        resolution=ProductResolution(
+            status="ambiguous",
+            ambiguous_refs=["candidate_2", "candidate_3"],
+        ),
+    )
+    assert '"ref":"candidate_1"' not in context
+    assert '"ref":"candidate_2"' in context
+    assert '"ref":"candidate_3"' in context
+
+
+def test_operator_presentation_declaration_becomes_same_ordinal_choice_frame():
+    from agent.product_context import ordinal_choice_ref, set_choice_refs
+    from api.chat import _presented_product_refs
+
+    candidates = [
+        {
+            "product_id": "r7-512",
+            "product_name": "机械革命蛟龙15K R7 512G",
+            "display_title": "机械革命蛟龙15K R7 512G",
+            "category": "laptops",
+            "price": 4299,
+        },
+        {
+            "product_id": "r5-1t",
+            "product_name": "机械革命蛟龙15K R5 1T",
+            "display_title": "机械革命蛟龙15K R5 1T",
+            "category": "laptops",
+            "price": 5199,
+        },
+    ]
+    verified = {
+        "present_product_candidates": {
+            "status": "success",
+            "data": {
+                "mode": "recommend",
+                "candidate_refs": ["candidate_2", "candidate_1"],
+            },
+        }
+    }
+    mode, refs = _presented_product_refs(verified, candidates)
+    assert mode == "recommend"
+    assert refs == ["candidate_2", "candidate_1"]
+    context = set_choice_refs({"category": "laptops"}, refs)
+    assert ordinal_choice_ref("第一款", context) == "candidate_2"
+    assert ordinal_choice_ref("第二款", context) == "candidate_1"
+
+
+def test_operator_presentation_declaration_rejects_refs_outside_current_frame():
+    from api.chat import _presented_product_refs
+
+    candidates = [
+        {
+            "product_id": "a",
+            "product_name": "候选A",
+            "display_title": "候选A",
+            "category": "phones",
+            "price": 4999,
+        }
+    ]
+    verified = {
+        "present_product_candidates": {
+            "status": "success",
+            "data": {"mode": "recommend", "candidate_refs": ["candidate_99"]},
+        }
+    }
+    assert _presented_product_refs(verified, candidates) == ("", [])
+
+
+@pytest.mark.asyncio
+async def test_stream_product_recommendation_done_answer_uses_operator_declared_refs_and_persists_them(
+    client, monkeypatch
+):
+    from agent.product_resolver import ProductResolution
+
+    candidates = [
+        {
+            "product_id": "r7-512",
+            "product_name": "机械革命蛟龙15K R7 512G",
+            "display_title": "机械革命蛟龙15K R7 512G",
+            "category": "laptops",
+            "price": 4299,
+        },
+        {
+            "product_id": "r5-1t",
+            "product_name": "机械革命蛟龙15K R5 1T",
+            "display_title": "机械革命蛟龙15K R5 1T",
+            "category": "laptops",
+            "price": 5199,
+        },
+    ]
+    intent = Intent(
+        target="agent",
+        domain="product",
+        operation="search_product",
+        query="5000左右，玩3A",
+        product_category="laptops",
+    )
+    client.app.state.intent_router.route = AsyncMock(return_value=intent)
+
+    class RecommendationAgent(_MockAgentLoop):
+        async def run_stream(self, query, *, context="", history=None, system_prompt_extra="", tool_context=None):
+            self.last_query = query
+            self.last_context = context
+            assert tool_context is not None
+            assert tool_context.product_candidate_refs == frozenset({"candidate_1", "candidate_2"})
+            yield {"event": "start"}
+            yield {"event": "token", "content": self._answer}
+            yield {
+                "event": "done",
+                "answer": self._answer,
+                "total_steps": 2,
+                "verified_facts": {
+                    "present_product_candidates": {
+                        "status": "success",
+                        "data": {
+                            "mode": "recommend",
+                            "candidate_refs": ["candidate_2", "candidate_1"],
+                        },
+                    }
+                },
+            }
+
+    client.app.state.agent = RecommendationAgent(
+        answer="我推荐这两款。\n\n[去商品目录查看](?page=catalog&category=laptops)"
+    )
+    monkeypatch.setattr(
+        "api.chat._prepare_ecommerce_role",
+        AsyncMock(
+            return_value=(
+                [],
+                True,
+                {"category": "laptops"},
+                ProductResolution(),
+                None,
+                {"product_candidates": candidates},
+            )
+        ),
+    )
+
+    transport = httpx.ASGITransport(app=client.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+        response = await http_client.post(
+            "/api/v1/chat/stream",
+            json={"session_id": "product-link-stream", "query": "5000左右，玩3A"},
+        )
+
+    assert response.status_code == 200
+    events = []
+    for line in response.text.splitlines():
+        if line.startswith("data: "):
+            events.append(json.loads(line[6:]))
+    done = [event for event in events if event.get("event") == "done"][-1]
+    answer = done["answer"]
+    first_href = "?page=product&category=laptops&product=r5-1t"
+    second_href = "?page=product&category=laptops&product=r7-512"
+    assert first_href in answer
+    assert second_href in answer
+    assert answer.index(first_href) < answer.index(second_href)
+    assert "?page=catalog" not in answer
+
+    session = client.app.state.session._sessions["product-link-stream"]
+    persisted = session.messages[-1]["content"]
+    assert persisted == answer
+    assert session.last_entities["product_context"]["choice_refs"] == ["candidate_2", "candidate_1"]
+
+
+@pytest.mark.asyncio
+async def test_sync_product_recommendation_unknown_subject_does_not_block_operator_and_links_declared_refs(
+    client, monkeypatch
+):
+    from agent.product_resolver import ProductResolution
+
+    candidates = [
+        {
+            "product_id": "iphone-17-a",
+            "product_name": "Apple iPhone 17 256GB",
+            "display_title": "Apple iPhone 17 256GB",
+            "category": "phones",
+            "price": 6999,
+        },
+        {
+            "product_id": "iphone-17-b",
+            "product_name": "Apple iPhone 17 512GB",
+            "display_title": "Apple iPhone 17 512GB",
+            "category": "phones",
+            "price": 7999,
+        },
+    ]
+    intent = Intent(
+        target="agent",
+        domain="product",
+        operation="search_product",
+        query="8000以内性能最好的iPhone，直接推荐",
+        product_category="phones",
+    )
+    client.app.state.intent_router.route = AsyncMock(return_value=intent)
+
+    class RecommendationAgent(_MockAgentLoop):
+        async def run(self, query, *, context="", history=None, system_prompt_extra="", tool_context=None):
+            self.last_query = query
+            self.last_context = context
+            assert "不要求存在唯一客观最优" in context
+            assert tool_context is not None
+            assert tool_context.product_candidate_refs == frozenset({"candidate_1", "candidate_2"})
+            return LoopResult(
+                answer="8000以内我会优先推荐 iPhone 17 512GB。",
+                total_steps=2,
+                total_tokens=50,
+                verified_facts={
+                    "present_product_candidates": {
+                        "status": "success",
+                        "data": {
+                            "mode": "recommend",
+                            "candidate_refs": ["candidate_2", "candidate_1"],
+                        },
+                    }
+                },
+            )
+
+    client.app.state.agent = RecommendationAgent()
+    monkeypatch.setattr(
+        "api.chat._prepare_ecommerce_role",
+        AsyncMock(
+            return_value=(
+                [],
+                True,
+                {"category": "phones", "max_price_cents": 800000},
+                ProductResolution(),  # unknown subject is normal for recommendation
+                None,
+                {"product_candidates": candidates},
+            )
+        ),
+    )
+
+    transport = httpx.ASGITransport(app=client.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+        response = await http_client.post(
+            "/api/v1/chat",
+            json={"session_id": "product-open-recommend-sync", "query": "8000以内性能最好的iPhone，直接推荐"},
+        )
+
+    assert response.status_code == 200
+    answer = response.json()["answer"]
+    first_href = "?page=product&category=phones&product=iphone-17-b"
+    second_href = "?page=product&category=phones&product=iphone-17-a"
+    assert first_href in answer
+    assert second_href in answer
+    assert answer.index(first_href) < answer.index(second_href)
+    assert "?page=catalog" not in answer
+
+    session = client.app.state.session._sessions["product-open-recommend-sync"]
+    assert session.last_entities["product_context"]["choice_refs"] == ["candidate_2", "candidate_1"]

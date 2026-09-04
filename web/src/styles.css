@@ -43,12 +43,17 @@ h1, h2, p { margin-top: 0; } h1 { margin-bottom: 6px; font-size: 28px; } h2 { ma
 /* 消息流沿用 ChatGPT 的“用户靠右、助手靠左文档流”阅读节奏。 */
 .chatgpt-history .bubble.user { grid-template-columns: minmax(0, 1fr) 30px; width: min(82%, 680px); margin-left: auto; }.chatgpt-history .bubble.user .message-avatar { grid-column: 2; grid-row: 1; background: #4a68d8; }.chatgpt-history .bubble.user .message-content { grid-column: 1; grid-row: 1; justify-self: end; padding: 10px 14px; border-radius: 18px; background: #eef2ff; }.chatgpt-history .bubble.assistant .message-content { min-width: 0; }.message-content { white-space: pre-wrap; line-height: 1.7; }.message-content p { margin: 0 0 12px; }.message-content p:last-child { margin-bottom: 0; }.message-content ul, .message-content ol { margin: 0 0 12px; padding-left: 22px; }.message-content h1, .message-content h2, .message-content h3 { margin: 16px 0 8px; font-size: 17px; }.message-content strong { font-weight: 750; }.message-content code { padding: 2px 5px; border-radius: 5px; background: #f1f1f1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; }.message-content pre { overflow: auto; padding: 12px; border-radius: 10px; background: #f4f4f4; }.message-content table { display: block; max-width: 100%; overflow-x: auto; margin: 12px 0; border-collapse: collapse; font-size: 14px; white-space: normal; }.message-content th, .message-content td { min-width: 100px; padding: 8px 10px; border: 1px solid #dedede; text-align: left; vertical-align: top; }.message-content th { background: #f5f5f5; }.chatgpt-history .bubble.thinking .message-content { padding-top: 4px; }
 
-/* 模型常用空行分段；客服说明保持紧凑，仍保留标题和列表的阅读层级。 */
-.chatgpt-history .bubble.assistant .message-content { line-height: 1.62; }
-.chatgpt-history .bubble.assistant .message-content p { margin-bottom: 7px; }
+/* Assistant 内容已经经过 Markdown 结构化渲染；不要再用 pre-wrap 放大块间空白。
+ * 用户气泡仍沿用 .message-content 的 pre-wrap，以保留用户手工换行。 */
+.chatgpt-history .bubble.assistant .message-content { white-space: normal; line-height: 1.56; }
+.chatgpt-history .bubble.assistant .message-content p { margin: 0 0 5px; }
 .chatgpt-history .bubble.assistant .message-content ul,
-.chatgpt-history .bubble.assistant .message-content ol { margin-bottom: 7px; }
+.chatgpt-history .bubble.assistant .message-content ol { margin: 0 0 5px; }
 .chatgpt-history .bubble.assistant .message-content li + li { margin-top: 2px; }
+.chatgpt-history .bubble.assistant .message-content table { margin: 7px 0; }
+.chatgpt-history .bubble.assistant .message-content h1,
+.chatgpt-history .bubble.assistant .message-content h2,
+.chatgpt-history .bubble.assistant .message-content h3 { margin: 12px 0 6px; }
 .customer-presentation { margin-top: 14px; padding: 14px; border: 1px solid #dfe5f2; border-radius: 12px; background: #fff; }
 .customer-presentation h3 { margin: 0 0 7px; color: #273653; font-size: 15px; }
 .presentation-description { margin: 0 0 12px; color: #68758d; font-size: 13px; line-height: 1.55; }

@@ -110,12 +110,10 @@ class TestRouteNormal:
     @pytest.mark.asyncio
     async def test_pending_order_cancel_is_distinct_from_refund_cancel(self):
         order_cancel = await _router(
-            '{"target":"agent","domain":"order","operation":"cancel",'
-            '"speech_act":"ACTION_REQUEST","confidence":0.95}'
+            '{"target":"agent","domain":"order","operation":"cancel","speech_act":"ACTION_REQUEST","confidence":0.95}'
         ).route("这笔订单不买了，帮我取消订单")
         refund_cancel = await _router(
-            '{"target":"agent","domain":"refund","operation":"cancel",'
-            '"speech_act":"ACTION_REQUEST","confidence":0.95}'
+            '{"target":"agent","domain":"refund","operation":"cancel","speech_act":"ACTION_REQUEST","confidence":0.95}'
         ).route("帮我取消退款申请")
 
         assert (order_cancel.domain, order_cancel.operation) == ("order", "cancel")
@@ -182,6 +180,19 @@ class TestRouteNormal:
         assert intent.domain == "general"
         assert intent.operation == "clarify"
         assert intent.support_requests == []
+
+    @pytest.mark.asyncio
+    async def test_product_category_is_independent_from_rag_table(self):
+        router = _router(
+            '{"target":"agent","domain":"product","operation":"search_product",'
+            '"product_category":"phones","speech_act":"INFORMATION_QUERY","confidence":0.96}'
+        )
+
+        intent = await router.route("给我推荐一台手机")
+
+        assert intent.target == "agent"
+        assert intent.table == ""
+        assert intent.product_category == "phones"
 
     @pytest.mark.asyncio
     async def test_product_purchase_is_a_goal_without_inventory_tool(self):
@@ -410,8 +421,7 @@ class TestRouteNormal:
     @pytest.mark.asyncio
     async def test_explicit_refund_becomes_fact_first_support_workflow_not_ticket(self):
         router = _router(
-            '{"target":"agent","domain":"refund","operation":"request",'
-            '"speech_act":"ACTION_REQUEST","confidence":0.88}'
+            '{"target":"agent","domain":"refund","operation":"request","speech_act":"ACTION_REQUEST","confidence":0.88}'
         )
         intent = await router.route("我要退款")
         assert intent.target == "agent"
@@ -552,8 +562,7 @@ class TestRouteNormal:
     async def test_explicit_refund_request_uses_router_semantics(self):
         """明确退款进入受控事实核验流程，不能因模型波动直接建单。"""
         router = _router(
-            '{"target":"agent","domain":"refund","operation":"request",'
-            '"speech_act":"ACTION_REQUEST","confidence":0.95}'
+            '{"target":"agent","domain":"refund","operation":"request","speech_act":"ACTION_REQUEST","confidence":0.95}'
         )
 
         intent = await router.route("我要申请退款")
@@ -571,8 +580,7 @@ class TestRouteNormal:
     async def test_explicit_refund_request_keeps_action_speech_act(self, query):
         """Goal 不能反推 speech act，但当前明确动作必须保留为动作请求。"""
         router = _router(
-            '{"target":"agent","domain":"refund","operation":"request",'
-            '"speech_act":"ACTION_REQUEST","confidence":0.98}'
+            '{"target":"agent","domain":"refund","operation":"request","speech_act":"ACTION_REQUEST","confidence":0.98}'
         )
 
         intent = await router.route(query)
