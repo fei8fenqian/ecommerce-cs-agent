@@ -27,7 +27,7 @@ from agent.decision_context import (
 )
 from agent.engines.loop import LoopResult
 from agent.evidence import resolve_evidence
-from agent.llm.intent_router import Intent, IntentRouter, build_route_instruction
+from agent.llm.intent_router import Intent, IntentRouter, SupportRequest, build_route_instruction
 from agent.llm.resolve import resolve_stock_follow_up
 from agent.llm.sentiment import build_escalation_prompt, detect_sentiment
 from agent.order_subject_resolver import resolve_order_subject
@@ -58,6 +58,7 @@ from agent.subject_correction import (
 from agent.support_control import confirmation_required
 from agent.support_subjects import (
     MAX_ORDER_CHOICE_OPTIONS,
+    has_pending_subject_exclusion,
     looks_like_bare_subject_description,
     looks_like_pending_subject_choice,
     match_pending_subject_choices,
@@ -81,6 +82,54 @@ from store.support_case_store import SupportCase
 from store.ticket_store import enqueue_human_ticket
 
 _chat_logger = logging.getLogger(__name__)
+
+
+def _support_trace_fields(case: SupportCase | None) -> dict[str, object]:
+    """Project only non-sensitive SupportCase control metadata into logs."""
+    if case is None:
+        return {
+            "case_present": False,
+            "case_status": "",
+            "pending_kind": "",
+            "pending_choice_count": 0,
+            "selected_subject_present": False,
+            "request_stack_count": 0,
+        }
+    pending = case.pending if isinstance(case.pending, dict) else {}
+    choices = pending.get("choices")
+    return {
+        "case_present": True,
+        "case_status": str(case.status or ""),
+        "pending_kind": str(pending.get("kind") or ""),
+        "pending_choice_count": len(choices) if isinstance(choices, list) else 0,
+        "selected_subject_present": bool(case.selected_subjects.get("order_id")),
+        "request_stack_count": len(case.request_stack) if isinstance(case.request_stack, list) else 0,
+    }
+
+
+def _log_support_trace(
+    support_event: str,
+    *,
+    case: SupportCase | None = None,
+    intent: Intent | None = None,
+    **fields: object,
+) -> None:
+    """Emit request-correlated Support control metadata without customer prose or IDs."""
+    extra: dict[str, object] = {"support_event": support_event, **_support_trace_fields(case)}
+    if intent is not None:
+        extra.update(
+            {
+                "intent_target": str(intent.target or ""),
+                "intent_domain": str(intent.domain or ""),
+                "intent_operation": str(intent.operation or ""),
+                "case_update": str(intent.case_update or ""),
+                "subject_relation": str(getattr(intent, "subject_relation", "unknown") or "unknown"),
+                "speech_act": str(getattr(intent, "speech_act", "") or ""),
+                "use_workflow": bool(intent.use_workflow),
+            }
+        )
+    extra.update({key: value for key, value in fields.items() if value is not None})
+    _chat_logger.info("support control trace", extra=extra)
 
 
 class ChatRequest(BaseModel):
@@ -452,6 +501,45 @@ def _customer_chat_capability_context(
     )
 
 
+def _support_product_subject_context(
+    entities: dict[str, Any],
+    messages: list[dict[str, object]] | None,
+) -> dict[str, str] | None:
+    """Project only immediate purchase continuity into Service semantics.
+
+    A selected product can remain in session state for later Ecommerce turns,
+    so its mere presence is too weak to influence an order/refund subject.
+    Cross-role continuity is exposed only when the immediately preceding
+    server trace was a Product purchase turn.  The canonical product id is
+    still dropped: Service must bind an authenticated order candidate before
+    reading or acting on order/refund state.
+    """
+    latest_assistant = next(
+        (
+            message
+            for message in reversed(messages or [])
+            if isinstance(message, dict) and message.get("role") == "assistant"
+        ),
+        None,
+    )
+    latest_trace = latest_assistant.get("_answer_trace") if isinstance(latest_assistant, dict) else None
+    if not (
+        isinstance(latest_trace, dict)
+        and latest_trace.get("domain") == "product"
+        and latest_trace.get("operation") == "purchase"
+    ):
+        return None
+    identity = stored_product_identity(entities)
+    if identity is None:
+        return None
+    payload = {
+        key: identity[key]
+        for key in ("product", "product_category", "component_category")
+        if isinstance(identity.get(key), str) and identity[key].strip()
+    }
+    return payload or None
+
+
 def _selected_product_operator_context(
     selected_product: dict[str, str] | None,
     entities: dict[str, Any],
@@ -523,6 +611,74 @@ def _support_case_payloads(intent: Intent) -> list[dict]:
     只会投影成只读 ``verification_requests``，不会获得任何写操作权限。
     """
     return [support_request.to_case_payload() for support_request in intent.workflow_requests]
+
+
+def _support_request_payloads(requests: Sequence[SupportRequest]) -> list[dict]:
+    """Serialize already validated Control Plane requests without re-routing them."""
+    return [support_request.to_case_payload() for support_request in requests]
+
+
+def _case_backed_subject_correction_requests(
+    case: SupportCase | None,
+    intent: Intent,
+) -> list[SupportRequest]:
+    """Restore an existing Case Goal for a subject correction statement.
+
+    A Router ``STATEMENT`` must never authorize a new write request.  During an
+    active server-owned customer-choice frame, however, the customer may correct
+    *which* order the already-authorized Case refers to (for example, switching
+    from one brand/order family to another).  In that narrow situation the
+    continuation authority comes from the persisted, revalidated ``request_stack``
+    rather than from the current utterance's speech act.
+
+    This helper does not bind a subject and does not manufacture a new Goal.  It
+    only returns the existing Case requests so the normal Workflow can perform a
+    fresh authenticated subject resolution.
+    """
+    if case is None or case.status != "AWAITING_CUSTOMER":
+        return []
+    if case.pending.get("kind") != "customer_choice":
+        return []
+    if intent.target not in {"", "agent"}:
+        return []
+    if intent.case_update != "continue" or intent.subject_relation != "changed":
+        return []
+    # If the current turn already carries an actionable/read-only workflow
+    # request, the Router path is sufficient and must remain authoritative.
+    if intent.workflow_requests:
+        return []
+
+    requests = IntentRouter.support_requests_from_case_payloads(case.request_stack)
+    if not requests:
+        return []
+    primary = requests[0]
+    # The Router still owns Goal semantics.  A case-backed correction is valid
+    # only when its coarse domain/operation agrees with the persisted Case.
+    if intent.domain != primary.domain or intent.operation != primary.operation:
+        return []
+    return requests
+
+
+async def _release_case_backed_subject_correction_choice(
+    request: Request,
+    *,
+    case: SupportCase | None,
+) -> SupportCase | None:
+    """Release only the stale choice question after a verified subject correction.
+
+    The Case Goal/request_stack remains intact.  This prevents the previous displayed
+    candidate frame from being reintroduced into Workflow case_context after the Router
+    has already classified the current turn as a subject change.
+    """
+    if case is None:
+        return None
+    service = getattr(request.app.state, "support_case_service", None)
+    if not isinstance(service, SupportCaseService):
+        return case
+    updated = await service.release_customer_choice_for_subject_change(case)
+    if updated is None:
+        raise HTTPException(status_code=409, detail="当前订单选择状态已变化，请重试。")
+    return updated
 
 
 def _recent_subject_router_context(case: SupportCase | None) -> str:
@@ -1170,6 +1326,7 @@ async def _workflow_subject_context_kwargs(
     recent_case: SupportCase | None,
     tool_context: ToolContext | None,
     structured_interaction: bool,
+    product_subject_context: dict[str, str] | None = None,
 ) -> dict[str, object]:
     """Build the one subject boundary shared by /chat and /chat/stream.
 
@@ -1186,7 +1343,12 @@ async def _workflow_subject_context_kwargs(
         recent_case=subject_context_case,
         tool_context=tool_context,
     )
-    return {"previous_subjects": previous_subjects} if previous_subjects is not None else {}
+    kwargs: dict[str, object] = {}
+    if previous_subjects is not None:
+        kwargs["previous_subjects"] = previous_subjects
+    if product_subject_context:
+        kwargs["product_subject_context"] = dict(product_subject_context)
+    return kwargs
 
 
 async def _allow_historical_subject_explanation(
@@ -1249,12 +1411,21 @@ def _is_pending_case_reply(case: SupportCase | None, intent: Intent, raw_query: 
         return False
     if case.pending.get("kind") == "customer_choice":
         choices = case.pending.get("choices", [])
-        # 已展示的候选拥有优先级：可唯一解析的选择，以及明显在回答选择的
-        # 未解析表达，都应回到原 Case，而不是被孤立路由成新业务请求。
-        if resolve_pending_subject_choice(raw_query, choices) is not None:
-            return True
-        if looks_like_pending_subject_choice(raw_query, choices):
-            return True
+        if isinstance(choices, list) and choices:
+            # Case continuity and pending-question continuity are separate.
+            # A persisted choice frame may consume only replies that actually
+            # reference its displayed candidates.  Router ``continue`` means
+            # the business task may continue; it is not evidence that this
+            # particular choice question was answered.  Frame-out corrections,
+            # side questions and explicit rejection therefore stay on the
+            # normal Router/Workflow path, where a fresh subject frame can be
+            # discovered without the stale choices owning the turn.
+            if resolve_pending_subject_choice(raw_query, choices) is not None:
+                return True
+            return looks_like_pending_subject_choice(raw_query, choices)
+        # Legacy Cases created before choice snapshots existed have no server-
+        # owned frame to validate against.  Preserve their old continuation
+        # behavior instead of changing compatibility semantics in this patch.
     if intent.case_update == "continue":
         return True
     normalized = re.sub(r"[\s，。！？、,.!?：:；;“”‘’\"'（）()【】\[\]]+", "", raw_query).lower()
@@ -1274,7 +1445,6 @@ def _is_pending_case_reply(case: SupportCase | None, intent: Intent, raw_query: 
         "第2个",
         "选第一个",
         "选第二个",
-        "都不要",
         "已经退了",
         "已退了",
         "还是不行",
@@ -1604,6 +1774,13 @@ async def _resolve_pending_order_choice(
         )
 
     narrowed = match_pending_subject_choices(raw_query, choices)
+    # An unresolved exclusion must never be handed to a semantic resolver with
+    # a re-numbered subset: “不要第一笔” could otherwise make “第一笔” refer to
+    # a different candidate after narrowing.  If exclusion does not already
+    # determine one remaining order above, fail closed and let the customer
+    # clarify rather than risk a wrong financial subject.
+    if has_pending_subject_exclusion(raw_query):
+        return "unknown", None, [], ""
     pool = narrowed or choices
     if len(pool) <= 1:
         return "unknown", None, [], ""
@@ -2021,6 +2198,7 @@ async def _await_support_case_customer(
     case: SupportCase | None,
     intent: Intent,
     workflow_progress: dict[str, object] | None = None,
+    workflow_requests: Sequence[SupportRequest] | None = None,
 ) -> SupportCase | None:
     """将复杂请求的下一轮语义显式保存，避免短回复退化为新问题。"""
     if case is None or case.status == "AWAITING_STAFF":
@@ -2028,13 +2206,13 @@ async def _await_support_case_customer(
     service = getattr(request.app.state, "support_case_service", None)
     if not isinstance(service, SupportCaseService):
         return case
-    requests = intent.workflow_requests
+    requests = list(workflow_requests) if workflow_requests is not None else intent.workflow_requests
     if not requests:
         return case
     primary = requests[0]
     execution_status = str((workflow_progress or {}).get("goal_status") or "")
     next_action = str((workflow_progress or {}).get("next_action") or "")
-    request_payloads = _support_case_payloads(intent)
+    request_payloads = _support_request_payloads(requests)
     requires_confirmation = confirmation_required(request_payloads)
     missing_facts = (workflow_progress or {}).get("missing_facts")
     pending = {
@@ -2107,6 +2285,7 @@ def _support_case_needs_customer_turn(
     intent: Intent,
     case: SupportCase | None = None,
     workflow_progress: dict[str, object] | None = None,
+    workflow_requests: Sequence[SupportRequest] | None = None,
 ) -> bool:
     """判断 Workflow 是否确实还需要客户选择/补充/确认。"""
     next_actor = str((workflow_progress or {}).get("next_actor") or "")
@@ -2124,7 +2303,7 @@ def _support_case_needs_customer_turn(
     if case is not None and case.pending:
         # 现有 pending 是案件状态，不会因用户提出另一件事而被覆盖或提前完成。
         return True
-    requests = intent.workflow_requests
+    requests = list(workflow_requests) if workflow_requests is not None else intent.workflow_requests
     if not requests:
         return False
     for item in requests:
@@ -2152,6 +2331,7 @@ async def _persist_support_case_progress(
     case: SupportCase | None,
     intent: Intent,
     loop_result: LoopResult,
+    workflow_requests: Sequence[SupportRequest] | None = None,
 ) -> SupportCase | None:
     """在记录事实后确定性地结束 Case，或保存下一轮待处理状态。"""
     case = await _record_support_case_facts(request, case=case, loop_result=loop_result)
@@ -2172,12 +2352,18 @@ async def _persist_support_case_progress(
         # boundary unresolved, finish the Case with a safe limitation instead
         # of persisting an artificial staff handoff.
         workflow_progress["next_actor"] = "NONE"
-    if _support_case_needs_customer_turn(intent, case, loop_result.workflow_progress):
+    if _support_case_needs_customer_turn(
+        intent,
+        case,
+        loop_result.workflow_progress,
+        workflow_requests=workflow_requests,
+    ):
         updated = await _await_support_case_customer(
             request,
             case=case,
             intent=intent,
             workflow_progress=loop_result.workflow_progress,
+            workflow_requests=workflow_requests,
         )
         return updated or case
     service = getattr(request.app.state, "support_case_service", None)
@@ -2193,7 +2379,9 @@ async def _persist_support_case_progress(
                     else "read_only_answer_returned"
                 ),
                 "resolution_type": resolution_type or None,
-                "request_count": len(intent.workflow_requests),
+                "request_count": len(
+                    list(workflow_requests) if workflow_requests is not None else intent.workflow_requests
+                ),
                 "execution": loop_result.workflow_progress,
             },
         )
@@ -3294,6 +3482,27 @@ async def chat(chat_req: ChatRequest, request: Request):
                         raw_query=chat_req.query,
                         tool_context=tool_context,
                     )
+        case_backed_correction_requests = _case_backed_subject_correction_requests(
+            active_support_case,
+            intent,
+        )
+        if case_backed_correction_requests:
+            active_support_case = await _release_case_backed_subject_correction_choice(
+                request,
+                case=active_support_case,
+            )
+            recent_support_case = active_support_case
+        effective_support_requests = case_backed_correction_requests or intent.workflow_requests
+        use_support_workflow = intent.use_workflow or bool(case_backed_correction_requests)
+        _log_support_trace(
+            "route_decision",
+            case=active_support_case,
+            intent=intent,
+            resume_pending=resuming_support_case,
+            effective_use_workflow=use_support_workflow,
+            workflow_authority=("case_request_stack" if case_backed_correction_requests else "router"),
+            effective_request_count=len(effective_support_requests),
+        )
         retrieval_query = getattr(intent, "retrieval_query", "") or getattr(intent, "query", "") or resolved_query
         semantic_hints = _semantic_hint_payload(
             resolved_query=resolved_query,
@@ -3512,11 +3721,11 @@ async def chat(chat_req: ChatRequest, request: Request):
                 total_steps=len(plan_state.get("plan", [])),
                 total_tokens=plan_state.get("total_tokens", 0),
             )
-        elif intent.use_workflow:
+        elif use_support_workflow:
             support_workflow = request.app.state.support_workflow_agent
             support_case = (
                 active_support_case
-                if resuming_support_case
+                if (resuming_support_case or case_backed_correction_requests)
                 else await _open_support_case(
                     request,
                     intent=intent,
@@ -3546,6 +3755,10 @@ async def chat(chat_req: ChatRequest, request: Request):
                 recent_case=recent_support_case,
                 tool_context=tool_context,
                 structured_interaction=chat_req.interaction is not None,
+                product_subject_context=_support_product_subject_context(
+                    ctx.last_entities,
+                    ctx.messages,
+                ),
             )
             # Compatibility/trace field only; OrderSubjectResolver does not
             # consume Router same/changed semantics.
@@ -3568,7 +3781,7 @@ async def chat(chat_req: ChatRequest, request: Request):
                     history=ctx.history,
                     system_prompt_extra=agent_prompt_extra,
                     case_context=case_context,
-                    support_requests=_support_case_payloads(intent),
+                    support_requests=_support_request_payloads(effective_support_requests),
                     tool_context=operator_tool_context,
                     **workflow_kwargs,
                 )
@@ -3580,6 +3793,16 @@ async def chat(chat_req: ChatRequest, request: Request):
                 case=support_case,
                 intent=intent,
                 loop_result=loop_result,
+                workflow_requests=effective_support_requests,
+            )
+            _log_support_trace(
+                "workflow_outcome",
+                case=response_case or support_case,
+                intent=intent,
+                goal_status=str(loop_result.workflow_progress.get("goal_status") or ""),
+                next_action=str(loop_result.workflow_progress.get("next_action") or ""),
+                next_actor=str(loop_result.workflow_progress.get("next_actor") or ""),
+                resolution_type=str(loop_result.workflow_progress.get("resolution_type") or ""),
             )
         elif intent.target == "rag":
             if catalog_acquired and (intent.domain == "product" or intent.product_category):
@@ -3868,6 +4091,27 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                         raw_query=chat_req.query,
                         tool_context=tool_context,
                     )
+        case_backed_correction_requests = _case_backed_subject_correction_requests(
+            active_support_case,
+            intent,
+        )
+        if case_backed_correction_requests:
+            active_support_case = await _release_case_backed_subject_correction_choice(
+                request,
+                case=active_support_case,
+            )
+            recent_support_case = active_support_case
+        effective_support_requests = case_backed_correction_requests or intent.workflow_requests
+        use_support_workflow = intent.use_workflow or bool(case_backed_correction_requests)
+        _log_support_trace(
+            "route_decision",
+            case=active_support_case,
+            intent=intent,
+            resume_pending=resuming_support_case,
+            effective_use_workflow=use_support_workflow,
+            workflow_authority=("case_request_stack" if case_backed_correction_requests else "router"),
+            effective_request_count=len(effective_support_requests),
+        )
         retrieval_query = getattr(intent, "retrieval_query", "") or getattr(intent, "query", "") or resolve_query
         semantic_hints = _semantic_hint_payload(
             resolved_query=resolve_query,
@@ -4151,7 +4395,7 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                 yield f"data: {json.dumps(done_event, ensure_ascii=False)}\n\n"
                 return
 
-            if intent.use_workflow:
+            if use_support_workflow:
                 if not await _is_current_chat_run(session_id, chat_run_id):
                     yield f"data: {json.dumps(_superseded_stream_event(request), ensure_ascii=False)}\n\n"
                     return
@@ -4160,7 +4404,7 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                 support_workflow = request.app.state.support_workflow_agent
                 support_case = (
                     active_support_case
-                    if resuming_support_case
+                    if (resuming_support_case or case_backed_correction_requests)
                     else await _open_support_case(
                         request,
                         intent=intent,
@@ -4190,6 +4434,10 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                     recent_case=recent_support_case,
                     tool_context=tool_context,
                     structured_interaction=chat_req.interaction is not None,
+                    product_subject_context=_support_product_subject_context(
+                        session_ctx.last_entities,
+                        session_ctx.messages,
+                    ),
                 )
                 # Compatibility/trace field only; OrderSubjectResolver does not
                 # consume Router same/changed semantics.
@@ -4212,7 +4460,7 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                         history=history,
                         system_prompt_extra=extra_prompt,
                         case_context=case_context,
-                        support_requests=_support_case_payloads(intent),
+                        support_requests=_support_request_payloads(effective_support_requests),
                         tool_context=operator_tool_context,
                         **workflow_kwargs,
                     )
@@ -4228,6 +4476,16 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                     case=support_case,
                     intent=intent,
                     loop_result=workflow_result,
+                    workflow_requests=effective_support_requests,
+                )
+                _log_support_trace(
+                    "workflow_outcome",
+                    case=response_case or support_case,
+                    intent=intent,
+                    goal_status=str(workflow_result.workflow_progress.get("goal_status") or ""),
+                    next_action=str(workflow_result.workflow_progress.get("next_action") or ""),
+                    next_actor=str(workflow_result.workflow_progress.get("next_actor") or ""),
+                    resolution_type=str(workflow_result.workflow_progress.get("resolution_type") or ""),
                 )
                 answer = workflow_result.answer
                 if tool_context.role == "customer":

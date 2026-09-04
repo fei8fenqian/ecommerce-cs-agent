@@ -196,12 +196,8 @@ def test_operator_subject_identity_uses_canonical_checkout_line_metadata():
         },
     ]
 
-    assert [choice["order_id"] for choice in match_subject_identity_choices("我想退款刚买的ssd", choices)] == [
-        "SO-SSD"
-    ]
-    assert [choice["order_id"] for choice in match_subject_identity_choices("我想把内存退了", choices)] == [
-        "SO-RAM"
-    ]
+    assert [choice["order_id"] for choice in match_subject_identity_choices("我想退款刚买的ssd", choices)] == ["SO-SSD"]
+    assert [choice["order_id"] for choice in match_subject_identity_choices("我想把内存退了", choices)] == ["SO-RAM"]
 
 
 def test_subject_identity_uses_top_level_catalog_category_alias_when_present():
@@ -221,8 +217,7 @@ def test_pending_order_choices_keeps_all_bounded_order_candidates():
             "status": "success",
             "data": {
                 "orders": [
-                    {"order_id": f"SO-{index}", "items": [{"product_name": f"商品{index}"}]}
-                    for index in range(1, 5)
+                    {"order_id": f"SO-{index}", "items": [{"product_name": f"商品{index}"}]} for index in range(1, 5)
                 ]
             },
         }
@@ -372,9 +367,7 @@ async def test_unknown_semantic_resolution_keeps_deterministically_narrowed_choi
 @pytest.mark.asyncio
 async def test_explicit_recency_can_resolve_within_identity_matched_subset():
     agent = _FakeAgent()
-    resolver = _SubjectResolverLLM(
-        '{"status":"resolved","selected_ref":"order_candidate_1","ambiguous_refs":[]}'
-    )
+    resolver = _SubjectResolverLLM('{"status":"resolved","selected_ref":"order_candidate_1","ambiguous_refs":[]}')
     agent.llm = resolver
     workflow = SupportWorkflowAgent(agent)
     result = LoopResult(
@@ -430,6 +423,116 @@ async def test_explicit_recency_can_resolve_within_identity_matched_subset():
     assert updated["selected_subjects"] == {"order_id": "SO-KC"}
     assert updated["subject_resolution_status"] == "resolved"
     assert resolver.calls
+
+
+@pytest.mark.asyncio
+async def test_cross_role_product_context_keeps_full_frame_for_multi_goal_refund_resolution():
+    agent = _FakeAgent()
+    resolver = _SubjectResolverLLM('{"status":"resolved","selected_ref":"order_candidate_1","ambiguous_refs":[]}')
+    agent.llm = resolver
+    workflow = SupportWorkflowAgent(agent)
+    result = LoopResult(
+        answer="已查询订单",
+        verified_facts={
+            "track_order": {
+                "status": "success",
+                "data": {
+                    "count": 3,
+                    "multiple_results": True,
+                    "orders": [
+                        {
+                            "order_id": "SO-HW",
+                            "status": "PAID",
+                            "items": [{"product_name": "HUAWEI Pura 80 Pro"}],
+                        },
+                        {
+                            "order_id": "SO-IP-1",
+                            "status": "PAID",
+                            "items": [{"product_name": "Apple iPhone Air 1TB"}],
+                        },
+                        {
+                            "order_id": "SO-IP-2",
+                            "status": "PAID",
+                            "items": [{"product_name": "Apple iPhone Air 512GB"}],
+                        },
+                    ],
+                },
+            }
+        },
+    )
+
+    updated = await workflow._absorb_observation(
+        {
+            "query": "我想退款了，我之后还想买 iPhone",
+            "support_requests": [{"domain": "refund", "operation": "request"}],
+            "product_subject_context": {
+                "product": "HUAWEI Pura 80 Pro",
+                "product_category": "phones",
+            },
+            "result": result,
+            "verified_facts": {},
+            "decision_facts": {},
+            "decision_contexts": [],
+            "selected_subjects": {},
+            "operator_observations": [],
+            "already_attempted_tools": [],
+        }
+    )
+
+    assert updated["selected_subjects"] == {"order_id": "SO-HW"}
+    assert updated["subject_resolution_status"] == "resolved"
+    assert resolver.calls
+
+
+@pytest.mark.asyncio
+async def test_ordinary_ambiguous_iphone_does_not_regress_to_unrelated_order_without_cross_role_context():
+    agent = _FakeAgent()
+    resolver = _SubjectResolverLLM(
+        '{"status":"ambiguous","selected_ref":"","ambiguous_refs":["order_candidate_1","order_candidate_2"]}'
+    )
+    agent.llm = resolver
+    workflow = SupportWorkflowAgent(agent)
+    choices = [
+        {"order_id": "SO-HW", "product_name": "HUAWEI Pura 80 Pro"},
+        {"order_id": "SO-IP-1", "product_name": "Apple iPhone Air 1TB"},
+        {"order_id": "SO-IP-2", "product_name": "Apple iPhone Air 512GB"},
+    ]
+
+    resolved_id, status, narrowed = await workflow._resolve_order_choices(
+        {
+            "query": "我想退 iPhone",
+            "support_requests": [{"domain": "refund", "operation": "request"}],
+        },
+        choices,
+    )
+
+    assert resolved_id == ""
+    assert status == "ambiguous"
+    assert [item["order_id"] for item in narrowed] == ["SO-IP-1", "SO-IP-2"]
+
+
+@pytest.mark.asyncio
+async def test_explicit_unique_service_identity_still_wins_before_cross_role_context():
+    agent = _FakeAgent()
+    resolver = _SubjectResolverLLM('{"status":"unknown","selected_ref":"","ambiguous_refs":[]}')
+    agent.llm = resolver
+    workflow = SupportWorkflowAgent(agent)
+    choices = [
+        {"order_id": "SO-HW", "product_name": "HUAWEI Pura 80 Pro"},
+        {"order_id": "SO-IP", "product_name": "Apple iPhone 16"},
+    ]
+
+    resolved_id, status, narrowed = await workflow._resolve_order_choices(
+        {
+            "query": "我想把 iPhone 16 退了",
+            "support_requests": [{"domain": "refund", "operation": "request"}],
+            "product_subject_context": {"product": "HUAWEI Pura 80 Pro", "product_category": "phones"},
+        },
+        choices,
+    )
+
+    assert (resolved_id, status, narrowed) == ("SO-IP", "resolved", [])
+    assert resolver.calls == []
 
 
 @pytest.mark.asyncio
@@ -1586,6 +1689,7 @@ def test_support_workflow_enters_confirmation_after_readiness_not_completion():
     assert result["reason"] == "capability_unavailable"
     assert result["readiness_satisfied"] is True
 
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "query",
@@ -1598,9 +1702,7 @@ def test_support_workflow_enters_confirmation_after_readiness_not_completion():
 )
 async def test_changed_subject_excludes_previous_verified_order_before_resolution(query):
     agent = _FakeAgent()
-    agent.llm = _SubjectResolverLLM(
-        '{"status":"resolved","selected_ref":"order_candidate_2","ambiguous_refs":[]}'
-    )
+    agent.llm = _SubjectResolverLLM('{"status":"resolved","selected_ref":"order_candidate_2","ambiguous_refs":[]}')
     workflow = SupportWorkflowAgent(agent)
     result = LoopResult(
         answer="已查询订单",
@@ -1779,6 +1881,7 @@ async def test_changed_subject_exclusion_does_not_promote_unrelated_only_alterna
 
     assert updated.get("selected_subjects", {}) == {}
     assert updated["subject_resolution_status"] == "unknown"
+
 
 @pytest.mark.asyncio
 async def test_structured_selected_subject_not_found_refund_status_recovers_eligibility_and_entry():

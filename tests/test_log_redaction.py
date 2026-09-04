@@ -193,3 +193,25 @@ async def test_context_fields_are_preserved_and_not_redacted():
     assert get_request_id() == "-"
     assert get_trace_id() == "-"
     assert get_span_id() == "-"
+
+
+def test_support_control_trace_metadata_remains_structured_without_customer_content():
+    payload = format_record(
+        "support control trace",
+        {
+            "support_event": "route_decision",
+            "case_status": "AWAITING_CUSTOMER",
+            "pending_kind": "customer_choice",
+            "pending_choice_count": 3,
+            "resume_pending": False,
+            "intent_domain": "refund",
+            "intent_operation": "status",
+        },
+    )
+
+    extra = payload["extra"]
+    assert extra["support_event"] == "route_decision"
+    assert extra["pending_choice_count"] == 3
+    assert extra["resume_pending"] is False
+    assert "query" not in extra
+    assert "order_id" not in extra

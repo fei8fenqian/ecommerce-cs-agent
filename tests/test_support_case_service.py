@@ -241,6 +241,44 @@ async def test_supersede_retires_disputed_subject_and_transaction_facts(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_release_customer_choice_for_subject_change_preserves_goal_and_clears_only_pending(monkeypatch):
+    captured: dict = {}
+
+    async def replace(case, **kwargs):
+        captured.update(kwargs)
+        return case
+
+    monkeypatch.setattr("service.support_case_service.replace_case", replace)
+    case = SupportCase(
+        **{
+            **_case(status="AWAITING_CUSTOMER").__dict__,
+            "request_stack": [{"domain": "refund", "operation": "request"}],
+            "pending": {
+                "kind": "customer_choice",
+                "choices": [
+                    {"order_id": "SO-1", "product_name": "Huawei"},
+                    {"order_id": "SO-2", "product_name": "Huawei"},
+                ],
+            },
+        }
+    )
+
+    result = await SupportCaseService().release_customer_choice_for_subject_change(case)
+
+    assert result == case
+    assert captured["status"] == "ACTIVE"
+    assert captured["pending"] == {}
+    assert captured["pending_command"] == {}
+    assert captured["request_stack"] == case.request_stack
+    assert captured["selected_subjects"] == case.selected_subjects
+    assert captured["verified_facts"] == case.verified_facts
+    assert captured["event_type"] == "CUSTOMER_RESPONSE"
+    assert captured["event_payload"]["reason"] == "SUBJECT_CHANGED"
+    assert captured["event_payload"]["choice_count"] == 2
+    assert captured["event_payload"]["request_stack_preserved"] is True
+
+
+@pytest.mark.asyncio
 async def test_select_customer_subject_persists_choice_and_clears_pending(monkeypatch):
     captured: dict = {}
 

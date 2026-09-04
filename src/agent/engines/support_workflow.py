@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import replace
 from typing import Any, TypedDict
@@ -29,6 +30,28 @@ from agent.support_subjects import match_subject_identity_choices
 from agent.tools_registry import ToolContext, ToolRegistry
 from service.checkout_refund_service import generate_customer_refund_entry
 
+_workflow_logger = logging.getLogger(__name__)
+
+
+def _log_order_subject_result(
+    *,
+    status: str,
+    candidate_count: int,
+    ambiguous_count: int = 0,
+    resolved_subject: bool = False,
+) -> None:
+    """Log subject-resolution shape only; never log customer prose or order IDs."""
+    _workflow_logger.info(
+        "support order subject trace",
+        extra={
+            "support_event": "order_subject_resolution",
+            "subject_status": status,
+            "candidate_count": candidate_count,
+            "ambiguous_count": ambiguous_count,
+            "resolved_subject": resolved_subject,
+        },
+    )
+
 
 class SupportWorkflowState(TypedDict, total=False):
     query: str
@@ -49,6 +72,7 @@ class SupportWorkflowState(TypedDict, total=False):
     replan_count: int
     selected_subjects: dict[str, Any]
     previous_subjects: dict[str, Any]
+    product_subject_context: dict[str, Any]
     subject_relation: str
     verified_facts: dict[str, Any]
     decision_facts: dict[str, Any]
@@ -144,6 +168,18 @@ class SupportWorkflowAgent:
         plan, required_facts, completion_facts = build_execution_plan(requests)
         plan_validation = validate_execution_plan(state.get("support_requests", []), plan)
         envelope = build_policy_envelope(requests)
+        _workflow_logger.info(
+            "support workflow plan trace",
+            extra={
+                "support_event": "workflow_plan",
+                "support_request_count": len(requests),
+                "execution_plan_count": len(plan),
+                "planned_tools": [
+                    str(step.get("tool") or "") for step in plan if isinstance(step, dict) and step.get("tool")
+                ],
+                "unsupported_workflow_count": len(envelope.unsupported_workflows),
+            },
+        )
         plan_prompt = ""
         if plan or envelope.unsupported_workflows:
             plan_prompt = (
@@ -245,6 +281,16 @@ class SupportWorkflowAgent:
             ):
                 requested_tools.append(name)
 
+        _workflow_logger.info(
+            "support workflow read plan trace",
+            extra={
+                "support_event": "workflow_read_plan",
+                "requested_tools": list(requested_tools),
+                "registry_present": self.registry is not None,
+                "tool_context_present": state.get("tool_context") is not None,
+            },
+        )
+
         facts: dict[str, Any] = dict(state.get("verified_facts", {}))
         decision_facts: dict[str, Any] = dict(state.get("decision_facts", {}))
         decision_contexts = merge_decision_contexts(state.get("decision_contexts", []))
@@ -267,7 +313,9 @@ class SupportWorkflowAgent:
             )
         skip_paid_refund_reads = False
 
-        def absorb_tool_result(name: str, result: Any, *, requested_order_id: str | None = None) -> dict[str, Any] | None:
+        def absorb_tool_result(
+            name: str, result: Any, *, requested_order_id: str | None = None
+        ) -> dict[str, Any] | None:
             nonlocal decision_contexts
             if not result.is_success:
                 facts[name] = {"status": "error", "error": str(result.error or "")[:300]}
@@ -312,6 +360,18 @@ class SupportWorkflowAgent:
             if name not in attempted:
                 attempted.append(name)
             bounded = absorb_tool_result(name, result, requested_order_id=requested_order_id)
+            _workflow_logger.info(
+                "support workflow read result trace",
+                extra={
+                    "support_event": "workflow_read_result",
+                    "tool": name,
+                    "status": str(result.status or ""),
+                    "requested_subject_present": bool(requested_order_id),
+                    "candidate_count": (
+                        len(self._pending_order_choices(facts)) if name == "track_order" and bounded is not None else 0
+                    ),
+                },
+            )
             if bounded is None:
                 continue
 
@@ -329,6 +389,12 @@ class SupportWorkflowAgent:
 
                 if not selected_order_id and choices:
                     resolved_id, resolved_status, resolved_choices = await self._resolve_order_choices(state, choices)
+                    _log_order_subject_result(
+                        status=resolved_status or "unknown",
+                        candidate_count=len(choices),
+                        ambiguous_count=len(resolved_choices),
+                        resolved_subject=bool(resolved_id),
+                    )
                     resolution_attempted = True
                     resolution_status = resolved_status
                     narrowed_choices = resolved_choices
@@ -361,14 +427,11 @@ class SupportWorkflowAgent:
                         if candidate_context:
                             decision_contexts = merge_decision_contexts(decision_contexts, [candidate_context])
 
-                if (
-                    decision_facts.get("order_status") == "PENDING_PAYMENT"
-                    and any(
-                        str(item.get("domain") or "") == "refund"
-                        and str(item.get("operation") or "") in {"request", "eligibility"}
-                        for item in state.get("support_requests", [])
-                        if isinstance(item, dict)
-                    )
+                if decision_facts.get("order_status") == "PENDING_PAYMENT" and any(
+                    str(item.get("domain") or "") == "refund"
+                    and str(item.get("operation") or "") in {"request", "eligibility"}
+                    for item in state.get("support_requests", [])
+                    if isinstance(item, dict)
                 ):
                     skip_paid_refund_reads = True
 
@@ -548,6 +611,9 @@ class SupportWorkflowAgent:
 
         query = str(state.get("query", ""))
         previous_order_id = self._selected_order_id(state.get("previous_subjects"))
+        product_subject_context = state.get("product_subject_context")
+        if not isinstance(product_subject_context, dict):
+            product_subject_context = {}
         matches = match_subject_identity_choices(query, choices)
         # With no previous subject, a unique identity match is already a
         # deterministic proof.  With a previous subject, however, expressions
@@ -559,7 +625,26 @@ class SupportWorkflowAgent:
             if isinstance(candidate_id, str) and candidate_id.startswith("SO"):
                 return candidate_id, "resolved", []
 
-        resolution_pool = choices if previous_order_id else (matches if len(matches) > 1 else choices)
+        # Preserve the existing narrow lexical frame for ordinary service
+        # turns.  Only the documented Ecommerce -> Service handoff needs the
+        # complete authenticated frame: a secondary goal in the same utterance
+        # may otherwise cause lexical matching to remove the order that the
+        # recent canonical product context is helping the Resolver interpret.
+        # The product context is never itself an order binding.
+        resolution_pool = (
+            choices if previous_order_id or product_subject_context else (matches if len(matches) > 1 else choices)
+        )
+        _workflow_logger.info(
+            "support order subject input trace",
+            extra={
+                "support_event": "order_subject_input",
+                "candidate_count": len(choices),
+                "identity_match_count": len(matches),
+                "resolution_pool_count": len(resolution_pool),
+                "previous_subject_present": bool(previous_order_id),
+                "product_context_present": bool(product_subject_context),
+            },
+        )
         previous_ref = next(
             (
                 f"order_candidate_{index}"
@@ -575,11 +660,11 @@ class SupportWorkflowAgent:
                 query,
                 resolution_pool,
                 previous_subject_ref=previous_ref,
+                recent_product_context=product_subject_context,
             )
             if resolution.status == "resolved":
                 ref_to_choice = {
-                    f"order_candidate_{index}": candidate
-                    for index, candidate in enumerate(resolution_pool, start=1)
+                    f"order_candidate_{index}": candidate for index, candidate in enumerate(resolution_pool, start=1)
                 }
                 candidate = ref_to_choice.get(resolution.selected_ref)
                 candidate_id = candidate.get("order_id") if isinstance(candidate, dict) else None
@@ -612,11 +697,7 @@ class SupportWorkflowAgent:
         # is safer than silently sticking to the previous order.
         if len(matches) == 1 and previous_order_id:
             candidate_id = matches[0].get("order_id")
-            if (
-                isinstance(candidate_id, str)
-                and candidate_id.startswith("SO")
-                and candidate_id != previous_order_id
-            ):
+            if isinstance(candidate_id, str) and candidate_id.startswith("SO") and candidate_id != previous_order_id:
                 return candidate_id, "resolved", []
         # Test doubles and degraded environments may not provide an LLM.  A
         # sole authenticated order is then the only safe fallback; with a real
@@ -666,8 +747,7 @@ class SupportWorkflowAgent:
             previous_result = state.get("result")
             previous_progress = (
                 previous_result.workflow_progress
-                if isinstance(previous_result, LoopResult)
-                and isinstance(previous_result.workflow_progress, dict)
+                if isinstance(previous_result, LoopResult) and isinstance(previous_result.workflow_progress, dict)
                 else {}
             )
             operator_state = {
@@ -686,9 +766,7 @@ class SupportWorkflowAgent:
             )
         if isinstance(agent_tool_context, ToolContext):
             envelope_tools = {
-                str(name)
-                for name in state.get("policy_envelope", {}).get("allowed_tools", [])
-                if isinstance(name, str)
+                str(name) for name in state.get("policy_envelope", {}).get("allowed_tools", []) if isinstance(name, str)
             }
             # A customer support Workflow never expands the caller's global
             # capability set.  The envelope only narrows the already authorised
@@ -805,6 +883,12 @@ class SupportWorkflowAgent:
         order_id = self._selected_order_id(selected)
         if not order_id and choices and not state.get("subject_resolution_attempted"):
             resolved_id, resolved_status, resolved_choices = await self._resolve_order_choices(state, choices)
+            _log_order_subject_result(
+                status=resolved_status or "unknown",
+                candidate_count=len(choices),
+                ambiguous_count=len(resolved_choices),
+                resolved_subject=bool(resolved_id),
+            )
             resolution_status = resolved_status
             narrowed_choices = resolved_choices
             if resolved_id:
@@ -911,9 +995,7 @@ class SupportWorkflowAgent:
             return None
         attempted = {str(name) for name in state.get("already_attempted_tools", [])}
         allowed = {
-            str(name)
-            for name in state.get("policy_envelope", {}).get("allowed_tools", [])
-            if isinstance(name, str)
+            str(name) for name in state.get("policy_envelope", {}).get("allowed_tools", []) if isinstance(name, str)
         }
         decision_facts = progress.get("decision_facts")
         if not isinstance(decision_facts, dict):
@@ -925,11 +1007,7 @@ class SupportWorkflowAgent:
             # subject precondition for a bounded read without fabricating a
             # transaction fact such as status or amount.
             effective_facts.setdefault("order_identified", True)
-        missing_facts = {
-            str(fact)
-            for fact in progress.get("missing_facts", [])
-            if isinstance(fact, str)
-        }
+        missing_facts = {str(fact) for fact in progress.get("missing_facts", []) if isinstance(fact, str)}
         if progress.get("reason") == "needs_subject_discovery":
             # A subject-sensitive tool may have been proposed before the
             # Operator discovered a customer-owned order.  Discovery is the
@@ -1266,14 +1344,9 @@ class SupportWorkflowAgent:
         explicit_order_id = SupportWorkflowAgent._explicit_order_id(state.get("query", ""))
         explicit_order_lookup_failed = bool(explicit_order_id and facts.get("track_order", {}).get("status") == "error")
         subject_binding_failed = any(
-            isinstance(item, dict)
-            and item.get("status") == "error"
-            and item.get("error") == "subject_not_bound"
+            isinstance(item, dict) and item.get("status") == "error" and item.get("error") == "subject_not_bound"
             for item in facts.values()
-        ) or any(
-            "subject_not_bound" in str(step.observation or "")
-            for step in result.steps
-        )
+        ) or any("subject_not_bound" in str(step.observation or "") for step in result.steps)
         actions_taken = ["read_fact:" + tool for tool in successful_tools]
         actions_taken.extend("tool:" + tool for tool in observed_successes | observed_failures)
 
@@ -1568,6 +1641,7 @@ class SupportWorkflowAgent:
         support_requests: list[dict[str, Any]] | None = None,
         selected_subjects: dict[str, Any] | None = None,
         previous_subjects: dict[str, Any] | None = None,
+        product_subject_context: dict[str, Any] | None = None,
         subject_relation: str = "unknown",
         tool_context: ToolContext | None = None,
         historical_contexts: list[dict[str, Any]] | None = None,
@@ -1594,6 +1668,7 @@ class SupportWorkflowAgent:
             "support_requests": support_requests or [],
             "selected_subjects": selected_subjects or {},
             "previous_subjects": previous_subjects or {},
+            "product_subject_context": product_subject_context or {},
             "subject_relation": subject_relation if subject_relation in {"same", "changed", "unknown"} else "unknown",
             "tool_context": tool_context,
             "historical_contexts": historical_contexts or [],

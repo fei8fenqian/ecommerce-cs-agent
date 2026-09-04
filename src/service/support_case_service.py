@@ -168,6 +168,33 @@ class SupportCaseService:
             },
         )
 
+    async def release_customer_choice_for_subject_change(self, case: SupportCase) -> SupportCase | None:
+        """Retire an obsolete customer-choice frame while preserving the Case Goal.
+
+        A Router-classified subject correction means the displayed choice frame no longer
+        owns the turn.  The persisted request_stack remains authoritative for the business
+        Goal, while the next Workflow pass must rediscover the current authenticated
+        subject from fresh order facts.  No subject is selected here and no transaction
+        fact is reused as current truth.
+        """
+        if case.status != "AWAITING_CUSTOMER" or case.pending.get("kind") != "customer_choice":
+            return case
+        choices = case.pending.get("choices")
+        choice_count = len(choices) if isinstance(choices, list) else 0
+        return await self._replace(
+            case,
+            status="ACTIVE",
+            pending={},
+            pending_command={},
+            event_type="CUSTOMER_RESPONSE",
+            event_payload={
+                "pending_kind": "customer_choice",
+                "reason": "SUBJECT_CHANGED",
+                "choice_count": choice_count,
+                "request_stack_preserved": True,
+            },
+        )
+
     async def select_customer_subject(
         self,
         case: SupportCase,

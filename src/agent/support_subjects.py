@@ -293,6 +293,16 @@ def looks_like_pending_subject_choice(raw_query: str, choices: object) -> bool:
     return bool(_matching_choices(raw_query, valid))
 
 
+def has_pending_subject_exclusion(raw_query: str) -> bool:
+    """Whether a displayed-choice reply contains exclusion/correction grammar.
+
+    Keep this grammar centralized with the deterministic choice parser so API
+    orchestration never has to duplicate phrase lists.
+    """
+    query = _normalize(raw_query)
+    return any(marker in query for marker in _SUBJECT_IDENTITY_EXCLUSION_MARKERS)
+
+
 def resolve_pending_subject_choice(
     raw_query: str,
     choices: object,
@@ -306,6 +316,28 @@ def resolve_pending_subject_choice(
     if not valid:
         return None
     query = _normalize(raw_query)
+
+    # 否定/排除必须先于任何正向 selector。否则“不要第一笔”会因为末尾
+    # 的“第一笔”被误执行成选择第一笔，这是 customer-choice 的安全边界。
+    if has_pending_subject_exclusion(raw_query):
+        excluded: list[dict[str, Any]] = []
+        exact = [choice for choice in valid if _order_id(choice).lower() in query]
+        if exact:
+            excluded = exact
+        else:
+            ordinal_match = re.search(r"(?:选)?第([一二两三123])(?:个|笔|单|件)?$", query)
+            if ordinal_match:
+                index = _ORDINALS.get(ordinal_match.group(1))
+                if index is not None and index <= len(valid):
+                    excluded = [valid[index - 1]]
+            if not excluded:
+                excluded = _matching_choices(raw_query, valid)
+        if len(excluded) == 1:
+            excluded_id = _order_id(excluded[0])
+            remaining = [choice for choice in valid if _order_id(choice) != excluded_id]
+            if len(remaining) == 1:
+                return {"choice": remaining[0], "selection_source": "exclusion"}
+        return None
 
     # 显式订单号优先级最高；订单号来自本轮服务端展示的候选集合。
     exact = [choice for choice in valid if _order_id(choice).lower() in query]
@@ -321,15 +353,7 @@ def resolve_pending_subject_choice(
             return {"choice": valid[index - 1], "selection_source": "ordinal"}
         return None
 
-    # 排除语义只在被排除对象唯一匹配且剩余候选唯一时成立。
-    exclusion = any(marker in query for marker in ("不是", "不要", "排除", "除了"))
     matches = _matching_choices(raw_query, valid)
-    if exclusion and len(matches) == 1:
-        remaining = [choice for choice in valid if _order_id(choice) != _order_id(matches[0])]
-        if len(remaining) == 1:
-            return {"choice": remaining[0], "selection_source": "exclusion"}
-        return None
-
     if len(matches) == 1:
         return {"choice": matches[0], "selection_source": "product"}
     if len(matches) > 1:

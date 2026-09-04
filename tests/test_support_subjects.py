@@ -54,6 +54,31 @@ def test_pending_choice_exclusion_selects_remaining_order():
     assert result["selection_source"] == "exclusion"
 
 
+def test_pending_choice_exclusion_precedes_ordinal_and_exact_selectors():
+    # Negation is a safety boundary: a selector inside an exclusion clause must
+    # never be executed as a positive choice.
+    ordinal = resolve_pending_subject_choice("不要第一笔", CHOICES)
+    exact = resolve_pending_subject_choice("不是 SOREAL_A6", CHOICES)
+
+    assert ordinal is not None
+    assert ordinal["choice"]["order_id"] == "SOREAL_A7"
+    assert ordinal["selection_source"] == "exclusion"
+    assert exact is not None
+    assert exact["choice"]["order_id"] == "SOREAL_A7"
+    assert exact["selection_source"] == "exclusion"
+
+
+def test_pending_choice_exclusion_with_multiple_remaining_never_guesses():
+    choices = [
+        {"order_id": "SO-1", "product_name": "HUAWEI Pura X"},
+        {"order_id": "SO-2", "product_name": "HUAWEI Pura 80 Pro"},
+        {"order_id": "SO-3", "product_name": "HUAWEI Mate 70"},
+    ]
+
+    assert resolve_pending_subject_choice("不是第一个", choices) is None
+    assert resolve_pending_subject_choice("不要第一笔", choices) is None
+
+
 def test_pending_choice_ambiguous_or_unknown_does_not_guess():
     assert resolve_pending_subject_choice("那个", CHOICES) is None
     assert resolve_pending_subject_choice("第三个", CHOICES) is None
@@ -95,9 +120,7 @@ def test_catalog_brand_identity_normalization_is_candidate_scoped_and_cross_lang
         {"order_id": "SO-SO", "product_name": "Sony WH-1000XM6"},
     ]
 
-    assert [item["order_id"] for item in match_subject_identity_choices("我问的是华为手机", choices)] == [
-        "SO-HW"
-    ]
+    assert [item["order_id"] for item in match_subject_identity_choices("我问的是华为手机", choices)] == ["SO-HW"]
     assert [item["order_id"] for item in match_subject_identity_choices("苹果那台", choices)] == ["SO-AP"]
     assert [item["order_id"] for item in match_subject_identity_choices("索尼耳机", choices)] == ["SO-SO"]
 

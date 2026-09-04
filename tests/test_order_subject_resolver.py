@@ -47,8 +47,7 @@ async def test_resolver_rejects_unknown_refs():
 @pytest.mark.asyncio
 async def test_resolver_preserves_narrow_ambiguity():
     llm = _ResolverLLM(
-        '{"status":"ambiguous","selected_ref":"","ambiguous_refs":['
-        '"order_candidate_1","order_candidate_2"]}'
+        '{"status":"ambiguous","selected_ref":"","ambiguous_refs":["order_candidate_1","order_candidate_2"]}'
     )
 
     result = await resolve_order_subject(
@@ -62,6 +61,7 @@ async def test_resolver_preserves_narrow_ambiguity():
 
     assert result.status == "ambiguous"
     assert result.ambiguous_refs == ("order_candidate_1", "order_candidate_2")
+
 
 @pytest.mark.asyncio
 async def test_resolver_receives_trusted_previous_subject_context_without_real_order_id():
@@ -86,3 +86,33 @@ async def test_resolver_receives_trusted_previous_subject_context_without_real_o
     assert payload["previous_subject_ref"] == "order_candidate_1"
     assert "subject_relation" not in payload
     assert "SO-OLD" not in prompt and "SO-NEW" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_resolver_receives_recent_product_context_as_non_authoritative_public_hint():
+    llm = _ResolverLLM('{"status":"resolved","selected_ref":"order_candidate_1","ambiguous_refs":[]}')
+    candidates = [
+        {"order_id": "SO-HW", "product_name": "HUAWEI Pura 80 Pro"},
+        {"order_id": "SO-IP", "product_name": "Apple iPhone Air"},
+    ]
+
+    result = await resolve_order_subject(
+        llm,
+        "我想退款了，我之后还想买 iPhone",
+        candidates,
+        recent_product_context={
+            "product": "HUAWEI Pura 80 Pro",
+            "product_category": "phones",
+            "product_id": "must-not-leak",
+        },
+    )
+
+    assert result.status == "resolved"
+    import json
+
+    payload = json.loads(llm.messages[0][0][1]["content"])
+    assert payload["recent_product_context"] == {
+        "product": "HUAWEI Pura 80 Pro",
+        "product_category": "phones",
+    }
+    assert "must-not-leak" not in llm.messages[0][0][1]["content"]

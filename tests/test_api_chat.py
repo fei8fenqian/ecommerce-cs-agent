@@ -31,6 +31,7 @@ from api.chat import (
     _await_support_case_customer,
     _build_ticket_issue,
     _can_append_generic_customer_action,
+    _case_backed_subject_correction_requests,
     _claim_chat_run,
     _entities_from_retrieval,
     _is_confirmed_human_handoff,
@@ -46,6 +47,7 @@ from api.chat import (
     _record_support_case_facts,
     _resume_pending_case,
     _support_case_needs_customer_turn,
+    _support_product_subject_context,
     chat_router,
     chat_stream,
 )
@@ -185,6 +187,7 @@ class _MockSupportWorkflow:
         tool_context=None,
         selected_subjects=None,
         previous_subjects=None,
+        product_subject_context=None,
         subject_relation="unknown",
         historical_contexts=None,
         allow_historical_explanation=False,
@@ -200,6 +203,7 @@ class _MockSupportWorkflow:
                 "tool_context": tool_context,
                 "selected_subjects": selected_subjects,
                 "previous_subjects": previous_subjects,
+                "product_subject_context": product_subject_context,
                 "subject_relation": subject_relation,
                 "historical_contexts": historical_contexts,
                 "allow_historical_explanation": allow_historical_explanation,
@@ -1063,6 +1067,115 @@ def test_answer_trace_does_not_overwrite_response_layer_source(answer_source):
 
     assert result.answer_source == answer_source
     assert result.answer_trace["answer_source"] == answer_source
+
+
+def test_case_backed_subject_correction_restores_existing_goal_without_reclassifying_statement():
+    case = _choice_case()
+    intent = Intent(
+        target="agent",
+        domain="refund",
+        operation="status",
+        speech_act="STATEMENT",
+        case_update="continue",
+        subject_relation="changed",
+    )
+
+    assert intent.workflow_requests == []
+    requests = _case_backed_subject_correction_requests(case, intent)
+
+    assert [(item.domain, item.operation) for item in requests] == [("refund", "status")]
+    assert intent.speech_act == "STATEMENT"
+    assert intent.workflow_requests == []
+
+
+def test_case_backed_subject_correction_fails_closed_outside_exact_case_goal():
+    case = _choice_case()
+
+    for intent in (
+        Intent(
+            target="agent",
+            domain="refund",
+            operation="status",
+            speech_act="STATEMENT",
+            case_update="continue",
+            subject_relation="same",
+        ),
+        Intent(
+            target="agent",
+            domain="refund",
+            operation="status",
+            speech_act="STATEMENT",
+            case_update="new_request",
+            subject_relation="changed",
+        ),
+        Intent(
+            target="agent",
+            domain="product",
+            operation="purchase",
+            speech_act="STATEMENT",
+            case_update="continue",
+            subject_relation="changed",
+        ),
+        Intent(
+            target="agent",
+            domain="general",
+            operation="answer",
+            speech_act="STATEMENT",
+            case_update="continue",
+            subject_relation="changed",
+        ),
+    ):
+        assert _case_backed_subject_correction_requests(case, intent) == []
+
+
+def test_case_backed_subject_correction_never_overrides_current_actionable_request():
+    case = _choice_case()
+    intent = Intent(
+        target="agent",
+        domain="refund",
+        operation="status",
+        speech_act="INFORMATION_QUERY",
+        requests=[SupportRequest(domain="refund", operation="status")],
+        case_update="continue",
+        subject_relation="changed",
+    )
+
+    assert _case_backed_subject_correction_requests(case, intent) == []
+    assert [(item.domain, item.operation) for item in intent.workflow_requests] == [("refund", "status")]
+
+
+def test_pending_customer_choice_requires_evidence_from_displayed_frame():
+    case = _choice_case()
+    continuing_refund = Intent(
+        target="agent",
+        domain="refund",
+        operation="status",
+        requests=[SupportRequest(domain="refund", operation="status")],
+        case_update="continue",
+    )
+
+    # Router-level task continuity must not make the stale choice frame own a
+    # correction, rejection, or side question that does not reference it.
+    assert _is_pending_case_reply(case, continuing_refund, "我想退的是 iPhone") is False
+    assert _is_pending_case_reply(case, continuing_refund, "这些都不要") is False
+    assert _is_pending_case_reply(case, continuing_refund, "为什么要选") is False
+
+    # A real answer to the displayed choice still resumes deterministically.
+    assert _is_pending_case_reply(case, continuing_refund, "第二个") is True
+    assert _is_pending_case_reply(case, continuing_refund, "Sony 耳机那笔") is True
+
+
+def test_non_choice_pending_keeps_existing_router_continue_behavior():
+    case = _support_case_fixture(status="AWAITING_CUSTOMER")
+    case = SupportCase(
+        **{
+            **case.__dict__,
+            "pending": {"kind": "customer_clarification", "missing_facts": ["reason"]},
+        }
+    )
+    intent = Intent(target="agent", case_update="continue")
+
+    assert _is_pending_case_reply(case, intent, "好的") is True
 
 
 def test_router_new_request_wins_over_old_pending_choice_match():
@@ -2587,6 +2700,44 @@ def test_orders_navigation_is_server_capability_for_safe_read_modes_not_query_wo
         "agent", "", "换一种完全不同的表达", intent_domain="order", intent_operation="list"
     )
     assert first == second == "\n\n[查看我的订单](?page=orders)"
+
+
+def test_support_product_subject_context_only_uses_immediate_purchase_trace():
+    entities = {
+        "product": "HUAWEI Pura 80 Pro",
+        "product_id": "catalog-secret-id",
+        "product_category": "phones",
+        "product_name": "HUAWEI Pura 80 Pro",
+    }
+    purchase_messages = [
+        {"role": "assistant", "content": "ok", "_answer_trace": {"domain": "product", "operation": "purchase"}}
+    ]
+
+    context = _support_product_subject_context(entities, purchase_messages)
+
+    assert context == {"product": "HUAWEI Pura 80 Pro", "product_category": "phones"}
+    assert "product_id" not in context
+    assert (
+        _support_product_subject_context(
+            entities,
+            [{"role": "assistant", "content": "ok", "_answer_trace": {"domain": "product", "operation": "answer"}}],
+        )
+        is None
+    )
+    assert (
+        _support_product_subject_context(
+            entities,
+            [
+                {
+                    "role": "assistant",
+                    "content": "old",
+                    "_answer_trace": {"domain": "product", "operation": "purchase"},
+                },
+                {"role": "assistant", "content": "newer without trace"},
+            ],
+        )
+        is None
+    )
 
 
 def test_customer_capability_snapshot_declares_orders_navigation():
