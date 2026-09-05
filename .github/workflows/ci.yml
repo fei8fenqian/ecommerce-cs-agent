@@ -77,4 +77,4 @@ jobs:
         run: alembic upgrade d2e7a1c9b504
 
       - name: Run tests
-        run: make test
+        run: TEST_DB=ecommerce_agent_test make test
