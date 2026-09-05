@@ -5434,7 +5434,9 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                         if final_answer.startswith(answer):
                             suffix = final_answer[len(answer) :]
                             if suffix:
-                                yield f"data: {json.dumps({'event': 'token', 'content': suffix}, ensure_ascii=False)}\n\n"
+                                token_event = {"event": "token", "content": suffix}
+                                encoded_event = json.dumps(token_event, ensure_ascii=False)
+                                yield f"data: {encoded_event}\n\n"
                         answer = final_answer
                     presentation_result.answer = answer
                     presentation = _customer_presentation(

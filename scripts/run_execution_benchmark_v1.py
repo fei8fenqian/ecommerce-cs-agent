@@ -1141,7 +1141,6 @@ async def _run_case(
         support_case = await _read_case(session_id, owner_id) if session_id else None
         loop = captured["loops"][-1] if captured["loops"] else {"answer": responses[-1].get("answer", "")}
         financial_calls = captured.get("financial_write_calls", [])
-        predicted_intent = None if oracle else None
         # observed_route stores JSON-safe snapshots; the comparison is made from
         # that snapshot below instead of retaining model objects.
         expected_requests = case["oracle"].get("requests", [])

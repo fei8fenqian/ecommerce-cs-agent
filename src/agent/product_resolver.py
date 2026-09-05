@@ -128,10 +128,13 @@ class ProductResolver:
             "并用 recommended_refs 按最符合客户当前诉求的顺序返回候选。通常推荐 3-6 个；客户明确要求全部时才可更多。"
             "推荐排序只依据客户语言、product_context 与 candidates 的真实公开属性；缺失属性不得脑补。"
             "selected/ambiguous 与 recommendation 是不同语义：selected 或 ambiguous 时 recommended_refs 必须为空。"
-            "previous_selected_ref 只是已验证的上一轮单品上下文；只有客户继续问这款/它/详情/购买且没有切换证据时才能继续它。"
-            "previous_choice_refs 是同一个候选帧里上一轮服务端实际展示/推荐的有序集合；如果客户本轮整体指代‘这些/刚才推荐的/对应链接/对比它们’且没有新约束，"
+            "previous_selected_ref 只是已验证的上一轮单品上下文；只有客户继续问这款/它/详情/购买"
+            "且没有切换证据时才能继续它。"
+            "previous_choice_refs 是同一个候选帧里上一轮服务端实际展示/推荐的有序集合；"
+            "如果客户本轮整体指代‘这些/刚才推荐的/对应链接/对比它们’且没有新约束，"
             "可以 status=unknown 并原顺序返回这些 recommended_refs。"
-            "不得输出 product_id、URL 或候选外商品。只返回一个JSON对象，字段仅使用 status、selected_ref、ambiguous_refs、recommended_refs。"
+            "不得输出 product_id、URL 或候选外商品。只返回一个JSON对象，字段仅使用 "
+            "status、selected_ref、ambiguous_refs、recommended_refs。"
         )
         payload = {
             "query": query[:1200],

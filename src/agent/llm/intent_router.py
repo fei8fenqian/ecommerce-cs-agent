@@ -112,7 +112,8 @@ same 仅表示当前话仍指向该已验证 subject，changed 仅表示当前�
 
 如果 semantic_hints 提供 ecommerce_context 或 product_choice_pending，它们只帮助判断本轮仍属于商品会话；
 Router 不选择具体商品，也不返回 candidate_N。商品候选、比较、Variant 选择由后续 ProductResolver 和 Server 完成。
-商品开放式发现/推荐/比较统一输出 product.search_product；商品详情/链接/规格查看统一输出 product.answer；购买意图输出 product.purchase。不要创造 product.recommend、product.provide_link 等新 operation。
+商品开放式发现/推荐/比较统一输出 product.search_product；商品详情/链接/规格查看统一输出 product.answer；
+购买意图输出 product.purchase。不要创造 product.recommend、product.provide_link 等新 operation。
 
 商品域额外输出 product_category：phones、laptops、components 或空字符串。这个字段描述商品目录类别，
 与 target/rag 的 table 解耦；明确是手机/笔记本/配件时应填写，无法判断则留空。它不选择具体商品。

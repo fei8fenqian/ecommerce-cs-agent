@@ -79,7 +79,8 @@ def _render_case(record: dict[str, Any], ordinal: int) -> str:
             "- 解决此问题前必须确认的事实（使用稳定 fact 名，例如 `current_invoice_type`）：",
             "- 所需能力及顺序（能力名，不写具体工具实现，例如 `query_invoice_status`）：",
             "- 完成判据（成功必须同时满足什么）：",
-            "- completion type（`RESOLVED` / `RESOLVE_OR_EXPLAIN_NEXT_STEP` / `AWAITING_CUSTOMER` / `ESCALATION_REQUIRED`）：",
+            "- completion type（`RESOLVED` / `RESOLVE_OR_EXPLAIN_NEXT_STEP` / "
+            "`AWAITING_CUSTOMER` / `ESCALATION_REQUIRED`）：",
             "- 预期最终状态和说明：",
             "- 转人工：是否必需；允许条件；禁止条件：",
             "",
@@ -182,7 +183,8 @@ def main() -> int:
         "# JDDC 客服 Ground Truth 标注包",
         "",
         "> 只根据可见上下文与当前用户消息填写；不参考机器初标、Agent 回复或线上轨迹。",
-        "> 一条 Case 可以处于 `AWAITING_CUSTOMER`，这不等于失败；只有把未解决问题标为 `COMPLETED` 才是 false resolution。",
+        "> 一条 Case 可以处于 `AWAITING_CUSTOMER`，这不等于失败；"
+        "只有把未解决问题标为 `COMPLETED` 才是 false resolution。",
         "",
         f"共 {len(selected)} 条。",
         "",

@@ -50,7 +50,8 @@ def main() -> int:
         total += 1
         if decision.action != expected:
             failures.append(
-                f"{case.get('id', line_number)}: expected {expected.value}, got {decision.action.value} ({decision.reason})"
+                f"{case.get('id', line_number)}: expected {expected.value}, "
+                f"got {decision.action.value} ({decision.reason})"
             )
 
     if failures:
