@@ -30,6 +30,16 @@ def _make_loop_result(
     )
 
 
+def _product_entity(name: str, product_id: str) -> dict[str, str]:
+    """Build the canonical server-shaped product entity used by Session tests."""
+    return {
+        "product": name,
+        "product_id": product_id,
+        "product_name": name,
+        "product_category": "laptops",
+    }
+
+
 def _make_step(
     step: int = 1,
     thought: str = "正在处理",
@@ -313,7 +323,10 @@ class TestSessionManager:
             ctx.session_id,
             owner_id,
             "第一个问题",
-            _make_loop_result(answer="第一个回答", last_entities={"product": "惠普锐Pro"}),
+            _make_loop_result(
+                answer="第一个回答",
+                last_entities=_product_entity("惠普锐Pro", "laptop-hp"),
+            ),
         )
         await session_manager.add_turn(
             ctx.session_id,
@@ -347,7 +360,7 @@ class TestSessionManager:
         result = _make_loop_result(
             answer="拯救者有货，5台",
             steps=[step],
-            last_entities={"product": "拯救者Y9000P"},
+            last_entities=_product_entity("拯救者Y9000P", "laptop-y9000p"),
         )
 
         await session_manager.add_turn(ctx.session_id, owner_id, "拯救者有货吗", result)
@@ -416,7 +429,10 @@ class TestSessionManager:
         session_manager, owner_id, _ = manager
         ctx = await session_manager.get_or_create(None, owner_id)
         assert ctx is not None
-        result = _make_loop_result(answer="回答", last_entities={"product": "拯救者Y9000P"})
+        result = _make_loop_result(
+            answer="回答",
+            last_entities=_product_entity("拯救者Y9000P", "laptop-y9000p"),
+        )
         await session_manager.add_turn(ctx.session_id, owner_id, "查询", result)
 
         ctx = await session_manager.get(ctx.session_id, owner_id)
@@ -434,7 +450,7 @@ class TestSessionManager:
         r1 = _make_loop_result(
             answer="拯救者Y9000P配置...",
             steps=[step1],
-            last_entities={"product": "拯救者Y9000P"},
+            last_entities=_product_entity("拯救者Y9000P", "laptop-y9000p"),
         )
         await session_manager.add_turn(ctx.session_id, owner_id, "拯救者配置", r1)
 
@@ -456,10 +472,16 @@ class TestSessionManager:
         ctx = await session_manager.get_or_create(None, owner_id)
         assert ctx is not None
 
-        r1 = _make_loop_result(answer="a", last_entities={"product": "拯救者"})
+        r1 = _make_loop_result(
+            answer="a",
+            last_entities=_product_entity("拯救者", "laptop-old"),
+        )
         await session_manager.add_turn(ctx.session_id, owner_id, "q1", r1)
 
-        r2 = _make_loop_result(answer="b", last_entities={"product": "ThinkPad"})
+        r2 = _make_loop_result(
+            answer="b",
+            last_entities=_product_entity("ThinkPad", "laptop-thinkpad"),
+        )
         await session_manager.add_turn(ctx.session_id, owner_id, "q2", r2)
 
         ctx = await session_manager.get(ctx.session_id, owner_id)
@@ -473,7 +495,10 @@ class TestSessionManager:
         ctx = await session_manager.get_or_create(None, owner_id)
         assert ctx is not None
         # 通过 add_turn 设置初始 entity
-        r1 = _make_loop_result(answer="有货", last_entities={"product": "拯救者"})
+        r1 = _make_loop_result(
+            answer="有货",
+            last_entities=_product_entity("拯救者", "laptop-y9000p"),
+        )
         await session_manager.add_turn(ctx.session_id, owner_id, "查库存", r1)
 
         result = _make_loop_result(answer="不知道", last_entities={})
@@ -527,7 +552,10 @@ class TestSessionManager:
         ctx = await session_manager.get_or_create(None, owner_id)
         assert ctx is not None
         # 通过 add_turn 写入 entity
-        r1 = _make_loop_result(answer="配置...", last_entities={"product": "拯救者Y9000P"})
+        r1 = _make_loop_result(
+            answer="配置...",
+            last_entities=_product_entity("拯救者Y9000P", "laptop-y9000p"),
+        )
         await session_manager.add_turn(ctx.session_id, owner_id, "配置", r1)
         resolved = await session_manager.resolve("它的价格呢", ctx.session_id, owner_id)
         assert resolved == "拯救者Y9000P的价格呢"
