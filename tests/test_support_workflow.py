@@ -8,6 +8,7 @@ import pytest
 from agent.engines.loop import LoopResult, StepResult
 from agent.engines.support_workflow import SupportWorkflowAgent
 from agent.support_control import extract_decision_context, extract_decision_facts
+from agent.support_subjects import match_subject_identity_choices
 from agent.tools_registry import ToolContext
 
 
@@ -282,6 +283,7 @@ async def test_unique_subject_resolution_projects_selected_production_order_row(
 
     state = {
         "query": "我想退 SSD",
+        "support_requests": [{"domain": "refund", "operation": "request"}],
         "result": result,
         "verified_facts": {},
         "decision_facts": {},
@@ -589,6 +591,7 @@ async def test_unique_cooling_subject_resolution_uses_component_metadata():
     updated = await workflow._absorb_observation(
         {
             "query": "帮我看看我新买的散热器什么时候能到货",
+            "support_requests": [{"domain": "delivery", "operation": "status"}],
             "result": result,
             "verified_facts": {},
             "decision_facts": {},
@@ -1575,7 +1578,7 @@ async def test_support_workflow_injects_persisted_case_context_as_trusted_state(
     )
 
     prompt = agent.calls[0]["system_prompt_extra"]
-    assert "当前 Support Case（服务端可信状态" in prompt
+    assert "当前 Support Case（服务端持久化状态" in prompt
     assert '"case_status":"AWAITING_CUSTOMER"' in prompt
     assert "不得据此执行写操作" in prompt
 
@@ -1915,3 +1918,259 @@ async def test_structured_selected_subject_not_found_refund_status_recovers_elig
     assert result.workflow_progress["goal_status"] == "resolved"
     assert result.workflow_progress["resolution_type"] == "SELF_SERVICE_HANDOFF"
     assert result.workflow_progress["recovery_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_support_command_subject_description_bypasses_legacy_lexical_matcher():
+    """Migrated semantic meaning must bind candidates without reparsing raw Chinese."""
+    agent = _FakeAgent()
+    agent.llm = _SubjectResolverLLM('{"status":"resolved","selected_ref":"order_candidate_2","ambiguous_refs":[]}')
+    workflow = SupportWorkflowAgent(agent)
+    result = LoopResult(
+        answer="已查询订单",
+        verified_facts={
+            "track_order": {
+                "status": "success",
+                "data": {
+                    "count": 3,
+                    "multiple_results": True,
+                    "orders": [
+                        {"order_id": "SO-HWX", "status": "PAID", "items": [{"product_name": "HUAWEI Pura X"}]},
+                        {"order_id": "SO-HW80", "status": "PAID", "items": [{"product_name": "华为 Pura 80 Pro"}]},
+                        {"order_id": "SO-IP", "status": "PAID", "items": [{"product_name": "Apple iPhone Air"}]},
+                    ],
+                },
+            }
+        },
+    )
+
+    with patch(
+        "agent.engines.support_workflow.match_subject_identity_choices",
+        side_effect=AssertionError("legacy lexical matcher must not run for SupportCommand subject_description"),
+    ):
+        updated = await workflow._absorb_observation(
+            {
+                "query": "前面说错了，我想退昨天那台华为，但不是 Pura X",
+                "subject_description": "昨天那台华为，但不是 Pura X",
+                "support_requests": [{"domain": "refund", "operation": "request"}],
+                "result": result,
+                "verified_facts": {},
+                "decision_facts": {},
+                "decision_contexts": [],
+                "selected_subjects": {},
+                "previous_subjects": {},
+                "operator_observations": [],
+                "already_attempted_tools": [],
+            }
+        )
+
+    assert updated["selected_subjects"] == {"order_id": "SO-HW80"}
+    assert updated["subject_resolution_status"] == "resolved"
+
+
+class _MutableRefundReadRegistry:
+    def __init__(self):
+        self.refund_status = "PENDING_MERCHANT_REVIEW"
+        self.calls: list[tuple[str, dict, ToolContext | None]] = []
+
+    async def execute(self, name, *, tool_context=None, **kwargs):
+        from agent.tools_registry import ToolResult
+
+        self.calls.append((name, kwargs.copy(), tool_context))
+        if name == "track_order":
+            order_id = kwargs.get("order_id")
+            return ToolResult(
+                name=name,
+                status="success",
+                data={
+                    "order_id": order_id,
+                    "status": "PAID",
+                    "order_status": "PAID",
+                    "items": [{"product_name": "HUAWEI Pura 80 Pro"}],
+                },
+                decision_facts={"order_identified": True, "order_status": "PAID"},
+            )
+        if name == "query_refund_status":
+            return ToolResult(
+                name=name,
+                status="success",
+                data={"order_id": kwargs.get("order_id"), "refund_status": self.refund_status},
+                decision_facts={"refund_status": self.refund_status},
+            )
+        raise AssertionError(f"unexpected tool: {name}")
+
+
+@pytest.mark.asyncio
+async def test_refund_status_continuation_fresh_reads_mutable_truth_each_turn():
+    """A verified subject may persist; current refund truth may not."""
+    registry = _MutableRefundReadRegistry()
+    workflow = SupportWorkflowAgent(_FakeAgent(), registry)
+
+    def state():
+        return {
+            "query": "退款现在到哪了",
+            "support_requests": [{"domain": "refund", "operation": "status"}],
+            "execution_plan": [
+                {"workflow": "refund.status", "tool": "track_order", "available": True},
+                {"workflow": "refund.status", "tool": "query_refund_status", "available": True},
+            ],
+            "selected_subjects": {"order_id": "SO-HW80"},
+            "verified_facts": {},
+            "decision_facts": {},
+            "decision_contexts": [],
+            "subject_resolution_status": "resolved",
+            "subject_choices": [],
+            "already_attempted_tools": [],
+            "tool_context": ToolContext(
+                user_id=7,
+                role="customer",
+                selected_order_id="SO-HW80",
+                require_bound_subject=True,
+            ),
+        }
+
+    first = await workflow._read_facts(state())
+    assert first["decision_facts"]["refund_status"] == "PENDING_MERCHANT_REVIEW"
+
+    registry.refund_status = "COMPLETED"
+    second = await workflow._read_facts(state())
+    assert second["decision_facts"]["refund_status"] == "COMPLETED"
+
+    assert [(name, args.get("order_id")) for name, args, _ in registry.calls] == [
+        ("track_order", "SO-HW80"),
+        ("query_refund_status", "SO-HW80"),
+        ("track_order", "SO-HW80"),
+        ("query_refund_status", "SO-HW80"),
+    ]
+    assert all(ctx and ctx.selected_order_id == "SO-HW80" and ctx.require_bound_subject for _, _, ctx in registry.calls)
+
+
+def test_large_track_order_result_compacts_to_server_owned_candidate_frame_instead_of_summary():
+    orders = []
+    for index in range(1, 11):
+        product = "Apple iPhone 17 256GB" if index in {6, 8} else f"HUAWEI 测试机型 {index}"
+        orders.append(
+            {
+                "order_id": f"SO20260905{index:04d}",
+                "order_source": "checkout",
+                "order_status": "PAID",
+                "status": "PENDING_FULFILLMENT",
+                "delivery_state": "NOT_SHIPPED",
+                "total_amount": 5999 + index,
+                "recency_rank": index,
+                "items": [
+                    {
+                        "product_name": product,
+                        "catalog_category": "phones",
+                        "catalog_product_id": f"phone-{index}",
+                    }
+                ],
+                # Real checkout/provider rows can contain enough metadata to push
+                # the raw discovery payload far beyond the Case persistence cap.
+                "provider_payload": "x" * 1200,
+            }
+        )
+    raw = {
+        "count": len(orders),
+        "orders": orders,
+        "multiple_results": True,
+        "selection_required": False,
+    }
+
+    bounded = SupportWorkflowAgent._bounded_data(raw)
+    assert "summary" not in bounded
+    assert len(bounded["orders"]) == 10
+    assert len(str(bounded)) < len(str(raw))
+    assert bounded["orders"][5]["product_name"] == "Apple iPhone 17 256GB"
+    assert bounded["orders"][5]["catalog_category"] == "phones"
+
+    facts = {"track_order": {"status": "success", "data": bounded}}
+    choices = SupportWorkflowAgent._pending_order_choices(facts)
+    assert len(choices) == 10
+    assert [choice["order_id"] for choice in match_subject_identity_choices("我想退 iPhone", choices)] == [
+        "SO202609050006",
+        "SO202609050008",
+    ]
+
+
+class _LargeOrderDiscoveryRegistry:
+    def __init__(self):
+        self.calls: list[tuple[str, dict]] = []
+        self.orders = []
+        for index in range(1, 11):
+            product = "Apple iPhone 17 256GB" if index in {6, 8} else f"HUAWEI 测试机型 {index}"
+            self.orders.append(
+                {
+                    "order_id": f"SO20260905{index:04d}",
+                    "order_source": "checkout",
+                    "order_status": "PAID",
+                    "status": "PENDING_FULFILLMENT",
+                    "delivery_state": "NOT_SHIPPED",
+                    "product_name": product,
+                    "total_amount": 5999 + index,
+                    "recency_rank": index,
+                    "items": [
+                        {
+                            "product_name": product,
+                            "catalog_category": "phones",
+                            "catalog_product_id": f"phone-{index}",
+                        }
+                    ],
+                    "provider_payload": "x" * 1200,
+                }
+            )
+
+    async def execute(self, name, *, tool_context=None, **kwargs):
+        from agent.tools_registry import ToolResult
+
+        self.calls.append((name, kwargs.copy()))
+        if name == "track_order":
+            assert kwargs.get("order_id") in {None, ""}
+            return ToolResult(
+                name=name,
+                status="success",
+                data={
+                    "count": len(self.orders),
+                    "orders": self.orders,
+                    "multiple_results": True,
+                    "selection_required": False,
+                },
+            )
+        raise AssertionError(f"unexpected tool before a singular subject is bound: {name}")
+
+
+@pytest.mark.asyncio
+async def test_large_order_discovery_flows_through_workflow_to_iphone_ambiguity_without_extra_state():
+    """Realistic correction path: semantic subject -> large order read -> server candidate frame -> ASK_CHOICE."""
+    registry = _LargeOrderDiscoveryRegistry()
+    agent = _FakeAgent()
+    agent.llm = _SubjectResolverLLM(
+        '{"status":"ambiguous","selected_ref":"","ambiguous_refs":["order_candidate_6","order_candidate_8"]}'
+    )
+    workflow = SupportWorkflowAgent(agent, registry)
+
+    result = await workflow.run(
+        "我改主意了，我想退 iPhone 了",
+        support_requests=[{"domain": "refund", "operation": "request"}],
+        subject_description="iPhone",
+        selected_subjects={},
+        previous_subjects={},
+        subject_relation="changed",
+        tool_context=ToolContext(
+            user_id=7,
+            role="customer",
+            allowed_tools=frozenset({"track_order", "query_refund_status", "check_refund_eligibility"}),
+        ),
+    )
+
+    progress = result.workflow_progress
+    assert registry.calls == [("track_order", {})]
+    assert progress["goal_status"] == "awaiting_customer"
+    assert progress["next_action"] == "ASK_CHOICE"
+    assert progress["next_actor"] == "CUSTOMER"
+    assert progress["selected_subjects"] == {}
+    assert [item["order_id"] for item in progress["pending_choices"]] == [
+        "SO202609050006",
+        "SO202609050008",
+    ]
+    assert "当前暂时无法继续完成这项操作" not in result.answer

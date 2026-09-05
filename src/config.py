@@ -55,6 +55,12 @@ class Settings(BaseSettings):
     llm_stream_timeout_seconds: float = Field(default=30.0, gt=0, description="LLM 流式调用超时(秒)")
     llm_circuit_failure_threshold: int = Field(default=3, ge=1, description="LLM 熔断连续失败阈值")
     llm_circuit_open_seconds: float = Field(default=30.0, gt=0, description="LLM 熔断冷却时间(秒)")
+    # ---- Customer Support semantic migration shadow ----
+    # 默认关闭。开启后只额外生成结构化 SupportCommand trace，不参与 Router/Case/Workflow 执行。
+    support_command_shadow_enabled: bool = False
+    # Phase 3 bounded cutover.  Validated order/refund subject/status commands
+    # bypass legacy semantic glue; set false for one-switch rollback.
+    support_command_cutover_enabled: bool = False
 
     # ---- 支付宝沙箱（本地/演示环境） ----
     # 密钥只保存为本机文件路径；不能写入代码、Git 或日志。

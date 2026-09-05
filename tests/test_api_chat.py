@@ -23,10 +23,12 @@ from agent.decision_context import SUBJECT_CONTEXT_RESET_MARKER
 from agent.engines.loop import LoopResult
 from agent.llm.intent_router import Intent, SupportRequest
 from agent.llm.resolve import resolve_pronouns
+from agent.support_command_contract import SupportCommand, SupportCommandTurn
 from agent.tools_registry import ToolContext, ToolResult
 from api.chat import (
     ChatRequest,
     _apply_subject_choice_interaction,
+    _apply_support_command_cutover,
     _attach_answer_trace,
     _await_support_case_customer,
     _build_ticket_issue,
@@ -46,7 +48,10 @@ from api.chat import (
     _recent_subject_router_context,
     _record_support_case_facts,
     _resume_pending_case,
+    _single_cutover_command,
+    _strip_untrusted_customer_navigation,
     _support_case_needs_customer_turn,
+    _support_command_case_context,
     _support_product_subject_context,
     chat_router,
     chat_stream,
@@ -171,8 +176,9 @@ class _MockAgentLoop:
 class _MockSupportWorkflow:
     """记录复杂客服请求是否进入独立 Workflow。"""
 
-    def __init__(self, answer: str = "复杂流程回答"):
+    def __init__(self, answer: str = "复杂流程回答", workflow_progress: dict | None = None):
         self.answer = answer
+        self.workflow_progress = dict(workflow_progress or {})
         self.calls: list[dict] = []
 
     async def run(
@@ -189,6 +195,7 @@ class _MockSupportWorkflow:
         previous_subjects=None,
         product_subject_context=None,
         subject_relation="unknown",
+        subject_description="",
         historical_contexts=None,
         allow_historical_explanation=False,
     ):
@@ -205,6 +212,7 @@ class _MockSupportWorkflow:
                 "previous_subjects": previous_subjects,
                 "product_subject_context": product_subject_context,
                 "subject_relation": subject_relation,
+                "subject_description": subject_description,
                 "historical_contexts": historical_contexts,
                 "allow_historical_explanation": allow_historical_explanation,
             }
@@ -214,7 +222,18 @@ class _MockSupportWorkflow:
             total_steps=2,
             total_tokens=12,
             total_latency_ms=10.0,
+            workflow_progress=dict(self.workflow_progress),
         )
+
+
+class _MockSupportCommandInterpreter:
+    def __init__(self, turn: SupportCommandTurn):
+        self.turn = turn
+        self.calls: list[dict] = []
+
+    async def interpret(self, query, *, history=None, case_context=None):
+        self.calls.append({"query": query, "history": history, "case_context": case_context})
+        return self.turn
 
 
 def _support_case_request(service: SupportCaseService):
@@ -742,31 +761,26 @@ async def test_structured_subject_choice_chat_skips_router_and_resumes_case(clie
 
     assert response.status_code == 200
     client.app.state.intent_router.route.assert_not_awaited()
-    client.app.state.registry.execute.assert_awaited_once_with(
-        "track_order",
-        tool_context=ToolContext(
-            user_id=1,
-            role="customer",
-            blocked_tools=frozenset({"create_ticket"}),
-            allowed_tools=frozenset(
-                {
-                    "search_product",
-                    "search_knowledge",
-                    "check_stock",
-                    "track_order",
-                    "check_payment_status",
-                    "query_refund_status",
-                    "check_refund_eligibility",
-                    "check_after_sales",
-                    "compare_products",
-                    "search_component",
-                }
-            ),
-        ),
-        order_id="SOREAL_A7",
-    )
+    client.app.state.registry.execute.assert_awaited_once()
+    track_call = client.app.state.registry.execute.await_args
+    assert track_call.args == ("track_order",)
+    assert track_call.kwargs["order_id"] == "SOREAL_A7"
+    choice_tool_context = track_call.kwargs["tool_context"]
+    assert choice_tool_context.user_id == 1
+    assert choice_tool_context.role == "customer"
+    assert "track_order" in choice_tool_context.allowed_tools
+    assert "create_ticket" in choice_tool_context.blocked_tools
     service.select_customer_subject.assert_awaited_once()
     assert client.app.state.support_workflow_agent.calls[-1]["selected_subjects"] == {"order_id": "SOREAL_A7"}
+    session_ctx = client.app.state.session._sessions["mock-session-id"]
+    interaction_messages = [
+        message
+        for message in session_ctx.messages
+        if isinstance(message, dict) and isinstance(message.get("_interaction"), dict)
+    ]
+    assert len(interaction_messages) == 1
+    assert interaction_messages[0]["content"] == "已选择订单：SOREAL_A7"
+    assert all("已选择订单" not in str(message.get("content") or "") for message in session_ctx.history)
 
 
 def test_api_does_not_persist_capability_gap_as_customer_or_staff_turn():
@@ -1228,10 +1242,15 @@ class _MockSessionManager:
         owner_user_id: int,
         query: str,
         result: LoopResult,
+        *,
+        user_interaction=None,
     ) -> None:
         ctx = self._sessions.get(session_id)
         if ctx:
-            ctx.messages.append({"role": "user", "content": query})
+            user_message = {"role": "user", "content": query}
+            if user_interaction:
+                user_message["_interaction"] = user_interaction
+            ctx.messages.append(user_message)
             ctx.messages.append({"role": "assistant", "content": result.answer})
             if result.customer_presentation:
                 ctx.messages[-1]["_presentation"] = result.customer_presentation
@@ -1246,10 +1265,14 @@ class _MockSessionManager:
         answer: str,
         *,
         presentation=None,
+        user_interaction=None,
     ) -> None:
         ctx = self._sessions.get(session_id)
         if ctx:
-            ctx.messages.append({"role": "user", "content": query})
+            user_message = {"role": "user", "content": query}
+            if user_interaction:
+                user_message["_interaction"] = user_interaction
+            ctx.messages.append(user_message)
             assistant = {"role": "assistant", "content": answer}
             if presentation:
                 assistant["_presentation"] = presentation
@@ -2845,9 +2868,9 @@ def test_product_procedure_unknown_exposes_full_server_frame_for_open_recommenda
     assert '"eligible_candidate_count":2' in context
     assert '"ref":"candidate_1"' in context
     assert '"ref":"candidate_2"' in context
-    assert "status=unknown 时表示尚未选中具体商品，不代表不能推荐" in context
-    assert "不要求存在唯一客观最优" in context
-    assert "present_product_candidates" in context
+    assert "ProductResolver 已在服务端候选帧内完成商品指代或推荐排序" in context
+    assert "详情入口由服务端统一追加" in context
+    assert "present_product_candidates" not in context
 
 
 def test_product_procedure_ambiguous_exposes_only_subject_candidates():
@@ -2948,6 +2971,200 @@ def test_operator_presentation_declaration_rejects_refs_outside_current_frame():
     assert _presented_product_refs(verified, candidates) == ("", [])
 
 
+def test_model_authored_internal_navigation_is_not_click_authority():
+    answer = (
+        "推荐两款：\n\n"
+        "- [查看 荣耀MagicBook 16](http://127.0.0.1:5173/?page=product\\&category=laptops\\&product=荣耀MagicBook16)\n"
+        "- [查看 MacBook Air](?page=product&category=laptops&product=MacBookAir13M5)\n\n"
+        "参数来源见 [厂商页面](https://example.com/specs)。"
+    )
+    cleaned = _strip_untrusted_customer_navigation(answer)
+    assert "荣耀MagicBook16" not in cleaned
+    assert "MacBookAir13M5" not in cleaned
+    assert "?page=product" not in cleaned
+    assert "https://example.com/specs" in cleaned
+
+
+@pytest.mark.asyncio
+async def test_sync_product_recommendation_uses_resolver_refs_without_second_operator_run(client, monkeypatch):
+    from agent.product_resolver import ProductResolution
+
+    candidates = [
+        {
+            "product_id": "7ae55668794e900414586122559b85f4",
+            "product_name": "机械革命无界15X Pro",
+            "display_title": "机械革命无界15X Pro",
+            "category": "laptops",
+            "price": 4499,
+        },
+        {
+            "product_id": "3ab269775481c8a03d7fa45a6d607d1b",
+            "product_name": "惠普锐Pro",
+            "display_title": "惠普锐Pro",
+            "category": "laptops",
+            "price": 4499,
+        },
+    ]
+    intent = Intent(
+        target="agent",
+        domain="product",
+        operation="search_product",
+        query="再推荐8000块左右的笔记本",
+        product_category="laptops",
+    )
+    client.app.state.intent_router.route = AsyncMock(return_value=intent)
+
+    class RepairingRecommendationAgent(_MockAgentLoop):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        async def run(self, query, *, context="", history=None, system_prompt_extra="", tool_context=None):
+            self.calls += 1
+            assert "present_product_candidates" not in system_prompt_extra
+            return LoopResult(
+                answer=(
+                    "我推荐机械革命无界15X Pro和惠普锐Pro。\n\n"
+                    "- [查看 机械革命无界15X Pro](?page=product&category=laptops&product=机械革命15X)\n"
+                    "- [查看 惠普锐Pro](?page=product&category=laptops&product=惠普锐Pro)"
+                ),
+                total_steps=1,
+                total_tokens=40,
+            )
+
+    agent = RepairingRecommendationAgent()
+    client.app.state.agent = agent
+    monkeypatch.setattr(
+        "api.chat._prepare_ecommerce_role",
+        AsyncMock(
+            return_value=(
+                [],
+                True,
+                {"category": "laptops", "target_price_cents": 800000},
+                ProductResolution(recommended_refs=["candidate_1", "candidate_2"]),
+                None,
+                {"product_candidates": candidates},
+            )
+        ),
+    )
+
+    transport = httpx.ASGITransport(app=client.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+        response = await http_client.post(
+            "/api/v1/chat",
+            json={"session_id": "product-repair-sync", "query": "再推荐8000块左右的笔记本"},
+        )
+
+    assert response.status_code == 200
+    answer = response.json()["answer"]
+    assert agent.calls == 1
+    assert "product=机械革命15X" not in answer
+    assert "product=惠普锐Pro" not in answer
+    assert "product=7ae55668794e900414586122559b85f4" in answer
+    assert "product=3ab269775481c8a03d7fa45a6d607d1b" in answer
+    assert "?page=catalog" not in answer
+
+
+@pytest.mark.asyncio
+async def test_stream_product_recommendation_finishes_once_with_resolver_owned_links(client, monkeypatch):
+    from agent.product_resolver import ProductResolution
+
+    candidates = [
+        {
+            "product_id": "honor-magicbook16-canonical",
+            "product_name": "荣耀MagicBook 16 2026",
+            "display_title": "荣耀MagicBook 16 2026",
+            "category": "laptops",
+            "price": 7999,
+        },
+        {
+            "product_id": "asus-tuf5pro-canonical",
+            "product_name": "华硕天选5 Pro",
+            "display_title": "华硕天选5 Pro",
+            "category": "laptops",
+            "price": 7799,
+        },
+    ]
+    intent = Intent(
+        target="agent",
+        domain="product",
+        operation="search_product",
+        query="再推荐8000块左右的笔记本",
+        product_category="laptops",
+    )
+    client.app.state.intent_router.route = AsyncMock(return_value=intent)
+
+    class RepairingStreamAgent(_MockAgentLoop):
+        def __init__(self):
+            super().__init__()
+            self.repair_calls = 0
+
+        async def run_stream(self, query, *, context="", history=None, system_prompt_extra="", tool_context=None):
+            bad = (
+                "推荐荣耀MagicBook 16和华硕天选5 Pro。\n\n"
+                "- [查看 荣耀MagicBook 16](http://127.0.0.1:5173/?page=product\\&category=laptops\\&product=荣耀MagicBook16)\n"
+                "- [查看 华硕天选5 Pro](?page=product&category=laptops&product=华硕天选5Pro4050)"
+            )
+            yield {"event": "start"}
+            yield {"event": "token", "content": bad}
+            yield {"event": "done", "answer": bad, "total_steps": 1, "total_tokens": 30}
+
+        async def run(self, query, *, context="", history=None, system_prompt_extra="", tool_context=None):
+            self.repair_calls += 1
+            raise AssertionError("stream recommendation must not trigger a second Operator run")
+            return LoopResult(
+                answer="推荐荣耀MagicBook 16和华硕天选5 Pro。",
+                total_steps=1,
+                total_tokens=20,
+                verified_facts={
+                    "present_product_candidates": {
+                        "status": "success",
+                        "data": {
+                            "mode": "recommend",
+                            "candidate_refs": ["candidate_1", "candidate_2"],
+                        },
+                    }
+                },
+            )
+
+    agent = RepairingStreamAgent()
+    client.app.state.agent = agent
+    monkeypatch.setattr(
+        "api.chat._prepare_ecommerce_role",
+        AsyncMock(
+            return_value=(
+                [],
+                True,
+                {"category": "laptops", "target_price_cents": 800000},
+                ProductResolution(recommended_refs=["candidate_1", "candidate_2"]),
+                None,
+                {"product_candidates": candidates},
+            )
+        ),
+    )
+
+    transport = httpx.ASGITransport(app=client.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+        response = await http_client.post(
+            "/api/v1/chat/stream",
+            json={"session_id": "product-repair-stream", "query": "再推荐8000块左右的笔记本"},
+        )
+
+    assert response.status_code == 200
+    events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
+    done = [event for event in events if event.get("event") == "done"][-1]
+    answer = done["answer"]
+    assert agent.repair_calls == 0
+    assert "荣耀MagicBook16" not in answer
+    assert "华硕天选5Pro4050" not in answer
+    assert "product=honor-magicbook16-canonical" in answer
+    assert "product=asus-tuf5pro-canonical" in answer
+    assert "?page=catalog" not in answer
+
+    session = client.app.state.session._sessions["product-repair-stream"]
+    assert session.messages[-1]["content"] == answer
+
+
 @pytest.mark.asyncio
 async def test_stream_product_recommendation_done_answer_uses_operator_declared_refs_and_persists_them(
     client, monkeypatch
@@ -3012,7 +3229,7 @@ async def test_stream_product_recommendation_done_answer_uses_operator_declared_
                 [],
                 True,
                 {"category": "laptops"},
-                ProductResolution(),
+                ProductResolution(recommended_refs=["candidate_2", "candidate_1"]),
                 None,
                 {"product_candidates": candidates},
             )
@@ -3081,7 +3298,7 @@ async def test_sync_product_recommendation_unknown_subject_does_not_block_operat
         async def run(self, query, *, context="", history=None, system_prompt_extra="", tool_context=None):
             self.last_query = query
             self.last_context = context
-            assert "不要求存在唯一客观最优" in context
+            assert "ProductResolver 已在服务端候选帧内完成商品指代或推荐排序" in context
             assert tool_context is not None
             assert tool_context.product_candidate_refs == frozenset({"candidate_1", "candidate_2"})
             return LoopResult(
@@ -3107,7 +3324,9 @@ async def test_sync_product_recommendation_unknown_subject_does_not_block_operat
                 [],
                 True,
                 {"category": "phones", "max_price_cents": 800000},
-                ProductResolution(),  # unknown subject is normal for recommendation
+                ProductResolution(
+                    recommended_refs=["candidate_2", "candidate_1"]
+                ),  # recommendation order is server-owned; no product is selected
                 None,
                 {"product_candidates": candidates},
             )
@@ -3132,3 +3351,863 @@ async def test_sync_product_recommendation_unknown_subject_does_not_block_operat
 
     session = client.app.state.session._sessions["product-open-recommend-sync"]
     assert session.last_entities["product_context"]["choice_refs"] == ["candidate_2", "candidate_1"]
+
+
+def _command_refund_choice_case() -> SupportCase:
+    case = _support_case_fixture(status="AWAITING_CUSTOMER")
+    return SupportCase(
+        **{
+            **case.__dict__,
+            "request_stack": [
+                {
+                    "domain": "refund",
+                    "operation": "request",
+                    "next_step": "LOOKUP",
+                    "risk": "controlled_write",
+                }
+            ],
+            "pending": {
+                "kind": "customer_choice",
+                "subject_type": "order",
+                "choices": [
+                    {"order_id": "SO-A", "product_name": "HUAWEI Pura X"},
+                    {"order_id": "SO-B", "product_name": "Apple iPhone Air"},
+                ],
+            },
+        }
+    )
+
+
+def test_support_command_multi_command_turn_does_not_partially_cut_over(monkeypatch):
+    turn = SupportCommandTurn(
+        scope="supported",
+        commands=(
+            SupportCommand("set_subject", subject_description="华为"),
+            SupportCommand("start_goal", "order", "status", subject_description="另一笔订单"),
+        ),
+    )
+    monkeypatch.setattr("api.chat.settings.support_command_cutover_enabled", True)
+
+    assert _single_cutover_command(turn) is None
+
+
+def test_support_command_redundant_same_goal_restart_collapses_to_subject_replacement(monkeypatch):
+    case = _command_refund_choice_case()
+    turn = SupportCommandTurn(
+        scope="supported",
+        commands=(
+            SupportCommand("start_goal", "refund", "request", subject_description="iPhone", confidence=0.92),
+            SupportCommand("set_subject", subject_description="iPhone", confidence=0.95),
+        ),
+    )
+    monkeypatch.setattr("api.chat.settings.support_command_cutover_enabled", True)
+
+    command = _single_cutover_command(turn, active_case=case, recent_case=case)
+
+    assert command == SupportCommand("set_subject", subject_description="iPhone", confidence=0.95)
+
+
+def test_support_command_single_same_goal_restart_with_subject_becomes_subject_replacement(monkeypatch):
+    case = _command_refund_choice_case()
+    turn = SupportCommandTurn(
+        scope="supported",
+        commands=(SupportCommand("start_goal", "refund", "request", subject_description="iPhone", confidence=0.93),),
+    )
+    monkeypatch.setattr("api.chat.settings.support_command_cutover_enabled", True)
+
+    command = _single_cutover_command(turn, active_case=case, recent_case=case)
+
+    assert command == SupportCommand("set_subject", subject_description="iPhone", confidence=0.93)
+
+
+def test_support_command_conflicting_restart_and_subject_still_fail_closed(monkeypatch):
+    case = _command_refund_choice_case()
+    turn = SupportCommandTurn(
+        scope="supported",
+        commands=(
+            SupportCommand("start_goal", "order", "status", subject_description="iPhone"),
+            SupportCommand("set_subject", subject_description="iPhone"),
+        ),
+    )
+    monkeypatch.setattr("api.chat.settings.support_command_cutover_enabled", True)
+
+    assert _single_cutover_command(turn, active_case=case, recent_case=case) is None
+
+
+def test_support_command_case_context_exposes_only_ephemeral_current_subject_ref():
+    case = SupportCase(
+        **{
+            **_support_case_fixture(status="COMPLETED").__dict__,
+            "request_stack": [{"domain": "refund", "operation": "request"}],
+            "selected_subjects": {
+                "order_id": "SO2026090405413392B0EB29D431",
+                "product_name": "HUAWEI Pura X",
+            },
+        }
+    )
+
+    context = _support_command_case_context(case)
+
+    assert context["has_verified_subject"] is True
+    assert context["current_subject"] == {"ref": "current_subject", "description": "HUAWEI Pura X"}
+    assert "SO2026090405413392B0EB29D431" not in json.dumps(context, ensure_ascii=False)
+
+
+def test_support_command_case_context_hides_subject_after_context_reset():
+    case = SupportCase(
+        **{
+            **_support_case_fixture(status="ACTIVE").__dict__,
+            "request_stack": [{"domain": "refund", "operation": "request"}],
+            "selected_subjects": {"order_id": "SO-OLD", "product_name": "旧订单"},
+            "verified_facts": {SUBJECT_CONTEXT_RESET_MARKER: {"reason": "subject_disputed"}},
+        }
+    )
+
+    context = _support_command_case_context(case)
+
+    assert context["has_verified_subject"] is False
+    assert context["current_subject"] is None
+
+
+@pytest.mark.asyncio
+async def test_support_command_current_subject_fails_closed_when_ownership_cannot_be_reverified():
+    recent = SupportCase(
+        **{
+            **_support_case_fixture(status="COMPLETED").__dict__,
+            "request_stack": [{"domain": "refund", "operation": "request"}],
+            "selected_subjects": {"order_id": "SO-A"},
+        }
+    )
+    registry = SimpleNamespace(
+        execute=AsyncMock(return_value=ToolResult(name="track_order", status="not_found", data={}))
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(registry=registry)))
+
+    handled, updated, requests, subject_description, selected, authority = await _apply_support_command_cutover(
+        request,
+        command=SupportCommand("start_goal", "refund", "status", candidate_ref="current_subject"),
+        raw_query="我已经申请了",
+        active_case=None,
+        recent_case=recent,
+        tool_context=ToolContext(user_id=1, role="customer"),
+    )
+
+    assert handled is False
+    assert updated is None
+    assert requests == []
+    assert subject_description == ""
+    assert selected is None
+    assert authority == "router"
+    registry.execute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_support_command_set_subject_releases_old_choice_but_preserves_refund_goal():
+    case = _command_refund_choice_case()
+    released = SupportCase(
+        **{
+            **case.__dict__,
+            "status": "ACTIVE",
+            "pending": {},
+            "pending_command": {},
+            "version": case.version + 1,
+        }
+    )
+    service = SupportCaseService()
+    service.retire_customer_subject_for_change = AsyncMock(return_value=released)  # type: ignore[method-assign]
+    registry = SimpleNamespace(execute=AsyncMock())
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(support_case_service=service, registry=registry))
+    )
+
+    handled, updated, requests, subject_description, selected, authority = await _apply_support_command_cutover(
+        request,
+        command=SupportCommand("set_subject", subject_description="iPhone"),
+        raw_query="搞错了，我想退的是 iPhone",
+        active_case=case,
+        recent_case=case,
+        tool_context=ToolContext(user_id=1, role="customer"),
+    )
+
+    assert handled is True
+    assert updated is released
+    assert [(item.domain, item.operation) for item in requests] == [("refund", "request")]
+    assert subject_description == "iPhone"
+    assert selected is None
+    assert authority == "support_command"
+    service.retire_customer_subject_for_change.assert_awaited_once_with(case)
+    registry.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_support_command_set_subject_can_continue_from_recent_completed_goal_without_mutating_terminal_case():
+    recent = SupportCase(
+        **{
+            **_support_case_fixture(status="COMPLETED").__dict__,
+            "request_stack": [
+                {
+                    "domain": "refund",
+                    "operation": "request",
+                    "next_step": "LOOKUP",
+                    "risk": "controlled_write",
+                }
+            ],
+            "selected_subjects": {"order_id": "SO-OLD"},
+        }
+    )
+    service = SupportCaseService()
+    service.retire_customer_subject_for_change = AsyncMock()  # type: ignore[method-assign]
+    registry = SimpleNamespace(execute=AsyncMock())
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(support_case_service=service, registry=registry))
+    )
+
+    handled, updated, requests, subject_description, selected, authority = await _apply_support_command_cutover(
+        request,
+        command=SupportCommand("set_subject", subject_description="iPhone"),
+        raw_query="刚才搞错了，其实想退 iPhone",
+        active_case=None,
+        recent_case=recent,
+        tool_context=ToolContext(user_id=1, role="customer"),
+    )
+
+    assert handled is True
+    assert updated is None
+    assert [(item.domain, item.operation) for item in requests] == [("refund", "request")]
+    assert subject_description == "iPhone"
+    assert selected is None
+    assert authority == "support_command"
+    service.retire_customer_subject_for_change.assert_not_awaited()
+    registry.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_support_command_does_not_accept_model_introduced_real_order_reference():
+    case = _command_refund_choice_case()
+    service = SupportCaseService()
+    service.retire_customer_subject_for_change = AsyncMock()  # type: ignore[method-assign]
+    registry = SimpleNamespace(execute=AsyncMock())
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(support_case_service=service, registry=registry))
+    )
+
+    result = await _apply_support_command_cutover(
+        request,
+        command=SupportCommand("set_subject", subject_description="订单 SO-B"),
+        raw_query="搞错了，换另一笔",
+        active_case=case,
+        recent_case=case,
+        tool_context=ToolContext(user_id=1, role="customer"),
+    )
+
+    assert result[0] is False
+    service.retire_customer_subject_for_change.assert_not_awaited()
+    registry.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_support_command_explicit_customer_order_ref_requires_ownership_before_binding():
+    case = _command_refund_choice_case()
+    selected_case = SupportCase(
+        **{
+            **case.__dict__,
+            "status": "ACTIVE",
+            "selected_subjects": {"order_id": "SO-B"},
+            "pending": {},
+            "version": case.version + 1,
+        }
+    )
+    service = SupportCaseService()
+    service.select_customer_subject = AsyncMock(return_value=selected_case)  # type: ignore[method-assign]
+    registry = SimpleNamespace(
+        execute=AsyncMock(return_value=ToolResult(name="track_order", status="success", data={"order_id": "SO-B"}))
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(support_case_service=service, registry=registry))
+    )
+
+    handled, updated, requests, subject_description, selected, authority = await _apply_support_command_cutover(
+        request,
+        command=SupportCommand("set_subject", subject_description="订单 SO-B"),
+        raw_query="改成订单 SO-B",
+        active_case=case,
+        recent_case=case,
+        tool_context=ToolContext(user_id=1, role="customer"),
+    )
+
+    assert handled is True
+    assert updated is selected_case
+    assert [(item.domain, item.operation) for item in requests] == [("refund", "request")]
+    assert subject_description == ""
+    assert selected == {"order_id": "SO-B"}
+    assert authority == "support_command"
+    registry.execute.assert_awaited_once()
+    assert registry.execute.await_args.kwargs["order_id"] == "SO-B"
+
+
+@pytest.mark.asyncio
+async def test_support_command_refund_status_reuses_recent_verified_subject_only_after_fresh_ownership_check():
+    recent = SupportCase(
+        **{
+            **_support_case_fixture(status="COMPLETED").__dict__,
+            "request_stack": [{"domain": "refund", "operation": "request"}],
+            "selected_subjects": {"order_id": "SO-A"},
+        }
+    )
+    registry = SimpleNamespace(
+        execute=AsyncMock(return_value=ToolResult(name="track_order", status="success", data={"order_id": "SO-A"}))
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(registry=registry)))
+
+    handled, updated, requests, subject_description, selected, authority = await _apply_support_command_cutover(
+        request,
+        command=SupportCommand("start_goal", "refund", "status", candidate_ref="current_subject"),
+        raw_query="我已经申请了，现在到哪了",
+        active_case=None,
+        recent_case=recent,
+        tool_context=ToolContext(user_id=1, role="customer"),
+    )
+
+    assert handled is True
+    assert updated is None
+    assert [(item.domain, item.operation, item.risk) for item in requests] == [("refund", "status", "read_only")]
+    assert subject_description == ""
+    assert selected == {"order_id": "SO-A"}
+    assert authority == "support_command"
+    registry.execute.assert_awaited_once()
+    assert registry.execute.await_args.kwargs["order_id"] == "SO-A"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["/api/v1/chat", "/api/v1/chat/stream"])
+async def test_support_command_cutover_bypasses_legacy_semantic_glue_in_sync_and_stream(client, monkeypatch, endpoint):
+    """Once Runtime accepts a command, old raw-language helpers lose authority on both APIs."""
+    case = _command_refund_choice_case()
+    released = SupportCase(
+        **{
+            **case.__dict__,
+            "status": "ACTIVE",
+            "pending": {},
+            "pending_command": {},
+            "version": case.version + 1,
+        }
+    )
+    awaiting = SupportCase(
+        **{
+            **released.__dict__,
+            "status": "AWAITING_CUSTOMER",
+            "pending": {"kind": "customer_choice"},
+            "version": released.version + 1,
+        }
+    )
+    service = SupportCaseService()
+    service.get_active = AsyncMock(return_value=case)  # type: ignore[method-assign]
+    service.get_latest = AsyncMock(return_value=case)  # type: ignore[method-assign]
+    service.retire_customer_subject_for_change = AsyncMock(return_value=released)  # type: ignore[method-assign]
+    service.await_customer = AsyncMock(return_value=awaiting)  # type: ignore[method-assign]
+    client.app.state.support_case_service = service
+    client.app.state.support_command_interpreter = _MockSupportCommandInterpreter(
+        SupportCommandTurn(
+            scope="supported",
+            commands=(SupportCommand("set_subject", subject_description="iPhone"),),
+        )
+    )
+    client.app.state.support_workflow_agent = _MockSupportWorkflow(
+        answer="请选择新的退款订单",
+        workflow_progress={
+            "goal_status": "awaiting_customer",
+            "next_action": "ASK_CHOICE",
+            "next_actor": "CUSTOMER",
+            "pending_choices": [
+                {"order_id": "SO-IP-1", "product_name": "Apple iPhone Air"},
+                {"order_id": "SO-IP-2", "product_name": "Apple iPhone 16"},
+            ],
+        },
+    )
+    client.app.state.intent_router.route = AsyncMock(
+        return_value=Intent(
+            target="agent",
+            query="搞错了，我想退的是 iPhone",
+            confidence=1.0,
+            domain="refund",
+            operation="request",
+            requests=[SupportRequest(domain="refund", operation="request")],
+            case_update="continue",
+            subject_relation="changed",
+            speech_act="STATEMENT",
+            fact_scope="explain_previous",
+        )
+    )
+    monkeypatch.setattr("api.chat.settings.support_command_cutover_enabled", True)
+    monkeypatch.setattr(
+        "api.chat._is_pending_case_reply",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("legacy pending parser called")),
+    )
+    monkeypatch.setattr(
+        "api.chat._case_backed_subject_correction_requests",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("legacy correction glue called")),
+    )
+    monkeypatch.setattr(
+        "api.chat._workflow_subject_context_kwargs",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("legacy subject context called")),
+    )
+    monkeypatch.setattr(
+        "api.chat._allow_historical_subject_explanation",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("legacy fact scope called")),
+    )
+
+    transport = httpx.ASGITransport(app=client.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+        response = await http_client.post(endpoint, json={"query": "搞错了，我想退的是 iPhone"})
+
+    assert response.status_code == 200
+    call = client.app.state.support_workflow_agent.calls[-1]
+    assert call["support_requests"][0]["domain"] == "refund"
+    assert call["support_requests"][0]["operation"] == "request"
+    assert call["subject_description"] == "iPhone"
+    assert call["selected_subjects"] is None
+    service.retire_customer_subject_for_change.assert_awaited_once_with(case)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["/api/v1/chat", "/api/v1/chat/stream"])
+async def test_pending_refund_subject_correction_accepts_redundant_same_goal_command_shape(
+    client, monkeypatch, endpoint
+):
+    case = _command_refund_choice_case()
+    released = SupportCase(
+        **{
+            **case.__dict__,
+            "status": "ACTIVE",
+            "pending": {},
+            "pending_command": {},
+            "version": case.version + 1,
+        }
+    )
+    awaiting = SupportCase(
+        **{
+            **released.__dict__,
+            "status": "AWAITING_CUSTOMER",
+            "pending": {
+                "kind": "customer_choice",
+                "subject_type": "order",
+                "choices": [
+                    {"order_id": "SO-IP-1", "product_name": "Apple iPhone 16"},
+                    {"order_id": "SO-IP-2", "product_name": "Apple iPhone Air"},
+                ],
+            },
+            "version": released.version + 1,
+        }
+    )
+    service = SupportCaseService()
+    service.get_active = AsyncMock(return_value=case)  # type: ignore[method-assign]
+    service.get_latest = AsyncMock(return_value=case)  # type: ignore[method-assign]
+    service.retire_customer_subject_for_change = AsyncMock(return_value=released)  # type: ignore[method-assign]
+    service.await_customer = AsyncMock(return_value=awaiting)  # type: ignore[method-assign]
+    client.app.state.support_case_service = service
+    client.app.state.support_command_interpreter = _MockSupportCommandInterpreter(
+        SupportCommandTurn(
+            scope="supported",
+            commands=(
+                SupportCommand("start_goal", "refund", "request", subject_description="iPhone"),
+                SupportCommand("set_subject", subject_description="iPhone"),
+            ),
+        )
+    )
+    client.app.state.support_workflow_agent = _MockSupportWorkflow(
+        answer="请选择新的退款订单",
+        workflow_progress={
+            "goal_status": "awaiting_customer",
+            "next_action": "ASK_CHOICE",
+            "next_actor": "CUSTOMER",
+            "pending_choices": [
+                {"order_id": "SO-IP-1", "product_name": "Apple iPhone 16"},
+                {"order_id": "SO-IP-2", "product_name": "Apple iPhone Air"},
+            ],
+        },
+    )
+    client.app.state.intent_router.route = AsyncMock(
+        return_value=Intent(
+            target="agent",
+            query="哦我说错了 我想退的是iphone",
+            confidence=1.0,
+            domain="refund",
+            operation="request",
+            requests=[SupportRequest(domain="refund", operation="request")],
+            case_update="continue",
+            subject_relation="changed",
+            speech_act="STATEMENT",
+        )
+    )
+    monkeypatch.setattr("api.chat.settings.support_command_cutover_enabled", True)
+
+    transport = httpx.ASGITransport(app=client.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+        response = await http_client.post(endpoint, json={"query": "哦我说错了 我想退的是iphone"})
+
+    assert response.status_code == 200
+    call = client.app.state.support_workflow_agent.calls[-1]
+    assert call["support_requests"][0]["domain"] == "refund"
+    assert call["support_requests"][0]["operation"] == "request"
+    assert call["subject_description"] == "iPhone"
+    assert call["selected_subjects"] is None
+    service.retire_customer_subject_for_change.assert_awaited_once_with(case)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["/api/v1/chat", "/api/v1/chat/stream"])
+async def test_recent_completed_refund_subject_correction_opens_normal_case_and_reuses_old_subject_only_as_context(
+    client, monkeypatch, endpoint
+):
+    recent = SupportCase(
+        **{
+            **_support_case_fixture(status="COMPLETED").__dict__,
+            "request_stack": [
+                {
+                    "domain": "refund",
+                    "operation": "request",
+                    "next_step": "LOOKUP",
+                    "risk": "controlled_write",
+                }
+            ],
+            "selected_subjects": {"order_id": "SO-OLD"},
+        }
+    )
+    opened = SupportCase(
+        **{
+            **_support_case_fixture(status="ACTIVE").__dict__,
+            "request_stack": recent.request_stack,
+            "selected_subjects": {},
+        }
+    )
+    awaiting = SupportCase(
+        **{
+            **opened.__dict__,
+            "status": "AWAITING_CUSTOMER",
+            "pending": {
+                "kind": "customer_choice",
+                "subject_type": "order",
+                "choices": [
+                    {"order_id": "SO-IP-1", "product_name": "Apple iPhone Air"},
+                    {"order_id": "SO-IP-2", "product_name": "Apple iPhone 16"},
+                ],
+            },
+            "version": opened.version + 1,
+        }
+    )
+    service = SupportCaseService()
+    service.get_active = AsyncMock(return_value=None)  # type: ignore[method-assign]
+    service.get_latest = AsyncMock(return_value=recent)  # type: ignore[method-assign]
+    service.open_or_resume = AsyncMock(return_value=SimpleNamespace(case=opened, created=True))  # type: ignore[method-assign]
+    service.await_customer = AsyncMock(return_value=awaiting)  # type: ignore[method-assign]
+    client.app.state.support_case_service = service
+    client.app.state.support_command_interpreter = _MockSupportCommandInterpreter(
+        SupportCommandTurn(
+            scope="supported",
+            commands=(SupportCommand("set_subject", subject_description="iPhone"),),
+        )
+    )
+    client.app.state.support_workflow_agent = _MockSupportWorkflow(
+        answer="请选择新的退款订单",
+        workflow_progress={
+            "goal_status": "awaiting_customer",
+            "next_action": "ASK_CHOICE",
+            "next_actor": "CUSTOMER",
+            "pending_choices": [
+                {"order_id": "SO-IP-1", "product_name": "Apple iPhone Air"},
+                {"order_id": "SO-IP-2", "product_name": "Apple iPhone 16"},
+            ],
+        },
+    )
+    client.app.state.intent_router.route = AsyncMock(
+        return_value=Intent(
+            target="agent",
+            query="刚才搞错了，其实想退 iPhone",
+            confidence=1.0,
+            domain="refund",
+            operation="request",
+            requests=[SupportRequest(domain="refund", operation="request")],
+            case_update="continue",
+            subject_relation="changed",
+            speech_act="STATEMENT",
+        )
+    )
+    client.app.state.registry.execute = AsyncMock(
+        return_value=ToolResult(name="track_order", status="success", data={"order_id": "SO-OLD"})
+    )
+    monkeypatch.setattr("api.chat.settings.support_command_cutover_enabled", True)
+
+    transport = httpx.ASGITransport(app=client.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+        response = await http_client.post(endpoint, json={"query": "刚才搞错了，其实想退 iPhone"})
+
+    assert response.status_code == 200
+    call = client.app.state.support_workflow_agent.calls[-1]
+    assert call["support_requests"][0]["domain"] == "refund"
+    assert call["support_requests"][0]["operation"] == "request"
+    assert call["subject_description"] == "iPhone"
+    assert call["selected_subjects"] is None
+    assert call["previous_subjects"] == {"order_id": "SO-OLD"}
+    service.open_or_resume.assert_awaited_once()
+    assert service.open_or_resume.await_args.kwargs["request_stack"][0]["domain"] == "refund"
+    assert service.open_or_resume.await_args.kwargs["initial_selected_subjects"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("correction_endpoint", ["/api/v1/chat", "/api/v1/chat/stream"])
+async def test_refund_choice_then_completed_subject_replacement_does_not_stick_old_order(
+    client, monkeypatch, correction_endpoint
+):
+    """Real dialogue shape: choose order, finish turn, then correct the refund subject."""
+    base = _support_case_fixture(status="AWAITING_CUSTOMER")
+    choice_case = SupportCase(
+        **{
+            **base.__dict__,
+            "request_stack": [
+                {
+                    "domain": "refund",
+                    "operation": "request",
+                    "next_step": "LOOKUP",
+                    "risk": "controlled_write",
+                }
+            ],
+            "pending": {
+                "kind": "customer_choice",
+                "subject_type": "order",
+                "choices": [{"order_id": "SO-OLD", "product_name": "Huawei Mate"}],
+            },
+        }
+    )
+    selected = SupportCase(
+        **{
+            **choice_case.__dict__,
+            "status": "ACTIVE",
+            "selected_subjects": {"order_id": "SO-OLD"},
+            "pending": {},
+            "version": choice_case.version + 1,
+        }
+    )
+    completed = SupportCase(
+        **{
+            **selected.__dict__,
+            "status": "COMPLETED",
+            "version": selected.version + 1,
+            "completed_at": datetime.now(UTC),
+        }
+    )
+
+    service = SupportCaseService()
+    service.get_active = AsyncMock(return_value=choice_case)  # type: ignore[method-assign]
+    service.get_latest = AsyncMock(return_value=choice_case)  # type: ignore[method-assign]
+    service.select_customer_subject = AsyncMock(return_value=selected)  # type: ignore[method-assign]
+    service.complete = AsyncMock(return_value=completed)  # type: ignore[method-assign]
+    client.app.state.support_case_service = service
+    client.app.state.registry.execute = AsyncMock(
+        return_value=ToolResult(name="track_order", status="success", data={"order_id": "SO-OLD"})
+    )
+    client.app.state.intent_router.route = AsyncMock(side_effect=AssertionError("structured choice must skip Router"))
+
+    transport = httpx.ASGITransport(app=client.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http_client:
+        first = await http_client.post(
+            "/api/v1/chat",
+            json={
+                "session_id": "mock-session-id",
+                "interaction": {"type": "subject_choice", "subject_type": "order", "subject_id": "SO-OLD"},
+            },
+        )
+        assert first.status_code == 200
+
+        # The completed row is now history only.  The correction turn has no active
+        # Case and must open the ordinary refund.request Case for the new subject.
+        new_case = SupportCase(
+            **{
+                **_support_case_fixture(status="ACTIVE").__dict__,
+                "request_stack": completed.request_stack,
+                "selected_subjects": {},
+            }
+        )
+        awaiting = SupportCase(
+            **{
+                **new_case.__dict__,
+                "status": "AWAITING_CUSTOMER",
+                "pending": {
+                    "kind": "customer_choice",
+                    "subject_type": "order",
+                    "choices": [
+                        {"order_id": "SO-IP-1", "product_name": "Apple iPhone 16"},
+                        {"order_id": "SO-IP-2", "product_name": "Apple iPhone Air"},
+                    ],
+                },
+                "version": new_case.version + 1,
+            }
+        )
+        service.get_active = AsyncMock(return_value=None)  # type: ignore[method-assign]
+        service.get_latest = AsyncMock(return_value=completed)  # type: ignore[method-assign]
+        service.open_or_resume = AsyncMock(return_value=SimpleNamespace(case=new_case, created=True))  # type: ignore[method-assign]
+        service.await_customer = AsyncMock(return_value=awaiting)  # type: ignore[method-assign]
+        interpreter = _MockSupportCommandInterpreter(
+            SupportCommandTurn(
+                scope="supported",
+                commands=(SupportCommand("set_subject", subject_description="iPhone"),),
+            )
+        )
+        client.app.state.support_command_interpreter = interpreter
+        client.app.state.intent_router.route = AsyncMock(
+            return_value=Intent(
+                target="agent",
+                query="刚才搞错了，其实要退 iPhone",
+                confidence=1.0,
+                domain="refund",
+                operation="request",
+                requests=[SupportRequest(domain="refund", operation="request")],
+                case_update="continue",
+                subject_relation="changed",
+                speech_act="STATEMENT",
+            )
+        )
+        client.app.state.support_workflow_agent = _MockSupportWorkflow(
+            answer="请选择新的退款订单",
+            workflow_progress={
+                "goal_status": "awaiting_customer",
+                "next_action": "ASK_CHOICE",
+                "next_actor": "CUSTOMER",
+                "pending_choices": [
+                    {"order_id": "SO-IP-1", "product_name": "Apple iPhone 16"},
+                    {"order_id": "SO-IP-2", "product_name": "Apple iPhone Air"},
+                ],
+            },
+        )
+        monkeypatch.setattr("api.chat.settings.support_command_cutover_enabled", True)
+
+        second = await http_client.post(
+            correction_endpoint,
+            json={"session_id": "mock-session-id", "query": "刚才搞错了，其实要退 iPhone"},
+        )
+
+    assert second.status_code == 200
+    assert interpreter.calls
+    assert all("已选择订单" not in str(message.get("content") or "") for message in interpreter.calls[-1]["history"])
+    workflow_call = client.app.state.support_workflow_agent.calls[-1]
+    assert workflow_call["subject_description"] == "iPhone"
+    assert workflow_call["selected_subjects"] is None
+    assert workflow_call["previous_subjects"] == {"order_id": "SO-OLD"}
+    service.open_or_resume.assert_awaited_once()
+    assert service.open_or_resume.await_args.kwargs["initial_selected_subjects"] is None
+
+
+@pytest.mark.asyncio
+async def test_product_collective_followup_reuses_exact_previous_server_frame_without_retrieval(monkeypatch):
+    import api.chat as chat_api
+    from agent.product_resolver import ProductResolver
+
+    candidates = [
+        {
+            "product_id": "phone-a",
+            "product_name": "手机 A",
+            "display_title": "手机 A",
+            "category": "phones",
+            "price": 5999,
+        },
+        {
+            "product_id": "phone-b",
+            "product_name": "手机 B",
+            "display_title": "手机 B",
+            "category": "phones",
+            "price": 5999,
+        },
+        {
+            "product_id": "phone-c",
+            "product_name": "手机 C",
+            "display_title": "手机 C",
+            "category": "phones",
+            "price": 5999,
+        },
+    ]
+
+    class CollectiveLLM:
+        def __init__(self):
+            self.calls = []
+
+        async def chat(self, messages, **kwargs):
+            self.calls.append((messages, kwargs))
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "status": "unknown",
+                        "recommended_refs": ["candidate_2", "candidate_1"],
+                    },
+                    ensure_ascii=False,
+                )
+            )
+
+    async def must_not_search(*args, **kwargs):
+        raise AssertionError("collective follow-up must reuse the exact prior server-owned frame")
+
+    monkeypatch.setattr(chat_api, "list_product_candidates", must_not_search)
+    monkeypatch.setattr(chat_api, "hybrid_search", must_not_search)
+
+    entities = {
+        "product_candidates": candidates,
+        "product_context": {
+            "category": "phones",
+            "target_price_cents": 600000,
+            "choice_refs": ["candidate_2", "candidate_1"],
+        },
+    }
+    intent = Intent(
+        target="rag",
+        domain="product",
+        operation="answer",
+        query="这些对应链接呢",
+        product_category="phones",
+        table="phone_products",
+    )
+
+    catalog_docs, catalog_acquired, context, resolution, selected, projection = await chat_api._prepare_ecommerce_role(
+        intent=intent,
+        raw_query="这些对应链接呢",
+        retrieval_query="这些对应链接呢",
+        entities=entities,
+        history=[],
+        explicit_product=None,
+        catalog_required=True,
+        resolver=ProductResolver(CollectiveLLM()),
+    )
+
+    assert catalog_docs == []
+    assert catalog_acquired is True
+    assert selected is None
+    assert resolution.recommended_refs == ["candidate_2", "candidate_1"]
+    assert context["choice_refs"] == ["candidate_2", "candidate_1"]
+    assert [item["product_id"] for item in projection["product_candidates"]] == ["phone-a", "phone-b", "phone-c"]
+    products = chat_api._recommended_products_from_refs(resolution.recommended_refs, projection["product_candidates"])
+    suffix = chat_api._recommended_product_action_suffix(products)
+    assert "category=phones&product=phone-b" in suffix
+    assert "category=phones&product=phone-a" in suffix
+    assert suffix.index("phone-b") < suffix.index("phone-a")
+
+
+@pytest.mark.parametrize(
+    ("category", "product_id"),
+    [
+        ("laptops", "lap-canonical"),
+        ("phones", "phone-canonical"),
+        ("components", "component-canonical"),
+    ],
+)
+def test_server_recommendation_links_are_category_agnostic_and_use_canonical_identity(category, product_id):
+    from api.chat import _recommended_product_action_suffix
+
+    suffix = _recommended_product_action_suffix(
+        [
+            {
+                "product_id": product_id,
+                "product_name": "测试商品",
+                "display_title": "测试商品",
+                "category": category,
+                "price": 5999,
+            }
+        ]
+    )
+    assert f"?page=product&category={category}&product={product_id}" in suffix

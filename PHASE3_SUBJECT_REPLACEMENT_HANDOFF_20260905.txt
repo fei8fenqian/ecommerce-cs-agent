@@ -1,0 +1,165 @@
+E-Commerce-Agent Phase 3 — Subject Replacement / Structured Choice 收口
+日期：2026-09-05
+基线：E-Commerce-Agent-phase3-merged-20260905-0055.tar.gz
+
+一、这轮真正修的是什么
+
+原故障形状：
+1. 用户提出退款对象 A；
+2. 系统展示多笔候选订单；
+3. 用户点击一笔；
+4. 该轮完成后，用户说“刚才搞错了，其实要退 B”；
+5. 旧 Case / pending / selected subject 仍可能把 A 黏回后续 Workflow。
+
+这轮没有增加新的“纠正状态机”。核心改为：
+- UI 订单选择是结构化 interaction，不作为用户自然语言语义；
+- structured interaction 仍可在客户历史中显示，但带 _interaction 元数据，进入任何 LLM history 前整条过滤；
+- set_subject 被视为 semantic slot replacement，而不是 Case lifecycle 特例；
+- 活动 Case 更换对象时，退休旧 order binding、旧 subject-bound facts、旧 pending choice，但保留 Goal/request_stack；
+- 最近 COMPLETED Case 只提供 immediate Goal / previous-subject context，terminal row 永不 reopen；
+- 若用户在 completed 后立刻换对象，开启一个普通新 Case，而不是创建 derived correction Case；
+- old subject 只有重新 ownership verify 后才作为 OrderSubjectResolver 的 previous_subjects context，绝不作为 current binding；
+- choice_N 仍只能绑定当前 server-owned pending frame，completed Case 绝不能复用 stale choice ref。
+
+二、状态边界
+
+保留：
+- Refund / Payment / Provider 的真实业务状态；
+- SupportCase 作为 persistence / audit / recoverability；
+- candidate membership / ownership / tool fresh-read / legal state transition。
+
+降级：
+- Case.status 不再决定用户“能不能改退款对象”；
+- COMPLETED 只表示上一段执行记录结束，不表示语义上下文被封死。
+
+没有引入：
+- reopen Case；
+- derived correction Case 作为新主路径；
+- phrase matcher；
+- brand-specific branch；
+- Judge / Manager / Planner V2。
+
+三、关键生产改动
+
+- src/agent/llm/session.py
+  structured UI interaction 从所有 model history 中过滤，但保留 customer-visible transcript。
+
+- src/agent/llm/support_command.py
+  明确 completed 后紧接着纠正对象仍应输出 set_subject。
+
+- src/agent/support_command_runtime.py
+  set_subject 可从最近 completed 的 singular order/refund Goal 延续；choice ref 仍只允许 active pending frame。
+
+- src/service/support_case_service.py
+  retire_customer_subject_for_change：保留 Goal，退休旧 subject / subject-bound facts / pending，并 historicalize 旧 context。
+
+- src/api/chat.py
+  /chat 与 /chat/stream 同步接线；completed continuity 使用普通新 Case；旧 subject 只作为 reverified previous_subjects；所有 session persistence 带 structured interaction metadata。
+
+- src/config.py / .env.example
+  SUPPORT_COMMAND_CUTOVER_ENABLED 默认 false；真实 E2E 时显式设为 true，通过后再决定是否默认切流。
+
+四、测试证据
+
+本容器缺真实项目依赖 psycopg / tiktoken / langgraph / redis，且 DNS 不可用，不能安装依赖，因此不能声称“真实完整环境 full pytest PASS”。
+
+为避免只做静态检查，本轮做了两层验证：
+
+A. 不依赖外部包的真实模块测试：
+- python -m compileall -q src tests
+- python tests/test_support_command_runtime.py
+- python tests/test_support_command_binding_harness.py
+- python tests/test_support_dialogue_scenario_matrix.py
+- python tests/test_support_command.py
+结果：全部 PASS。
+
+B. 临时 stub 仅替代缺失第三方依赖；项目自己的 api.chat / CaseService / Runtime / Workflow / Resolver / FastAPI endpoint 仍执行。
+客服相关集合：227/227 PASS：
+- tests/test_api_chat.py                         119
+- tests/test_api_session.py                       4
+- tests/test_support_case_service.py             15
+- tests/test_support_workflow.py                 59
+- tests/test_order_subject_resolver.py            5
+- tests/test_support_subjects.py                 13
+- tests/test_log_redaction.py                     7
+- tests/test_support_trace.py                     5
+
+额外重点回归：
+- structured click -> completed refund turn -> “刚才搞错了，其实要退 iPhone”
+- 第二轮分别走 /api/v1/chat 和 /api/v1/chat/stream
+- 两条路径均：
+  * LLM history 看不到“已选择订单：SO-OLD”伪自然语言；
+  * 新 Case initial_selected_subjects=None；
+  * Workflow subject_description=iPhone；
+  * previous_subjects=SO-OLD 仅作为重新 ownership verify 后的 context；
+  * 不会把旧 SO-OLD 当 current binding；
+  * 新候选可以正常 ASK_CHOICE。
+
+五、原包中顺手修的 3 个测试契约漂移
+
+这些失败在未修改基线包上也可复现，不是本轮 production regression：
+- 2 个 SupportWorkflow 测试未提供当前 contract 已要求的 support_requests；
+- 1 个测试仍断言旧 prompt 文案“服务端可信状态”，production 已是“服务端持久化状态”；
+- structured choice API 测试原先硬编码整套 allowed_tools，漏掉基线已存在的 present_product_candidates；改为断言与该安全边界真正相关的 track_order / customer role / create_ticket blocked。
+
+六、用户本机真实 E2E Gate（必须跑）
+
+确认环境（只在本机 E2E/验证环境显式开启）：
+SUPPORT_COMMAND_CUTOVER_ENABLED=true
+
+默认仍为 false，避免未经真实 E2E 的新 authority 因缺少环境覆盖而自动接管。
+
+建议先跑：
+pytest tests/test_api_chat.py \
+       tests/test_api_session.py \
+       tests/test_support_case_service.py \
+       tests/test_support_workflow.py \
+       tests/test_order_subject_resolver.py \
+       tests/test_support_subjects.py \
+       tests/test_log_redaction.py \
+       tests/test_support_trace.py
+
+然后真实前端对话至少验证：
+
+场景 1：多订单 -> 点击 -> 完成 -> 改对象
+“我想把刚买的华为退了”
+-> 选择一笔真实 Huawei
+-> 系统核验并给退款入口/下一步
+-> “哦我记错了，我想退的是 iPhone”
+预期：只出现 authenticated iPhone 候选；不得继续展示旧 Huawei frame，不得默认旧订单。
+
+场景 2：新候选再点击
+点击 iPhone 候选
+预期：只绑定当前 frame；ownership 重新验证；退款资格基于该 iPhone fresh-read。
+
+场景 3：显式订单号
+“我其实要退 SO...”
+预期：只有 raw user query 真出现的订单号才允许 fast-path；ownership 失败 fail closed。
+
+场景 4：状态续问
+自助申请退款后：“我已经申请了 / 现在到哪了”
+预期：复用 verified subject identity，但 query_refund_status fresh-read，不相信 customer claim。
+
+场景 5：sync/stream parity
+同一组对话分别走 /chat 与 /chat/stream，Case transition / pending choices / subject binding 必须一致。
+
+七、如果真实 E2E 失败，先按这个分类，不要再加 semantic glue
+
+A. LLM SupportCommand 语义错 -> 调 interpreter prompt/schema/eval，不加中文 phrase helper。
+B. candidate membership / ownership / stale version 错 -> 修 Runtime/Case legality。
+C. subject_description 到候选绑定错 -> 修 OrderSubjectResolver contract，不让 Router/Case 再理解一次。
+D. refund/payment mutable fact 错 -> fresh-read Tool/Provider；不要从 history/case claim 猜。
+E. stream 与 sync 不一致 -> 修共享控制流，不单独做 stream 语义分支。
+
+八、一句话结论
+
+现在的主路径是：
+User natural language
+-> LLM SupportCommand（理解“换成 B”）
+-> deterministic Runtime（验证能否这么做）
+-> ordinary SupportCase（审计/恢复，不做语义门卫）
+-> authenticated OrderSubjectResolver
+-> existing SupportWorkflow
+-> Tool / Provider fresh truth。
+
+本轮目标不是让退款拥有更多状态，而是让“换退款对象”退出状态机特例，回归普通 semantic slot replacement。

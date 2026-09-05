@@ -450,9 +450,7 @@ def _render_blocked_missing(
         and current_fact("shipping_status")
         and "refund_entry" in missing_set
     ):
-        result.answer = (
-            "这笔订单当前符合退款资格且尚未发货，但暂时无法生成退款入口，请从订单页稍后重试。"
-        )
+        result.answer = "这笔订单当前符合退款资格且尚未发货，但暂时无法生成退款入口，请从订单页稍后重试。"
     elif known or details:
         prefix = f"我已经定位到“{subject_label}”这笔订单。" if subject_label else ""
         result.answer = prefix + "".join(known + details)
@@ -747,6 +745,26 @@ def _refund_prose_matches_known_facts(answer: str, facts: Mapping[str, Any]) -> 
     return True
 
 
+_SUBJECT_RESELECTION_PATTERN = re.compile(
+    r"(?:"
+    r"(?:请|麻烦|需要|还请|请再|请重新).{0,14}(?:提供|回复|告诉|确认|选择).{0,16}(?:订单号|哪一(?:笔|单)|订单)"
+    r"|(?:想|要|需要).{0,10}(?:退|查|处理).{0,8}(?:哪一(?:笔|单)|哪个订单)"
+    r"|(?:which|what).{0,12}order|(?:provide|select|choose|confirm).{0,12}order"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _prose_reasks_bound_subject(answer: str, subject_id: str | None) -> bool:
+    """Reject presentation that asks for an order the server already bound.
+
+    This validates final prose against server-owned identity; it does not infer
+    customer intent or select an order.  Once ``subject_id`` is authoritative,
+    asking the customer to identify/select that subject again is contradictory.
+    """
+    return bool(subject_id and _SUBJECT_RESELECTION_PATTERN.search(answer))
+
+
 def _safe_operator_read_prose(
     answer: str,
     facts: Mapping[str, Any],
@@ -761,6 +779,8 @@ def _safe_operator_read_prose(
     refund state; otherwise a deterministic fact renderer remains the fallback.
     """
     if not answer.strip():
+        return False
+    if _prose_reasks_bound_subject(answer, subject_id):
         return False
     if _unverified_refund_claim(answer, facts, trusted_subject_id=subject_id) is not None:
         return False
@@ -1149,11 +1169,16 @@ def compose_customer_response(
     ) and has_control_envelope
     if blocked:
         reason = str(progress.get("reason") or "")
-        if subject_id is not None and result.answer.strip() and reason in {
-            "fact_tool_failed",
-            "capability_unavailable",
-            "completion_criteria_not_satisfied",
-        }:
+        if (
+            subject_id is not None
+            and result.answer.strip()
+            and reason
+            in {
+                "fact_tool_failed",
+                "capability_unavailable",
+                "completion_criteria_not_satisfied",
+            }
+        ):
             safe = (
                 _safe_operator_read_prose(
                     result.answer,

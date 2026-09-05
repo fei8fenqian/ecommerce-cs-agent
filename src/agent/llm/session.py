@@ -130,7 +130,15 @@ def _trim_history(
 def _model_safe_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """移除仅供服务端恢复事实的会话元数据后再交给模型。"""
     allowed_keys = {"role", "content", "name", "tool_calls", "tool_call_id"}
-    return [{key: value for key, value in message.items() if key in allowed_keys} for message in messages]
+    return [
+        {key: value for key, value in message.items() if key in allowed_keys}
+        for message in messages
+        # Structured UI interactions are already interpreted and validated by
+        # the server.  Keep their customer-visible transcript entry for reload,
+        # but never feed that synthetic prose back to an LLM as if the customer
+        # had typed it.
+        if not isinstance(message.get("_interaction"), dict)
+    ]
 
 
 class SessionManager:
@@ -252,15 +260,18 @@ class SessionManager:
         owner_user_id: int,
         query: str,
         result: LoopResult,
+        *,
+        user_interaction: dict[str, Any] | None = None,
     ) -> None:
         """保存一轮完整的 Agent ReAct 对话。"""
         ctx = await self.get(session_id, owner_user_id)
         if ctx is None:
             return
 
-        new_messages: list[dict[str, Any]] = [
-            {"role": "user", "content": query},
-        ]
+        user_message: dict[str, Any] = {"role": "user", "content": query}
+        if user_interaction:
+            user_message["_interaction"] = json.loads(json.dumps(user_interaction, ensure_ascii=False))
+        new_messages: list[dict[str, Any]] = [user_message]
 
         for step in result.steps:
             if not step.tool_calls:
@@ -383,6 +394,7 @@ class SessionManager:
         answer: str,
         *,
         presentation: dict[str, Any] | None = None,
+        user_interaction: dict[str, Any] | None = None,
     ) -> None:
         """只保存 user 和 assistant 两条消息及可选 customer-safe presentation。"""
         ctx = await self.get(session_id, owner_user_id)
@@ -392,10 +404,10 @@ class SessionManager:
         assistant_message: dict[str, Any] = {"role": "assistant", "content": answer}
         if presentation:
             assistant_message["_presentation"] = json.loads(json.dumps(presentation, ensure_ascii=False))
-        new_messages = [
-            {"role": "user", "content": query},
-            assistant_message,
-        ]
+        user_message: dict[str, Any] = {"role": "user", "content": query}
+        if user_interaction:
+            user_message["_interaction"] = json.loads(json.dumps(user_interaction, ensure_ascii=False))
+        new_messages = [user_message, assistant_message]
         title = query[:50] if not ctx.title else None
 
         await append_session_messages(

@@ -168,28 +168,54 @@ class SupportCaseService:
             },
         )
 
-    async def release_customer_choice_for_subject_change(self, case: SupportCase) -> SupportCase | None:
-        """Retire an obsolete customer-choice frame while preserving the Case Goal.
+    async def retire_customer_subject_for_change(self, case: SupportCase) -> SupportCase | None:
+        """Retire stale subject state before semantic replacement.
 
-        A Router-classified subject correction means the displayed choice frame no longer
-        owns the turn.  The persisted request_stack remains authoritative for the business
-        Goal, while the next Workflow pass must rediscover the current authenticated
-        subject from fresh order facts.  No subject is selected here and no transaction
-        fact is reused as current truth.
+        Once the customer says the object is different, the old order is no longer a
+        current binding.  Keep the canonical Goal/request stack, but clear the displayed
+        choice frame, current order selection and subject-bound transaction facts.  The
+        previous order survives only as historical audit context plus a reset marker until
+        a fresh authenticated subject is bound.
+
+        This deliberately avoids a separate ``subject_correction`` Case lifecycle.  The
+        next Workflow pass is an ordinary subject discovery step for the same business
+        Goal.
         """
-        if case.status != "AWAITING_CUSTOMER" or case.pending.get("kind") != "customer_choice":
+        if case.status not in {"ACTIVE", "AWAITING_CUSTOMER"}:
             return case
+        old_pending_kind = str(case.pending.get("kind") or "")
         choices = case.pending.get("choices")
         choice_count = len(choices) if isinstance(choices, list) else 0
+        old_order_id = case.selected_subjects.get("order_id")
+        existing_contexts = case.verified_facts.get("_decision_contexts", [])
+        historical_contexts = historicalize_decision_contexts(
+            existing_contexts if isinstance(existing_contexts, list) else []
+        )
+        verified_facts = {
+            key: value
+            for key, value in case.verified_facts.items()
+            if key not in {"_decision_contexts", SUBJECT_CONTEXT_RESET_MARKER} and key not in SUBJECT_BOUND_FACTS
+        }
+        if historical_contexts:
+            verified_facts["_decision_contexts"] = historical_contexts
+        if self._valid_order_id(old_order_id):
+            verified_facts[SUBJECT_CONTEXT_RESET_MARKER] = {
+                "from_subject_id": old_order_id,
+                "reason": "customer_changed_subject",
+            }
+        selected_subjects = {key: value for key, value in case.selected_subjects.items() if key != "order_id"}
         return await self._replace(
             case,
             status="ACTIVE",
+            selected_subjects=selected_subjects,
+            verified_facts=verified_facts,
             pending={},
             pending_command={},
             event_type="CUSTOMER_RESPONSE",
             event_payload={
-                "pending_kind": "customer_choice",
+                "pending_kind": old_pending_kind,
                 "reason": "SUBJECT_CHANGED",
+                "old_subject_id": old_order_id if self._valid_order_id(old_order_id) else None,
                 "choice_count": choice_count,
                 "request_stack_preserved": True,
             },

@@ -7,7 +7,7 @@ import time
 import uuid
 from dataclasses import replace
 from typing import Any, Literal, Mapping, Sequence
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlparse
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -30,6 +30,7 @@ from agent.evidence import resolve_evidence
 from agent.llm.intent_router import Intent, IntentRouter, SupportRequest, build_route_instruction
 from agent.llm.resolve import resolve_stock_follow_up
 from agent.llm.sentiment import build_escalation_prompt, detect_sentiment
+from agent.llm.support_command import interpretation_log_payload
 from agent.order_subject_resolver import resolve_order_subject
 from agent.product_context import (
     attach_candidate_frame,
@@ -55,6 +56,8 @@ from agent.subject_correction import (
     detect_subject_correction,
     resolve_subject_description,
 )
+from agent.support_command_contract import SupportCommand, SupportCommandTurn
+from agent.support_command_runtime import SupportCaseSnapshot, plan_support_command
 from agent.support_control import confirmation_required
 from agent.support_subjects import (
     MAX_ORDER_CHOICE_OPTIONS,
@@ -156,12 +159,19 @@ class ChatRequest(BaseModel):
 
     @property
     def history_content(self) -> str:
-        """为结构化点击生成可读的客户历史文本，不把它送回 Router 猜测。"""
+        """为结构化点击生成仅供客户可见历史的文本。"""
         if self.query.strip():
             return self.query
         if self.interaction is not None:
             return f"已选择订单：{self.interaction.subject_id}"
         return ""
+
+    @property
+    def session_interaction(self) -> dict[str, object] | None:
+        """Return structured UI metadata that must remain outside model history."""
+        if self.interaction is None:
+            return None
+        return self.interaction.model_dump(mode="json")
 
 
 class ChatResponse(BaseModel):
@@ -191,6 +201,364 @@ _CUSTOMER_CHAT_READ_TOOLS = frozenset(
         "search_component",
     }
 )
+
+
+def _support_command_case_context(case: SupportCase | None) -> dict[str, object]:
+    """Project Case state for the Support Command Generator without real IDs.
+
+    Mature command generators need active flow/pending context, but the semantic
+    layer must not receive authority-bearing order ids.  Choice refs are rebuilt
+    as ephemeral ``choice_N`` handles for this one prompt only.
+    """
+    if case is None:
+        return {}
+
+    goals: list[str] = []
+    for item in case.request_stack[:3] if isinstance(case.request_stack, list) else []:
+        if not isinstance(item, dict):
+            continue
+        domain = str(item.get("domain") or "").strip()
+        operation = str(item.get("operation") or "").strip()
+        if domain and operation:
+            goals.append(f"{domain}.{operation}")
+
+    pending = case.pending if isinstance(case.pending, dict) else {}
+    safe_pending: dict[str, object] = {"kind": str(pending.get("kind") or "")}
+    choices = pending.get("choices")
+    if isinstance(choices, list):
+        public_choices: list[dict[str, object]] = []
+        for index, choice in enumerate(choices[:10], start=1):
+            if not isinstance(choice, dict):
+                continue
+            item: dict[str, object] = {"ref": f"choice_{index}"}
+            product_name = choice.get("product_name")
+            if isinstance(product_name, str) and product_name.strip():
+                item["description"] = product_name.strip()[:180]
+            amount_cents = choice.get("amount_cents")
+            if isinstance(amount_cents, int) and not isinstance(amount_cents, bool) and amount_cents >= 0:
+                item["amount_yuan"] = round(amount_cents / 100, 2)
+            public_choices.append(item)
+        safe_pending["choices"] = public_choices
+        safe_pending["choice_count"] = len(public_choices)
+
+    safe_current_subject: dict[str, object] | None = None
+    if not _case_has_subject_context_reset(case) and isinstance(case.selected_subjects, dict):
+        selected_order_id = case.selected_subjects.get("order_id")
+        if isinstance(selected_order_id, str) and selected_order_id.startswith("SO"):
+            safe_current_subject = {"ref": "current_subject"}
+            product_name = case.selected_subjects.get("product_name")
+            if isinstance(product_name, str) and product_name.strip():
+                safe_current_subject["description"] = product_name.strip()[:180]
+
+    return {
+        "status": str(case.status or ""),
+        "goals": goals,
+        "has_verified_subject": safe_current_subject is not None,
+        "current_subject": safe_current_subject,
+        "pending": safe_pending,
+    }
+
+
+async def _interpret_support_command(
+    request: Request,
+    *,
+    raw_query: str,
+    history: list[dict[str, Any]] | None,
+    case: SupportCase | None,
+    legacy_domain: str,
+) -> SupportCommandTurn | None:
+    """Interpret one support turn for shadow/coexistence cutover.
+
+    The interpreter itself has no business authority.  Provider/parse/timeout
+    failures are swallowed; only a separately validated Runtime plan may affect
+    Case/Workflow state when cutover mode is enabled.
+    """
+    user = getattr(request.state, "user", {})
+    if not isinstance(user, dict) or user.get("role") != "customer":
+        return None
+    # Coexistence gate: only interpret the migrated order/refund topic area.
+    # An active Case qualifies even if the legacy Router misclassifies the
+    # current correction turn.
+    if case is None and legacy_domain not in {"order", "refund"}:
+        return None
+    interpreter = getattr(request.app.state, "support_command_interpreter", None)
+    if interpreter is None:
+        return None
+    try:
+        turn = await interpreter.interpret(
+            raw_query,
+            history=history,
+            case_context=_support_command_case_context(case),
+        )
+    except Exception as exc:
+        _chat_logger.warning(
+            "support command interpretation failed",
+            extra={
+                "support_event": "support_command_interpretation_error",
+                "error_type": type(exc).__name__,
+            },
+        )
+        return None
+    _chat_logger.info(
+        "support command interpretation trace",
+        extra={
+            **interpretation_log_payload(turn),
+            "support_event": "support_command_interpretation",
+            "mode": "cutover" if settings.support_command_cutover_enabled else "shadow",
+        },
+    )
+    return turn
+
+
+def _case_support_requests(case: SupportCase | None) -> list[SupportRequest]:
+    if case is None:
+        return []
+    return IntentRouter.support_requests_from_case_payloads(case.request_stack)
+
+
+def _support_case_snapshot(case: SupportCase | None) -> SupportCaseSnapshot | None:
+    if case is None:
+        return None
+    requests = _case_support_requests(case)
+    primary = requests[0] if requests else None
+    choices = case.pending.get("choices") if isinstance(case.pending, dict) else None
+    return SupportCaseSnapshot(
+        status=str(case.status or ""),
+        goal_domain=str(primary.domain if primary is not None else ""),
+        goal_operation=str(primary.operation if primary is not None else ""),
+        pending_kind=str(case.pending.get("kind") or "") if isinstance(case.pending, dict) else "",
+        pending_choice_count=len(choices) if isinstance(choices, list) else 0,
+        has_verified_subject=bool(case.selected_subjects.get("order_id")),
+    )
+
+
+def _single_cutover_command(
+    turn: SupportCommandTurn | None,
+    *,
+    active_case: SupportCase | None = None,
+    recent_case: SupportCase | None = None,
+) -> SupportCommand | None:
+    """Return one structurally safe command for Phase 3 cutover.
+
+    The semantic interpreter may redundantly restate the already-active Goal
+    while also correcting its subject (for example ``start_goal(refund.request)``
+    plus ``set_subject(iPhone)``).  Requiring one exact surface form makes the
+    Runtime unnecessarily brittle even when every proposed command describes
+    the same server-owned Goal.  Collapse only that structurally equivalent
+    shape; conflicting/mixed multi-command turns still fail closed.
+    """
+    if not settings.support_command_cutover_enabled or turn is None or turn.scope != "supported":
+        return None
+    commands = list(turn.commands)
+    if not commands:
+        return None
+
+    continuity = active_case or recent_case
+    snapshot = _support_case_snapshot(continuity)
+    continuity_goal = (snapshot.goal_domain, snapshot.goal_operation) if snapshot is not None else ("", "")
+
+    def same_goal_restart(command: SupportCommand) -> bool:
+        return bool(
+            command.type == "start_goal"
+            and continuity_goal != ("", "")
+            and (command.domain, command.operation) == continuity_goal
+            and not command.candidate_ref
+        )
+
+    # A single same-goal restart carrying a new semantic subject is equivalent
+    # to replacing the current subject.  The Runtime still performs all Case,
+    # ownership and candidate validation afterwards.
+    if len(commands) == 1:
+        command = commands[0]
+        if same_goal_restart(command) and command.subject_description.strip():
+            return SupportCommand(
+                "set_subject",
+                subject_description=command.subject_description,
+                confidence=command.confidence,
+            )
+        return command
+
+    subject_commands = [command for command in commands if command.type == "set_subject"]
+    restart_commands = [command for command in commands if command.type == "start_goal"]
+    if (
+        len(subject_commands) == 1
+        and len(subject_commands) + len(restart_commands) == len(commands)
+        and all(same_goal_restart(command) for command in restart_commands)
+    ):
+        # A redundant same-goal restart has no separate business effect.  Drop
+        # it and execute the single subject replacement atomically.
+        return subject_commands[0]
+
+    return None
+
+
+async def _apply_support_command_cutover(
+    request: Request,
+    *,
+    command: SupportCommand | None,
+    raw_query: str,
+    active_case: SupportCase | None,
+    recent_case: SupportCase | None,
+    tool_context: ToolContext | None,
+) -> tuple[bool, SupportCase | None, list[SupportRequest], str, dict[str, object] | None, str]:
+    """Execute a deterministic Runtime plan after semantic interpretation.
+
+    Natural-language meaning is already contained in ``command``.  This layer
+    only validates Case state, candidate membership and ownership before
+    projecting existing business requests into SupportWorkflow.
+    """
+    if command is None or tool_context is None or tool_context.role != "customer":
+        return False, active_case, [], "", None, "router"
+
+    # A semantic interpreter may summarize an order reference the customer
+    # actually typed, but it must never introduce a new real identifier.
+    # Candidate binding remains server-owned and provenance-checked.
+    raw_order_refs = set(_explicit_order_references(raw_query))
+    semantic_order_refs = set(_explicit_order_references(command.subject_description))
+    if semantic_order_refs - raw_order_refs:
+        return False, active_case, [], "", None, "router"
+
+    plan = plan_support_command(
+        command,
+        active_case=_support_case_snapshot(active_case),
+        recent_case=_support_case_snapshot(recent_case),
+    )
+    if not plan.handled:
+        return False, active_case, [], "", None, "router"
+
+    if plan.action == "set_subject_description":
+        continuity_case = active_case or recent_case
+        if continuity_case is None:
+            return False, active_case, [], "", None, "router"
+        service = getattr(request.app.state, "support_case_service", None)
+        if not isinstance(service, SupportCaseService):
+            return False, active_case, [], "", None, "router"
+
+        # Full checkout order refs are an allowed high-confidence reference
+        # fast-path.  The identifier is never trusted by itself: ownership is
+        # checked before it becomes a current binding.
+        explicit_order_id = _explicit_order_reference(raw_query)
+        if explicit_order_id:
+            if not await _verify_customer_order_subject(request, order_id=explicit_order_id, tool_context=tool_context):
+                # A direct customer reference that fails ownership validation is
+                # not replaced by a different semantic guess.  Leave it on the
+                # legacy/fail-closed path instead of letting the model choose an
+                # unrelated owned order.
+                return False, active_case, [], "", None, "router"
+            subject = {"order_id": explicit_order_id}
+            if active_case is not None:
+                current_order_id = active_case.selected_subjects.get("order_id")
+                if isinstance(current_order_id, str) and current_order_id.startswith("SO"):
+                    if current_order_id == explicit_order_id:
+                        updated = active_case
+                    else:
+                        updated = await service.transition_customer_subject(
+                            active_case, subject=subject, selection_source="support_command_explicit_order"
+                        )
+                else:
+                    updated = await service.select_customer_subject(
+                        active_case, subject=subject, selection_source="support_command_explicit_order"
+                    )
+                if updated is None:
+                    raise HTTPException(status_code=409, detail="当前订单选择状态已变化，请重试。")
+            else:
+                # The previous Case is terminal and remains immutable.  The
+                # verified subject is projected into the normal Case that the
+                # endpoint opens for this new turn; no derived correction Case
+                # is needed here.
+                updated = None
+            return (
+                True,
+                updated,
+                _case_support_requests(continuity_case),
+                "",
+                {"order_id": explicit_order_id},
+                "support_command",
+            )
+
+        updated = active_case
+        if active_case is not None:
+            # A semantic subject replacement retires both an obsolete choice
+            # frame and any previously bound order/facts.  The old order may be
+            # passed to the Resolver later only as revalidated previous-subject
+            # context, never as the current binding.
+            updated = await service.retire_customer_subject_for_change(active_case)
+            if updated is None:
+                raise HTTPException(status_code=409, detail="当前订单选择状态已变化，请重试。")
+        return (
+            True,
+            updated,
+            _case_support_requests(continuity_case),
+            plan.subject_description,
+            None,
+            "support_command",
+        )
+
+    if plan.action == "set_subject_choice":
+        if active_case is None:
+            return False, active_case, [], "", None, "router"
+        choices = active_case.pending.get("choices")
+        if not isinstance(choices, list) or plan.candidate_index >= len(choices):
+            return False, active_case, [], "", None, "router"
+        choice = choices[plan.candidate_index]
+        if not isinstance(choice, dict):
+            return False, active_case, [], "", None, "router"
+        order_id = choice.get("order_id")
+        if not isinstance(order_id, str) or not await _verify_customer_order_subject(
+            request, order_id=order_id, tool_context=tool_context
+        ):
+            return False, active_case, [], "", None, "router"
+        service = getattr(request.app.state, "support_case_service", None)
+        if not isinstance(service, SupportCaseService):
+            return False, active_case, [], "", None, "router"
+        updated = await service.select_customer_subject(
+            active_case,
+            subject=choice,
+            selection_source="support_command_choice_ref",
+        )
+        if updated is None:
+            raise HTTPException(status_code=409, detail="当前订单选择状态已变化，请重试。")
+        return True, updated, _case_support_requests(updated), "", dict(updated.selected_subjects), "support_command"
+
+    if plan.action == "read_status":
+        selected_override: dict[str, object] | None = None
+        subject_description = plan.subject_description
+        explicit_order_id = _explicit_order_reference(raw_query)
+        if explicit_order_id:
+            if not await _verify_customer_order_subject(request, order_id=explicit_order_id, tool_context=tool_context):
+                return False, active_case, [], "", None, "router"
+            selected_override = {"order_id": explicit_order_id}
+            subject_description = ""
+        elif plan.reuse_verified_subject:
+            continuity_case = active_case or recent_case
+            previous = await _trusted_previous_subject_for_resolution(
+                request,
+                intent=Intent(target="agent", domain=plan.domain, operation=plan.operation),
+                recent_case=continuity_case,
+                tool_context=tool_context,
+            )
+            if previous is None:
+                # The semantic command explicitly referenced current_subject,
+                # so losing provenance/ownership must fail closed rather than
+                # silently turning into an unbound status lookup.
+                return False, active_case, [], "", None, "router"
+            selected_override = previous
+        request_item = SupportRequest(
+            domain=plan.domain,
+            operation=plan.operation,
+            next_step="LOOKUP",
+            risk="read_only",
+        )
+        return (
+            True,
+            active_case,
+            [request_item],
+            subject_description,
+            selected_override,
+            "support_command",
+        )
+
+    return False, active_case, [], "", None, "router"
 
 
 def _semantic_hint_payload(
@@ -368,7 +736,7 @@ def _goal_relevant_tools(intent: Intent, *, canonical_product: bool = False) -> 
         # is the Router-owned Goal.
         if canonical_product:
             return frozenset()
-        return frozenset({"search_product", "search_component", "present_product_candidates"})
+        return frozenset({"search_product", "search_component"})
     relevant: set[str] = set()
     for domain, operation in keys:
         if domain == "product":
@@ -378,7 +746,6 @@ def _goal_relevant_tools(intent: Intent, *, canonical_product: bool = False) -> 
                     "search_component",
                     "compare_products",
                     "search_knowledge",
-                    "present_product_candidates",
                 }
             )
         elif domain == "inventory":
@@ -421,11 +788,11 @@ def _ecommerce_operator_tool_context(
     catalog_bound: bool,
     candidate_refs: Sequence[str] = (),
 ) -> ToolContext:
-    """Keep catalog acquisition in the Ecommerce Procedure, not the Operator loop.
+    """Keep catalog acquisition and candidate authority outside the Operator loop.
 
-    The Operator may declare an ordered presentation over opaque candidate refs,
-    but cannot search a second catalog once the server has already formed the
-    authoritative candidate frame.
+    Once the server has formed an authoritative candidate frame, ProductResolver
+    owns semantic selection/recommendation inside that frame.  The Operator only
+    explains the resulting public candidates and cannot search or redeclare them.
     """
     narrowed = _operator_tool_context(tool_context, intent, canonical_product=canonical_product)
     narrowed = replace(
@@ -436,7 +803,8 @@ def _ecommerce_operator_tool_context(
         return narrowed
     return replace(
         narrowed,
-        allowed_tools=frozenset(narrowed.allowed_tools) - {"search_product", "search_component", "compare_products"},
+        allowed_tools=frozenset(narrowed.allowed_tools)
+        - {"search_product", "search_component", "compare_products", "present_product_candidates"},
     )
 
 
@@ -492,9 +860,9 @@ def _customer_chat_capability_context(
         + json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
         + "\n如果 product_detail_navigation=true，服务端一定会在本轮最终回答附上真实商品详情入口；"
         "此时不得声称无法提供/生成商品链接，也不要让客户再去目录里手动搜索。"
-        "recommended_product_navigation=true 表示当前候选帧支持推荐详情入口；当你实际推荐商品时，"
-        "必须先调用 present_product_candidates(mode=recommend, candidate_refs=[...]) 声明你将展示的候选及顺序，"
-        "服务端随后会为这些候选附上真实详情入口；这不等于客户已经选中商品。"
+        "recommended_product_navigation=true 表示服务端已经从当前候选帧验证了本轮推荐商品及顺序，"
+        "并会自动附上这些商品的真实详情入口；你只负责解释推荐理由，不要调用展示协议工具，"
+        "也不要自己生成 URL、product_id 或额外商品。推荐不等于客户已经选中商品。"
         "orders_navigation=true 表示服务端可以提供当前登录客户的订单页入口。"
         "但不要自己生成 URL。create_order/address/payment/checkout 能力为 false 时，不得索要这些信息，"
         "也不得声称会代客户下单或付款。具体当前在售商品只能来自本轮 catalog/tool 观察或服务端已选商品。"
@@ -675,7 +1043,7 @@ async def _release_case_backed_subject_correction_choice(
     service = getattr(request.app.state, "support_case_service", None)
     if not isinstance(service, SupportCaseService):
         return case
-    updated = await service.release_customer_choice_for_subject_change(case)
+    updated = await service.retire_customer_subject_for_change(case)
     if updated is None:
         raise HTTPException(status_code=409, detail="当前订单选择状态已变化，请重试。")
     return updated
@@ -1188,9 +1556,50 @@ async def _open_support_case(
     return opened.case
 
 
+async def _open_support_command_case(
+    request: Request,
+    *,
+    session_id: str,
+    customer_user_id: int,
+    support_requests: Sequence[SupportRequest],
+    selected_subjects: dict[str, object] | None = None,
+) -> SupportCase | None:
+    """Open the ordinary auditable Case for an accepted semantic command.
+
+    A completed Case may supply immediate Goal/subject continuity to the
+    command Runtime, but terminal rows are never reopened and no special
+    correction Case is derived from them.  This helper creates the same normal
+    Case used by any other support turn, optionally pre-binding only a subject
+    that the current request already revalidated through ownership checks.
+    """
+    payloads = _support_request_payloads(support_requests)
+    if not payloads:
+        return None
+    service = getattr(request.app.state, "support_case_service", None)
+    if not isinstance(service, SupportCaseService):
+        return None
+    opened = await service.open_or_resume(
+        session_id=session_id,
+        customer_user_id=customer_user_id,
+        request_stack=payloads,
+        initial_selected_subjects=selected_subjects,
+    )
+    return opened.case
+
+
+def _explicit_order_references(query: str) -> tuple[str, ...]:
+    """Extract customer-visible checkout references for deterministic validation only."""
+    refs: list[str] = []
+    for match in re.finditer(r"\bSO[A-Z0-9_-]+\b", query, flags=re.IGNORECASE):
+        value = match.group(0).upper()
+        if value not in refs:
+            refs.append(value)
+    return tuple(refs)
+
+
 def _explicit_order_reference(query: str) -> str | None:
-    match = re.search(r"\bSO[A-Z0-9_-]+\b", query, flags=re.IGNORECASE)
-    return match.group(0).upper() if match is not None else None
+    refs = _explicit_order_references(query)
+    return refs[0] if refs else None
 
 
 def _trusted_subject_relation(intent: Intent, *, recent_order_id: str, raw_query: str) -> str:
@@ -2783,6 +3192,8 @@ def _visible_product_refs(
         return [resolution.selected_ref]
     if resolution.status == "ambiguous" and resolution.ambiguous_refs:
         return [ref for ref in resolution.ambiguous_refs if ref in by_ref]
+    if resolution.recommended_refs:
+        return [ref for ref in resolution.recommended_refs if ref in by_ref]
     return list(by_ref.keys())
 
 
@@ -2792,13 +3203,11 @@ def _product_procedure_context(
     candidates: list[dict[str, Any]],
     resolution: ProductResolution,
 ) -> str:
-    """Expose one authoritative catalog frame to the Ecommerce Operator.
+    """Expose the server-validated ecommerce decision frame to the Operator.
 
-    ProductResolver owns only subject resolution.  When no product subject is
-    selected, the Operator may recommend freely *inside* this server-owned
-    frame.  Any ordered list it presents must be declared through the
-    ``present_product_candidates`` tool so the server can validate refs, persist
-    ordinal continuity, and generate detail actions without parsing prose.
+    ProductResolver owns semantic selection and open-ended recommendation ordering
+    inside the current server-owned candidate frame.  The Operator only explains
+    the visible candidates in that order; links/actions remain server-owned.
     """
     by_ref = _candidate_refs(candidates)
     visible_refs = _visible_product_refs(candidates, resolution)
@@ -2853,6 +3262,7 @@ def _product_procedure_context(
             "status": resolution.status,
             "selected_ref": resolution.selected_ref or None,
             "ambiguous_refs": resolution.ambiguous_refs,
+            "recommended_refs": resolution.recommended_refs,
         },
         "eligible_candidate_count": len(candidates),
         "candidates": public_candidates,
@@ -2860,17 +3270,13 @@ def _product_procedure_context(
     return (
         "Ecommerce Role 当前商品候选帧（服务端可信）。price_yuan/attributes/summary 来自当前 Catalog，"
         "不得编造缺失的价格、库存或规格，也不得推荐 candidates 之外的商品。"
-        "ProductResolver 这里只负责商品指代，不负责推荐。"
+        "ProductResolver 已在服务端候选帧内完成商品指代或推荐排序。"
         "subject_resolution.status=ambiguous 时，只展示给出的 candidates 并让客户选择；"
         "status=selected 时只能把唯一 candidate 当作当前选中商品；"
-        "status=unknown 时表示尚未选中具体商品，不代表不能推荐。"
-        "开放式导购（例如‘性能最好’、‘性价比高’、‘随便推荐几款’）由你根据客户原话和候选真实属性自行判断，"
-        "不要求存在唯一客观最优，也不要仅因为存在多个合理选项就反复追问。"
-        "当你准备向客户展示任何有顺序的商品列表时，必须先调用 present_product_candidates："
-        "推荐列表用 mode=recommend，需要客户在多个配置/选项中继续选择时用 mode=choice；"
-        "candidate_refs 必须严格按你随后向客户展示的顺序提交。工具成功后按同一顺序回答。"
-        "这个工具只声明展示顺序，不代表客户已经选择商品。"
-        "如果客户明确要求列出全部候选，可以展示全部；如果某个主观维度缺少可靠属性，可说明比较依据有限，"
+        "status=unknown 且 recommended_refs 非空时，candidates 已按推荐顺序裁成服务端验证后的推荐集，"
+        "请按这个顺序自然解释推荐理由，不要再自行换序、补商品或重新搜索。"
+        "不要输出任何站内 URL、product_id 或 Markdown 商品链接，详情入口由服务端统一追加。"
+        "如果某个主观维度缺少可靠属性，可说明比较依据有限，"
         "但不要因此把正常导购变成无限澄清。eligible_candidate_count=0 才能说明当前目录没有满足硬约束的商品。\n"
         + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     )
@@ -2931,6 +3337,10 @@ async def _resolve_product_turn(
         selected = canonical_product_identity(candidate) if candidate is not None else None
     elif resolution.status == "ambiguous":
         choice_refs = resolution.ambiguous_refs
+    elif resolution.recommended_refs:
+        # Recommendation order is server-validated continuity for "第二个/这几款"
+        # follow-ups, but it is not a selected product identity.
+        choice_refs = resolution.recommended_refs
     return resolution, selected, set_choice_refs(product_context, choice_refs)
 
 
@@ -3005,7 +3415,15 @@ async def _prepare_ecommerce_role(
         entities=entities,
         canonical_product=False,
         product_context=product_context,
-        reuse_existing_frame=pending_ordinal_choice and not hard_changed,
+        reuse_existing_frame=(
+            pending_ordinal_choice
+            or (
+                intent.domain == "product"
+                and intent.operation == "answer"
+                and bool(existing_context.get("choice_refs"))
+            )
+        )
+        and not hard_changed,
     )
     if catalog_docs:
         candidates = dedupe_product_candidates(catalog_docs)[:12]
@@ -3054,6 +3472,7 @@ async def _prepare_ecommerce_role(
             purpose={
                 "answer": "inspect",
                 "purchase": "purchase",
+                "search_product": "recommend",
             }.get(intent.operation, "auto"),
         )
 
@@ -3105,6 +3524,55 @@ def _presented_product_refs(
         if ref in allowed and ref not in validated:
             validated.append(ref)
     return (mode, validated) if validated else ("", [])
+
+
+def _is_untrusted_internal_navigation_href(href: str) -> bool:
+    """Return True for app navigation that must be issued by the server."""
+    raw = str(href or "").strip()
+    if not raw:
+        return False
+    # Markdown generators sometimes escape query separators as ``\&``.
+    # Normalize only for authority classification; the original text is still
+    # removed/downgraded rather than rewritten into a clickable route.
+    parsed = urlparse(raw.replace("\\&", "&"))
+    host = (parsed.hostname or "").casefold()
+    # Ordinary external URLs are not part of the SPA navigation authority.
+    if parsed.scheme and host not in {"localhost", "127.0.0.1", "::1"}:
+        return False
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    page = str((query.get("page") or [""])[0]).strip().casefold()
+    return page in {"product", "catalog", "orders", "tickets", "cart", "checkout"}
+
+
+_MARKDOWN_LINK_RE = re.compile(r"\[([^\]\n]{1,240})\]\(([^)\n]{1,1200})\)")
+
+
+def _strip_untrusted_customer_navigation(answer: str) -> str:
+    """Remove model-authored app links while preserving non-link prose.
+
+    Product/order/ticket navigation is a server-owned action channel.  A model
+    may name a product, but it cannot manufacture a clickable SPA route.  Pure
+    action-list rows are removed so the server-signed suffix does not duplicate
+    them; inline links are downgraded to their visible label.
+    """
+    if not answer or "page=" not in answer:
+        return answer
+
+    lines: list[str] = []
+    standalone = re.compile(r"^\s*(?:[-*+]\s*)?\[([^\]\n]{1,240})\]\(([^)\n]{1,1200})\)\s*$")
+    for line in answer.splitlines():
+        match = standalone.match(line)
+        if match and _is_untrusted_internal_navigation_href(match.group(2)):
+            continue
+
+        def replace_link(link_match: re.Match[str]) -> str:
+            label, href = link_match.group(1), link_match.group(2)
+            return label if _is_untrusted_internal_navigation_href(href) else link_match.group(0)
+
+        lines.append(_MARKDOWN_LINK_RE.sub(replace_link, line))
+
+    cleaned = "\n".join(lines)
+    return re.sub(r"\n{3,}", "\n\n", cleaned).rstrip()
 
 
 def _recommended_products_from_refs(
@@ -3393,6 +3861,12 @@ async def chat(chat_req: ChatRequest, request: Request):
         session_contexts = _session_decision_contexts(ctx.messages)
         confirmed_human_handoff = False
         resuming_support_case = False
+        support_command_handled = False
+        support_command_requests: list[SupportRequest] = []
+        support_command_subject_description = ""
+        support_command_selected_subjects: dict[str, object] | None = None
+        support_command_authority = "router"
+        support_command_context_case: SupportCase | None = None
         if chat_req.interaction is not None:
             active_support_case = await _apply_subject_choice_interaction(
                 request,
@@ -3457,51 +3931,105 @@ async def chat(chat_req: ChatRequest, request: Request):
                         knowledge_context=pre_knowledge_context,
                         semantic_hints=semantic_hints,
                     )
-                # A non-description turn has now been adjudicated by the
-                # normal Router.  Retire the correction-description frame
-                # before any workflow/request-stack resume can occur.  This is
-                # intentionally independent of case_update: a misclassified
-                # ``continue`` must not revive the stale correction either.
-                if (
-                    active_support_case is not None
-                    and active_support_case.pending.get("kind") == "subject_correction_description"
-                    and not looks_like_bare_subject_description(chat_req.query)
-                ):
-                    active_support_case = await _supersede_subject_correction_pending(
-                        request,
-                        case=active_support_case,
-                    )
-                    recent_support_case = active_support_case
-                confirmed_human_handoff = _is_confirmed_human_handoff(active_support_case, chat_req.query)
-                resuming_support_case = _is_pending_case_reply(active_support_case, intent, chat_req.query)
-                if resuming_support_case and active_support_case is not None:
-                    intent = _intent_for_case_reply(active_support_case, intent)
-                    active_support_case = await _resume_pending_case(
-                        request,
-                        case=active_support_case,
-                        raw_query=chat_req.query,
-                        tool_context=tool_context,
-                    )
-        case_backed_correction_requests = _case_backed_subject_correction_requests(
-            active_support_case,
-            intent,
-        )
-        if case_backed_correction_requests:
-            active_support_case = await _release_case_backed_subject_correction_choice(
-                request,
-                case=active_support_case,
+                support_command_turn = await _interpret_support_command(
+                    request,
+                    raw_query=chat_req.query,
+                    history=ctx.history,
+                    case=(
+                        active_support_case
+                        or (recent_support_case if str(intent.domain or "") in {"order", "refund"} else None)
+                    ),
+                    legacy_domain=str(intent.domain or ""),
+                )
+                support_command_context_case = active_support_case or (
+                    recent_support_case if str(intent.domain or "") in {"order", "refund"} else None
+                )
+                (
+                    support_command_handled,
+                    active_support_case,
+                    support_command_requests,
+                    support_command_subject_description,
+                    support_command_selected_subjects,
+                    support_command_authority,
+                ) = await _apply_support_command_cutover(
+                    request,
+                    command=_single_cutover_command(
+                        support_command_turn,
+                        active_case=active_support_case,
+                        recent_case=recent_support_case,
+                    ),
+                    raw_query=chat_req.query,
+                    active_case=active_support_case,
+                    recent_case=recent_support_case,
+                    tool_context=tool_context,
+                )
+                if support_command_handled:
+                    recent_support_case = active_support_case or recent_support_case
+                    confirmed_human_handoff = False
+                    resuming_support_case = False
+                else:
+                    # Legacy coexistence path.  Once a command is accepted above,
+                    # none of these raw-language helpers may reinterpret it.
+                    if (
+                        active_support_case is not None
+                        and active_support_case.pending.get("kind") == "subject_correction_description"
+                        and not looks_like_bare_subject_description(chat_req.query)
+                    ):
+                        active_support_case = await _supersede_subject_correction_pending(
+                            request,
+                            case=active_support_case,
+                        )
+                        recent_support_case = active_support_case
+                    confirmed_human_handoff = _is_confirmed_human_handoff(active_support_case, chat_req.query)
+                    resuming_support_case = _is_pending_case_reply(active_support_case, intent, chat_req.query)
+                    if resuming_support_case and active_support_case is not None:
+                        intent = _intent_for_case_reply(active_support_case, intent)
+                        active_support_case = await _resume_pending_case(
+                            request,
+                            case=active_support_case,
+                            raw_query=chat_req.query,
+                            tool_context=tool_context,
+                        )
+        case_backed_correction_requests: list[SupportRequest] = []
+        if not support_command_handled:
+            case_backed_correction_requests = _case_backed_subject_correction_requests(
+                active_support_case,
+                intent,
             )
-            recent_support_case = active_support_case
-        effective_support_requests = case_backed_correction_requests or intent.workflow_requests
-        use_support_workflow = intent.use_workflow or bool(case_backed_correction_requests)
+            if case_backed_correction_requests:
+                active_support_case = await _release_case_backed_subject_correction_choice(
+                    request,
+                    case=active_support_case,
+                )
+                recent_support_case = active_support_case
+        effective_support_requests = (
+            support_command_requests
+            if support_command_handled
+            else (case_backed_correction_requests or intent.workflow_requests)
+        )
+        use_support_workflow = (
+            bool(support_command_requests)
+            if support_command_handled
+            else (intent.use_workflow or bool(case_backed_correction_requests))
+        )
+        if support_command_handled and effective_support_requests:
+            primary_command_request = effective_support_requests[0]
+            intent.target = "agent"
+            intent.domain = primary_command_request.domain
+            intent.operation = primary_command_request.operation
         _log_support_trace(
             "route_decision",
             case=active_support_case,
             intent=intent,
             resume_pending=resuming_support_case,
             effective_use_workflow=use_support_workflow,
-            workflow_authority=("case_request_stack" if case_backed_correction_requests else "router"),
+            workflow_authority=(
+                support_command_authority
+                if support_command_handled
+                else ("case_request_stack" if case_backed_correction_requests else "router")
+            ),
             effective_request_count=len(effective_support_requests),
+            command_cutover=support_command_handled,
         )
         retrieval_query = getattr(intent, "retrieval_query", "") or getattr(intent, "query", "") or resolved_query
         semantic_hints = _semantic_hint_payload(
@@ -3550,7 +4078,12 @@ async def chat(chat_req: ChatRequest, request: Request):
             catalog_bound=catalog_acquired,
             candidate_refs=_visible_product_refs(product_candidates_for_turn, product_resolution),
         )
-        recommended_products_for_turn: list[dict[str, Any]] = []
+        recommended_products_for_turn: list[dict[str, Any]] = _recommended_products_from_refs(
+            product_resolution.recommended_refs, product_candidates_for_turn
+        )
+        if product_resolution.recommended_refs:
+            product_context = set_choice_refs(product_context, product_resolution.recommended_refs)
+            product_entity_projection.update(product_context_entity(product_context))
         catalog_context = (
             _product_procedure_context(
                 product_context=product_context,
@@ -3578,7 +4111,7 @@ async def chat(chat_req: ChatRequest, request: Request):
         capability_ctx = _customer_chat_capability_context(
             operator_tool_context,
             canonical_product=turn_product_entity is not None,
-            recommended_product_actions=bool(product_candidates_for_turn and intent.domain == "product"),
+            recommended_product_actions=bool(recommended_products_for_turn),
         )
         selected_product_ctx = _selected_product_operator_context(
             turn_product_entity,
@@ -3635,6 +4168,7 @@ async def chat(chat_req: ChatRequest, request: Request):
                 chat_req.history_content,
                 answer,
                 presentation=presentation,
+                user_interaction=chat_req.session_interaction,
             )
             return ChatResponse(
                 answer=answer,
@@ -3649,7 +4183,13 @@ async def chat(chat_req: ChatRequest, request: Request):
             CustomerSupportAction.OFFER_WARRANTY_TROUBLESHOOTING,
         }:
             answer = support_decision.answer
-            await session.add_turn_simple(ctx.session_id, user_id, chat_req.history_content, answer)
+            await session.add_turn_simple(
+                ctx.session_id,
+                user_id,
+                chat_req.history_content,
+                answer,
+                user_interaction=chat_req.session_interaction,
+            )
             return ChatResponse(
                 answer=answer,
                 session_id=ctx.session_id,
@@ -3690,6 +4230,7 @@ async def chat(chat_req: ChatRequest, request: Request):
                 chat_req.history_content,
                 answer,
                 presentation=presentation,
+                user_interaction=chat_req.session_interaction,
             )
             return ChatResponse(
                 answer=answer,
@@ -3714,6 +4255,7 @@ async def chat(chat_req: ChatRequest, request: Request):
                 user_id,
                 chat_req.history_content,
                 plan_state.get("answer", ""),
+                user_interaction=chat_req.session_interaction,
             )
             return ChatResponse(
                 answer=plan_state.get("answer", ""),
@@ -3723,47 +4265,79 @@ async def chat(chat_req: ChatRequest, request: Request):
             )
         elif use_support_workflow:
             support_workflow = request.app.state.support_workflow_agent
-            support_case = (
-                active_support_case
-                if (resuming_support_case or case_backed_correction_requests)
-                else await _open_support_case(
-                    request,
-                    intent=intent,
-                    session_id=ctx.session_id,
-                    customer_user_id=user_id,
-                    recent_case=recent_support_case,
-                    raw_query=chat_req.query,
-                    tool_context=tool_context,
+            if support_command_handled:
+                # Runtime validation already decided whether this command may
+                # continue an existing Case or execute as a read-only turn.
+                # Do not reopen/merge from the legacy Router's request stack.
+                support_case = active_support_case
+                if support_case is None and support_command_requests:
+                    support_case = await _open_support_command_case(
+                        request,
+                        session_id=ctx.session_id,
+                        customer_user_id=user_id,
+                        support_requests=support_command_requests,
+                        selected_subjects=support_command_selected_subjects,
+                    )
+            else:
+                support_case = (
+                    active_support_case
+                    if (resuming_support_case or case_backed_correction_requests)
+                    else await _open_support_case(
+                        request,
+                        intent=intent,
+                        session_id=ctx.session_id,
+                        customer_user_id=user_id,
+                        recent_case=recent_support_case,
+                        raw_query=chat_req.query,
+                        tool_context=tool_context,
+                    )
                 )
-            )
-            support_case = await _merge_new_support_request(request, case=support_case, intent=intent)
-            if support_case is None:
-                support_case = await _open_support_case(
-                    request,
-                    intent=intent,
-                    session_id=ctx.session_id,
-                    customer_user_id=user_id,
-                    recent_case=None,
-                    raw_query=chat_req.query,
-                    tool_context=tool_context,
-                )
+                support_case = await _merge_new_support_request(request, case=support_case, intent=intent)
+                if support_case is None:
+                    support_case = await _open_support_case(
+                        request,
+                        intent=intent,
+                        session_id=ctx.session_id,
+                        customer_user_id=user_id,
+                        recent_case=None,
+                        raw_query=chat_req.query,
+                        tool_context=tool_context,
+                    )
             case_context = SupportCaseService.to_prompt_context(support_case) if support_case is not None else ""
-            workflow_kwargs = await _workflow_subject_context_kwargs(
-                request,
-                intent=intent,
-                support_case=support_case,
-                recent_case=recent_support_case,
-                tool_context=tool_context,
-                structured_interaction=chat_req.interaction is not None,
-                product_subject_context=_support_product_subject_context(
-                    ctx.last_entities,
-                    ctx.messages,
-                ),
-            )
-            # Compatibility/trace field only; OrderSubjectResolver does not
-            # consume Router same/changed semantics.
-            workflow_kwargs["subject_relation"] = getattr(intent, "subject_relation", "unknown")
-            if getattr(intent, "fact_scope", "current") == "explain_previous":
+            if support_command_handled:
+                # Once the Runtime accepts a command, legacy Router subject/fact
+                # semantics lose authority for this turn.  The Workflow receives
+                # only the Runtime-validated binding and the LLM semantic subject.
+                workflow_kwargs: dict[str, object] = {}
+                if support_command_subject_description:
+                    workflow_kwargs["subject_description"] = support_command_subject_description
+                    previous_subjects = await _trusted_previous_subject_for_resolution(
+                        request,
+                        intent=intent,
+                        recent_case=support_command_context_case,
+                        tool_context=tool_context,
+                    )
+                    if previous_subjects is not None:
+                        workflow_kwargs["previous_subjects"] = previous_subjects
+                if support_command_selected_subjects:
+                    workflow_kwargs["selected_subjects"] = support_command_selected_subjects
+            else:
+                workflow_kwargs = await _workflow_subject_context_kwargs(
+                    request,
+                    intent=intent,
+                    support_case=support_case,
+                    recent_case=recent_support_case,
+                    tool_context=tool_context,
+                    structured_interaction=chat_req.interaction is not None,
+                    product_subject_context=_support_product_subject_context(
+                        ctx.last_entities,
+                        ctx.messages,
+                    ),
+                )
+                # Compatibility/trace field only; OrderSubjectResolver does not
+                # consume Router same/changed semantics.
+                workflow_kwargs["subject_relation"] = getattr(intent, "subject_relation", "unknown")
+            if not support_command_handled and getattr(intent, "fact_scope", "current") == "explain_previous":
                 allow_historical_explanation = await _allow_historical_subject_explanation(
                     request,
                     intent=intent,
@@ -3846,19 +4420,6 @@ async def chat(chat_req: ChatRequest, request: Request):
                 catalog_entities = _entities_from_catalog_docs(catalog_docs, loop_result.answer)
                 loop_result.last_entities = {**catalog_entities, **loop_result.last_entities}
 
-        presentation_mode, presented_refs = _presented_product_refs(
-            loop_result.verified_facts,
-            product_candidates_for_turn,
-            allowed_refs=_visible_product_refs(product_candidates_for_turn, product_resolution),
-        )
-        if presented_refs:
-            product_context = set_choice_refs(product_context, presented_refs)
-            product_entity_projection.update(product_context_entity(product_context))
-            if presentation_mode == "recommend":
-                recommended_products_for_turn = _recommended_products_from_refs(
-                    presented_refs, product_candidates_for_turn
-                )
-
         if product_entity_projection:
             _merge_last_entities(loop_result.last_entities, product_entity_projection)
 
@@ -3875,6 +4436,9 @@ async def chat(chat_req: ChatRequest, request: Request):
                 session_contexts=session_contexts,
                 session_messages=ctx.messages,
             )
+
+        if tool_context.role == "customer" and intent.domain == "product":
+            loop_result.answer = _strip_untrusted_customer_navigation(loop_result.answer)
 
         if (
             tool_context.role == "customer"
@@ -3923,7 +4487,13 @@ async def chat(chat_req: ChatRequest, request: Request):
             tool_context=operator_tool_context,
         )
         # 当前对话放入上下文ctx
-        await session.add_turn(ctx.session_id, user_id, chat_req.history_content, loop_result)
+        await session.add_turn(
+            ctx.session_id,
+            user_id,
+            chat_req.history_content,
+            loop_result,
+            user_interaction=chat_req.session_interaction,
+        )
         return ChatResponse(
             answer=loop_result.answer,
             session_id=ctx.session_id,
@@ -4009,6 +4579,12 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
         # entering either interaction or correction handling.
         confirmed_human_handoff = False
         resuming_support_case = False
+        support_command_handled = False
+        support_command_requests: list[SupportRequest] = []
+        support_command_subject_description = ""
+        support_command_selected_subjects: dict[str, object] | None = None
+        support_command_authority = "router"
+        support_command_context_case: SupportCase | None = None
         subject_correction_short_circuit: tuple[LoopResult, dict | None] | None = None
         if chat_req.interaction is not None:
             active_support_case = await _apply_subject_choice_interaction(
@@ -4071,46 +4647,103 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                         knowledge_context=pre_knowledge_context,
                         semantic_hints=semantic_hints,
                     )
-                if (
-                    active_support_case is not None
-                    and active_support_case.pending.get("kind") == "subject_correction_description"
-                    and not looks_like_bare_subject_description(chat_req.query)
-                ):
-                    active_support_case = await _supersede_subject_correction_pending(
-                        request,
-                        case=active_support_case,
-                    )
-                    recent_support_case = active_support_case
-                confirmed_human_handoff = _is_confirmed_human_handoff(active_support_case, chat_req.query)
-                resuming_support_case = _is_pending_case_reply(active_support_case, intent, chat_req.query)
-                if resuming_support_case and active_support_case is not None:
-                    intent = _intent_for_case_reply(active_support_case, intent)
-                    active_support_case = await _resume_pending_case(
-                        request,
-                        case=active_support_case,
-                        raw_query=chat_req.query,
-                        tool_context=tool_context,
-                    )
-        case_backed_correction_requests = _case_backed_subject_correction_requests(
-            active_support_case,
-            intent,
-        )
-        if case_backed_correction_requests:
-            active_support_case = await _release_case_backed_subject_correction_choice(
-                request,
-                case=active_support_case,
+                support_command_turn = await _interpret_support_command(
+                    request,
+                    raw_query=chat_req.query,
+                    history=history,
+                    case=(
+                        active_support_case
+                        or (recent_support_case if str(intent.domain or "") in {"order", "refund"} else None)
+                    ),
+                    legacy_domain=str(intent.domain or ""),
+                )
+                support_command_context_case = active_support_case or (
+                    recent_support_case if str(intent.domain or "") in {"order", "refund"} else None
+                )
+                (
+                    support_command_handled,
+                    active_support_case,
+                    support_command_requests,
+                    support_command_subject_description,
+                    support_command_selected_subjects,
+                    support_command_authority,
+                ) = await _apply_support_command_cutover(
+                    request,
+                    command=_single_cutover_command(
+                        support_command_turn,
+                        active_case=active_support_case,
+                        recent_case=recent_support_case,
+                    ),
+                    raw_query=chat_req.query,
+                    active_case=active_support_case,
+                    recent_case=recent_support_case,
+                    tool_context=tool_context,
+                )
+                if support_command_handled:
+                    recent_support_case = active_support_case or recent_support_case
+                    confirmed_human_handoff = False
+                    resuming_support_case = False
+                else:
+                    if (
+                        active_support_case is not None
+                        and active_support_case.pending.get("kind") == "subject_correction_description"
+                        and not looks_like_bare_subject_description(chat_req.query)
+                    ):
+                        active_support_case = await _supersede_subject_correction_pending(
+                            request,
+                            case=active_support_case,
+                        )
+                        recent_support_case = active_support_case
+                    confirmed_human_handoff = _is_confirmed_human_handoff(active_support_case, chat_req.query)
+                    resuming_support_case = _is_pending_case_reply(active_support_case, intent, chat_req.query)
+                    if resuming_support_case and active_support_case is not None:
+                        intent = _intent_for_case_reply(active_support_case, intent)
+                        active_support_case = await _resume_pending_case(
+                            request,
+                            case=active_support_case,
+                            raw_query=chat_req.query,
+                            tool_context=tool_context,
+                        )
+        case_backed_correction_requests: list[SupportRequest] = []
+        if not support_command_handled:
+            case_backed_correction_requests = _case_backed_subject_correction_requests(
+                active_support_case,
+                intent,
             )
-            recent_support_case = active_support_case
-        effective_support_requests = case_backed_correction_requests or intent.workflow_requests
-        use_support_workflow = intent.use_workflow or bool(case_backed_correction_requests)
+            if case_backed_correction_requests:
+                active_support_case = await _release_case_backed_subject_correction_choice(
+                    request,
+                    case=active_support_case,
+                )
+                recent_support_case = active_support_case
+        effective_support_requests = (
+            support_command_requests
+            if support_command_handled
+            else (case_backed_correction_requests or intent.workflow_requests)
+        )
+        use_support_workflow = (
+            bool(support_command_requests)
+            if support_command_handled
+            else (intent.use_workflow or bool(case_backed_correction_requests))
+        )
+        if support_command_handled and effective_support_requests:
+            primary_command_request = effective_support_requests[0]
+            intent.target = "agent"
+            intent.domain = primary_command_request.domain
+            intent.operation = primary_command_request.operation
         _log_support_trace(
             "route_decision",
             case=active_support_case,
             intent=intent,
             resume_pending=resuming_support_case,
             effective_use_workflow=use_support_workflow,
-            workflow_authority=("case_request_stack" if case_backed_correction_requests else "router"),
+            workflow_authority=(
+                support_command_authority
+                if support_command_handled
+                else ("case_request_stack" if case_backed_correction_requests else "router")
+            ),
             effective_request_count=len(effective_support_requests),
+            command_cutover=support_command_handled,
         )
         retrieval_query = getattr(intent, "retrieval_query", "") or getattr(intent, "query", "") or resolve_query
         semantic_hints = _semantic_hint_payload(
@@ -4159,7 +4792,12 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
             catalog_bound=catalog_acquired,
             candidate_refs=_visible_product_refs(product_candidates_for_turn, product_resolution),
         )
-        recommended_products_for_turn: list[dict[str, Any]] = []
+        recommended_products_for_turn: list[dict[str, Any]] = _recommended_products_from_refs(
+            product_resolution.recommended_refs, product_candidates_for_turn
+        )
+        if product_resolution.recommended_refs:
+            product_context = set_choice_refs(product_context, product_resolution.recommended_refs)
+            product_entity_projection.update(product_context_entity(product_context))
         catalog_context = (
             _product_procedure_context(
                 product_context=product_context,
@@ -4186,7 +4824,7 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
             _customer_chat_capability_context(
                 operator_tool_context,
                 canonical_product=turn_product_entity is not None,
-                recommended_product_actions=bool(product_candidates_for_turn and intent.domain == "product"),
+                recommended_product_actions=bool(recommended_products_for_turn),
             ),
             _selected_product_operator_context(
                 turn_product_entity,
@@ -4283,6 +4921,7 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                     chat_req.history_content,
                     answer,
                     presentation=correction_presentation,
+                    user_interaction=chat_req.session_interaction,
                 )
                 done_event = {
                     "event": "done",
@@ -4303,7 +4942,13 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                 answer = support_decision.answer
                 yield f"data: {json.dumps({'event': 'token', 'content': answer}, ensure_ascii=False)}\n\n"
                 try:
-                    await session.add_turn_simple(session_id, user_id, chat_req.history_content, answer)
+                    await session.add_turn_simple(
+                        session_id,
+                        user_id,
+                        chat_req.history_content,
+                        answer,
+                        user_interaction=chat_req.session_interaction,
+                    )
                 except Exception as exc:
                     _chat_logger.error(
                         "customer support guidance persistence failed action=%s error_type=%s",
@@ -4385,6 +5030,7 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                         chat_req.history_content,
                         answer,
                         presentation=presentation,
+                        user_interaction=chat_req.session_interaction,
                     )
                 except Exception as exc:
                     # 工单已在独立事务中成功创建；会话存档失败不能伪装成工单失败。
@@ -4402,47 +5048,75 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
 
                 phase = "support_workflow"
                 support_workflow = request.app.state.support_workflow_agent
-                support_case = (
-                    active_support_case
-                    if (resuming_support_case or case_backed_correction_requests)
-                    else await _open_support_case(
-                        request,
-                        intent=intent,
-                        session_id=session_id,
-                        customer_user_id=user_id,
-                        recent_case=recent_support_case,
-                        raw_query=chat_req.query,
-                        tool_context=tool_context,
+                if support_command_handled:
+                    support_case = active_support_case
+                    if support_case is None and support_command_requests:
+                        support_case = await _open_support_command_case(
+                            request,
+                            session_id=session_id,
+                            customer_user_id=user_id,
+                            support_requests=support_command_requests,
+                            selected_subjects=support_command_selected_subjects,
+                        )
+                else:
+                    support_case = (
+                        active_support_case
+                        if (resuming_support_case or case_backed_correction_requests)
+                        else await _open_support_case(
+                            request,
+                            intent=intent,
+                            session_id=session_id,
+                            customer_user_id=user_id,
+                            recent_case=recent_support_case,
+                            raw_query=chat_req.query,
+                            tool_context=tool_context,
+                        )
                     )
-                )
-                support_case = await _merge_new_support_request(request, case=support_case, intent=intent)
-                if support_case is None:
-                    support_case = await _open_support_case(
-                        request,
-                        intent=intent,
-                        session_id=session_id,
-                        customer_user_id=user_id,
-                        recent_case=None,
-                        raw_query=chat_req.query,
-                        tool_context=tool_context,
-                    )
+                    support_case = await _merge_new_support_request(request, case=support_case, intent=intent)
+                    if support_case is None:
+                        support_case = await _open_support_case(
+                            request,
+                            intent=intent,
+                            session_id=session_id,
+                            customer_user_id=user_id,
+                            recent_case=None,
+                            raw_query=chat_req.query,
+                            tool_context=tool_context,
+                        )
                 case_context = SupportCaseService.to_prompt_context(support_case) if support_case is not None else ""
-                workflow_kwargs = await _workflow_subject_context_kwargs(
-                    request,
-                    intent=intent,
-                    support_case=support_case,
-                    recent_case=recent_support_case,
-                    tool_context=tool_context,
-                    structured_interaction=chat_req.interaction is not None,
-                    product_subject_context=_support_product_subject_context(
-                        session_ctx.last_entities,
-                        session_ctx.messages,
-                    ),
-                )
-                # Compatibility/trace field only; OrderSubjectResolver does not
-                # consume Router same/changed semantics.
-                workflow_kwargs["subject_relation"] = getattr(intent, "subject_relation", "unknown")
-                if getattr(intent, "fact_scope", "current") == "explain_previous":
+                if support_command_handled:
+                    # Keep the stream boundary identical to /chat: accepted
+                    # commands bypass all legacy Router subject/fact semantics.
+                    workflow_kwargs: dict[str, object] = {}
+                    if support_command_subject_description:
+                        workflow_kwargs["subject_description"] = support_command_subject_description
+                        previous_subjects = await _trusted_previous_subject_for_resolution(
+                            request,
+                            intent=intent,
+                            recent_case=support_command_context_case,
+                            tool_context=tool_context,
+                        )
+                        if previous_subjects is not None:
+                            workflow_kwargs["previous_subjects"] = previous_subjects
+                    if support_command_selected_subjects:
+                        workflow_kwargs["selected_subjects"] = support_command_selected_subjects
+                else:
+                    workflow_kwargs = await _workflow_subject_context_kwargs(
+                        request,
+                        intent=intent,
+                        support_case=support_case,
+                        recent_case=recent_support_case,
+                        tool_context=tool_context,
+                        structured_interaction=chat_req.interaction is not None,
+                        product_subject_context=_support_product_subject_context(
+                            session_ctx.last_entities,
+                            session_ctx.messages,
+                        ),
+                    )
+                    # Compatibility/trace field only; OrderSubjectResolver does not
+                    # consume Router same/changed semantics.
+                    workflow_kwargs["subject_relation"] = getattr(intent, "subject_relation", "unknown")
+                if not support_command_handled and getattr(intent, "fact_scope", "current") == "explain_previous":
                     allow_historical_explanation = await _allow_historical_subject_explanation(
                         request,
                         intent=intent,
@@ -4575,6 +5249,7 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                         answer_source=workflow_result.answer_source,
                         answer_trace=workflow_result.answer_trace,
                     ),
+                    user_interaction=chat_req.session_interaction,
                 )
                 done_event = {
                     "event": "done",
@@ -4638,6 +5313,7 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                             total_latency_ms=(time.perf_counter() - start_t) * 1000,
                             last_entities=last_entities,
                         ),
+                        user_interaction=chat_req.session_interaction,
                     )
                     if pending_done_event is not None:
                         yield f"data: {json.dumps(pending_done_event, ensure_ascii=False)}\n\n"
@@ -4660,7 +5336,31 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
 
                 if event.get("event") == "done":
                     answer = str(event.get("answer", ""))
-                    event_entities = event.get("last_entities")
+                    verified_facts = event.get("verified_facts", {})
+                    if not isinstance(verified_facts, Mapping):
+                        verified_facts = {}
+                    decision_facts = event.get("decision_facts", {})
+                    if not isinstance(decision_facts, dict):
+                        decision_facts = {}
+                    decision_contexts = event.get("decision_contexts", [])
+                    if not isinstance(decision_contexts, list):
+                        decision_contexts = []
+                    raw_event_entities = event.get("last_entities")
+                    event_entities = raw_event_entities if isinstance(raw_event_entities, dict) else {}
+                    event_result = LoopResult(
+                        answer=answer,
+                        total_steps=int(event.get("total_steps") or 0),
+                        total_tokens=int(event.get("total_tokens") or 0),
+                        last_entities=dict(event_entities),
+                        verified_facts=dict(verified_facts),
+                        decision_facts=decision_facts,
+                        decision_contexts=decision_contexts,
+                    )
+                    answer = event_result.answer
+                    verified_facts = event_result.verified_facts
+                    decision_facts = event_result.decision_facts
+                    decision_contexts = event_result.decision_contexts
+                    event_entities = event_result.last_entities
                     _merge_last_entities(last_entities, event_entities)
                     retrieved_entities = {}
                     if catalog_docs:
@@ -4670,21 +5370,6 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                     if retrieved_entities:
                         _merge_last_entities(last_entities, retrieved_entities)
 
-                    verified_facts = event.get("verified_facts", {})
-                    presentation_mode, presented_refs = _presented_product_refs(
-                        verified_facts if isinstance(verified_facts, Mapping) else {},
-                        product_candidates_for_turn,
-                        allowed_refs=_visible_product_refs(product_candidates_for_turn, product_resolution),
-                    )
-                    if presented_refs:
-                        updated_product_context = set_choice_refs(product_context, presented_refs)
-                        product_entity_projection.update(product_context_entity(updated_product_context))
-                        if presentation_mode == "recommend":
-                            recommended_products_for_turn.clear()
-                            recommended_products_for_turn.extend(
-                                _recommended_products_from_refs(presented_refs, product_candidates_for_turn)
-                            )
-
                     # Match the synchronous path: retrieval/tool observations
                     # are evidence, while the Ecommerce Procedure's validated
                     # candidate-frame/selection projection is authoritative and
@@ -4692,12 +5377,6 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                     # accidentally retire a product selected earlier this turn.
                     if product_entity_projection:
                         _merge_last_entities(last_entities, product_entity_projection)
-                    decision_facts = event.get("decision_facts", {})
-                    if not isinstance(decision_facts, dict):
-                        decision_facts = {}
-                    decision_contexts = event.get("decision_contexts", [])
-                    if not isinstance(decision_contexts, list):
-                        decision_contexts = []
                     guarded_result: LoopResult | None = None
                     if response_fact_sensitive:
                         guarded_result = LoopResult(
@@ -4722,6 +5401,9 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                         decision_facts=decision_facts,
                         decision_contexts=decision_contexts,
                     )
+                    if tool_context.role == "customer" and intent.domain == "product":
+                        answer = _strip_untrusted_customer_navigation(answer)
+                        presentation_result.answer = answer
                     final_answer = answer
                     if tool_context.role == "customer" and _can_append_generic_customer_action(
                         presentation_result,
@@ -4768,8 +5450,8 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                         tool_context=operator_tool_context,
                     )
                     stream_res["answer"] = answer
-                    stream_res["total_steps"] = event.get("total_steps", 0)
-                    stream_res["total_tokens"] = event.get("total_tokens", 0)
+                    stream_res["total_steps"] = event_result.total_steps
+                    stream_res["total_tokens"] = event_result.total_tokens
                     stream_res["decision_facts"] = decision_facts
                     stream_res["decision_contexts"] = decision_contexts
                     stream_res["presentation"] = presentation
@@ -4811,6 +5493,7 @@ async def chat_stream(chat_req: ChatRequest, request: Request):
                         answer_source=presentation_result.answer_source,
                         answer_trace=presentation_result.answer_trace,
                     ),
+                    user_interaction=chat_req.session_interaction,
                 )
                 if pending_done_event is not None:
                     yield f"data: {json.dumps(pending_done_event, ensure_ascii=False)}\n\n"

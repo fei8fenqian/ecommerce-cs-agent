@@ -1,0 +1,185 @@
+E-Commerce-Agent 当前进度交接
+日期：2026-09-05
+基线：E-Commerce-Agent-authority-e2e-fix-merged-20260905-0949.tar.gz
+状态：Product recommendation authority + Refund subject continuity 已完成真实浏览器 E2E 主链验证；本轮收尾 presentation consistency 修复已完成代码回归，等待用户最后一次浏览器确认。
+
+============================================================
+1. 项目当前主心骨
+============================================================
+
+保持：
+LLM proposes meaning.
+Server / Runtime validates identity, membership, legality and actions.
+Tools / Provider determine mutable business truth.
+Presentation must not contradict server-owned state.
+
+不要重新增加品牌/句式特判、dialogue state、Manager/Reconciler 或第二套退款状态机。
+Payment / UnionPay / Refund Provider / financial state machine / DB schema / ToolRegistry 继续冻结，除非真实 regression 直接指向这些层。
+
+============================================================
+2. Product recommendation 已解决
+============================================================
+
+此前真实问题：
+- 第一轮推荐链接正常，第二轮手机/配件可能没有详情链接；
+- LLM 可能自行拼假的 product id；
+- present_product_candidates 没调用时，后端会再次调用 Operator；
+- SSE 第一版回答结束后又被第二版覆盖。
+
+已收口：
+- authoritative Catalog 先形成 server-owned candidate frame；
+- ProductResolver 在 frame 内返回有序 opaque candidate_N；
+- Server 验证 candidate membership，并映射 canonical catalog product_id；
+- 商品详情 URL 只由 Server 生成；
+- Operator 不再拥有 canonical identity / URL authority；
+- recommendation main path 不再依赖 present_product_candidates；
+- 删除“缺 presentation declaration -> 第二次完整 LLM 回答”的主路径 retry；
+- ProductContext.choice_refs 复用已有 server-owned frame，支持“对应链接呢 / 第二个”等连续对话；
+- laptops / phones / components 走同一条通用路径，没有品类特判。
+
+用户真实 E2E 已确认：
+- 笔记本推荐链接正常；
+- 手机推荐链接恢复；
+- 推荐 SSE 不再被第二次完整回答覆盖；
+- 用户反馈推荐整体表现很好。
+
+============================================================
+3. Refund subject continuity 已解决
+============================================================
+
+此前真实问题：
+“我想退华为” -> 多订单 -> “我搞错了，我想退 iPhone”
+会 generic unresolved。
+
+真实 trace 已证明 SupportCommand 本身理解正确：
+- set_subject("iPhone")
+- command_cutover=true
+- workflow_authority=support_command
+
+最终根因不是 LLM/Case，而是 track_order 大结果超过 SupportWorkflow persistence bound 后被退化为 summary，订单身份丢失，OrderSubjectResolver 无候选可绑。
+
+已收口：
+- 大的 authenticated order list 投影为 compact server-owned order candidate frame；
+- 最多保留 10 笔身份；
+- 从 checkout items[] 提升 product_name / catalog_category / component_category / catalog_product_id 到候选顶层；
+- 优先删除冗余 decoration，不先删除订单 identity；
+- compact frame 仅用于 identity binding；
+- 绑定订单以后退款状态/资格/入口仍由现有 Tool / Provider fresh-read；
+- 没有新增 Case state / RefundCommand / 审核状态 / Manager。
+
+用户真实 E2E 已确认：
+1. “我想把刚买的华为退了” -> 正确出现 3 笔 Huawei；
+2. “我搞错了，我想退的是 iPhone” -> 正确切换到真实 iPhone 候选；
+3. 选择 iPhone -> 正确核验退款资格并给官方自助退款入口；
+4. “我已经申请退款了，你看看成功没” -> fresh-read，正确返回等待商家核验及退款金额；
+5. 普通 acknowledgement “好的了解” -> 正常自然回复；
+6. “之前的华为还是想退了” -> 正确重新发现 Huawei 候选；
+7. “我点错了，我想退的是另一台华为” -> 正确重新得到 Huawei choice frame，可再次选择不同订单。
+
+因此“退款对象改错后无法重新绑定”的主故障已经真实 E2E 解决。
+
+============================================================
+4. 本轮最后一个 presentation 小问题及修复
+============================================================
+
+真人 E2E 最后残留：
+用户已经通过结构化 choice 点击并绑定，例如：
+SO20260904034942C4A0A2478CFB
+
+Server 同轮已经有：
+- selected_subject_present=true
+- track_order success
+- query_refund_status success
+- workflow outcome COMPLETED / ANSWER
+
+但 Operator prose 仍可能说：
+“请问您想退哪一笔华为订单？请回复序号或订单号……”
+随后下方又正确展示当前订单退款状态。
+
+根因：
+customer-response boundary 原本会校验退款状态/资格事实是否矛盾，但没有校验：
+“Server 已经绑定 subject” 与 “Operator 又要求客户重新选择 subject” 的 presentation contradiction。
+
+本轮最小修复：
+- 只修改 customer-response safety boundary；
+- 当 authoritative subject_id 已存在时，若 Operator prose 又要求提供/回复/选择/确认是哪笔订单，则视为与 server-owned identity 冲突；
+- 不保留该 prose，回退到已有 deterministic refund fact renderer；
+- 正常、与事实一致的自然语言状态解释继续保留。
+
+这不是 Router/语义判断，不影响用户意图；只是 final presentation 对 server state 的一致性校验。
+
+Production 本轮仅修改：
+- src/agent/customer_response.py
+
+Tests 本轮仅修改：
+- tests/test_customer_agent_boundary.py
+
+============================================================
+5. 本轮验证
+============================================================
+
+python -m compileall -q src tests
+PASS
+
+使用临时 dependency stubs（只替代当前容器缺失的 psycopg/langgraph 等第三方依赖；stubs 不进入项目包）：
+
+主跨链回归：311 / 311 PASS
+包括：
+- tests/test_api_chat.py
+- tests/test_customer_agent_boundary.py
+- SupportCommand / Runtime / binding harness / dialogue matrix
+- SupportWorkflow / OrderSubjectResolver / SupportCaseService
+- CustomerPresentation
+- ProductResolver / ProductContext / legacy present_product_candidates tool
+- log redaction / support trace
+
+外围回归：18 / 18 PASS
+- tests/test_api_products.py
+- tests/test_customer_closure.py
+- tests/test_new_checkout_order_lookup.py
+
+合计：329 / 329 PASS
+
+新增关键回归：
+A. 已绑定 SO-HW80 + current refund_status=NOT_FOUND，同时 Operator 还要求“回复序号或订单号”
+   -> 必须拒绝重复选择 prose，使用 deterministic current refund fact。
+B. 已绑定 SO-IP + current status=PENDING_MERCHANT_REVIEW，Operator 正常说“这笔退款仍在等待商家核验”
+   -> 必须保留自然语言，不做粗暴模板化。
+
+============================================================
+6. 当前仍未完成 / 不要误报
+============================================================
+
+1. 本轮最后这个 presentation micro-fix 尚未由用户在真实浏览器再点一次确认；代码回归已过。
+2. 当前执行容器没有真实 PostgreSQL 项目依赖，因此不能声称 full DB-backed pytest PASS；用户本机此前的真实浏览器/DB E2E 才是主要证据。
+3. legacy Router / pending / correction compatibility code 仍存在；不要因为主链已稳定就立即大删。下一阶段只有在真实 E2E 持续稳定后，才做 Phase 4 authority cleanup。
+4. present_product_candidates 仍注册用于 legacy compatibility，但新推荐 main path 已不依赖它。
+5. reject_pending / interrupt / cancel_goal 等尚未迁移的 SupportCommand 能力仍应保持原 fallback 边界，不要为了“完整”现在扩 command taxonomy。
+
+============================================================
+7. 下一负责人应该做什么
+============================================================
+
+第一步只做最后真人冒烟：
+- 重复“另一台华为” -> choice -> 点击一笔；
+- 预期：点击后不再出现“请问您想退哪一笔/请回复序号或订单号”的重复追问；
+- 如果已有退款记录，直接展示该订单 current refund status；
+- 如果没有退款记录，也只陈述 current verified result，不再次要求选订单。
+
+如果这一步通过：
+当前 Product + Refund Phase 3 主链可以视为 E2E 收口。
+
+之后再进入 Phase 4 cleanup，原则是删旧 authority，不是增加新框架：
+- 只删除已经被真实新路径替代的 deterministic semantic glue；
+- OrderSubjectResolver 继续收窄成 server-owned candidate binder；
+- 不碰 Payment / Provider / DB / ToolRegistry；
+- 每删一块先保持 /chat 与 /chat/stream parity，并跑真实回归。
+
+============================================================
+8. 一句话交接
+============================================================
+
+Product 推荐已经收敛成“server-owned candidates -> ProductResolver refs -> Server canonical links”；
+Refund 已收敛成“SupportCommand meaning -> compact authenticated order frame -> OrderSubjectResolver -> fresh Tool/Provider truth”。
+用户已真实验证跨品牌/同品牌退款对象纠正和退款状态连续对话可用。
+本轮只补最后一个 presentation consistency guard：Server 已经选定订单后，模型不能再让用户重复选一次。

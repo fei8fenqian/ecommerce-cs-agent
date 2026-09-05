@@ -1,0 +1,350 @@
+[
+  {
+    "id": "refund_replace_brand",
+    "utterance": "哦我记错了，我想退的是 iPhone",
+    "command": {
+      "type": "set_subject",
+      "domain": "",
+      "operation": "",
+      "subject_description": "iPhone"
+    },
+    "case": "refund_choice",
+    "expected": "set_subject_description"
+  },
+  {
+    "id": "refund_replace_complex",
+    "utterance": "前面说错了，我想退昨天那台华为，但不是 Pura X",
+    "command": {
+      "type": "set_subject",
+      "domain": "",
+      "operation": "",
+      "subject_description": "昨天那台华为，但不是 Pura X"
+    },
+    "case": "refund_choice",
+    "expected": "set_subject_description"
+  },
+  {
+    "id": "refund_choose_second",
+    "utterance": "第二个吧",
+    "command": {
+      "type": "set_subject",
+      "domain": "",
+      "operation": "",
+      "candidate_ref": "choice_2"
+    },
+    "case": "refund_choice",
+    "expected": "set_subject_choice"
+  },
+  {
+    "id": "refund_bad_choice",
+    "utterance": "第四个",
+    "command": {
+      "type": "set_subject",
+      "domain": "",
+      "operation": "",
+      "candidate_ref": "choice_4"
+    },
+    "case": "refund_choice",
+    "expected": "fallback"
+  },
+  {
+    "id": "refund_hallucinated_id",
+    "utterance": "就 SO_FAKE",
+    "command": {
+      "type": "set_subject",
+      "domain": "",
+      "operation": "",
+      "candidate_ref": "SO_FAKE"
+    },
+    "case": "refund_choice",
+    "expected": "fallback"
+  },
+  {
+    "id": "refund_status_claim",
+    "utterance": "我已经申请了",
+    "command": {
+      "type": "start_goal",
+      "domain": "refund",
+      "operation": "status",
+      "candidate_ref": "current_subject"
+    },
+    "case": "recent_completed_refund",
+    "expected": "read_status",
+    "reuse_verified_subject": true
+  },
+  {
+    "id": "refund_status_approved_claim",
+    "utterance": "商家已经同意退款了吧",
+    "command": {
+      "type": "start_goal",
+      "domain": "refund",
+      "operation": "status",
+      "candidate_ref": "current_subject"
+    },
+    "case": "recent_completed_refund",
+    "expected": "read_status",
+    "reuse_verified_subject": true
+  },
+  {
+    "id": "refund_status_new_subject",
+    "utterance": "另一台华为的退款到哪了",
+    "command": {
+      "type": "start_goal",
+      "domain": "refund",
+      "operation": "status",
+      "subject_description": "另一台华为"
+    },
+    "case": "recent_completed_refund",
+    "expected": "read_status",
+    "reuse_verified_subject": false
+  },
+  {
+    "id": "order_status_continue",
+    "utterance": "那这笔现在到哪了",
+    "command": {
+      "type": "start_goal",
+      "domain": "order",
+      "operation": "status",
+      "candidate_ref": "current_subject"
+    },
+    "case": "recent_completed_order",
+    "expected": "read_status",
+    "reuse_verified_subject": true
+  },
+  {
+    "id": "order_status_explicit_new",
+    "utterance": "查一下昨天那台手机",
+    "command": {
+      "type": "start_goal",
+      "domain": "order",
+      "operation": "status",
+      "subject_description": "昨天那台手机"
+    },
+    "case": "none",
+    "expected": "read_status",
+    "reuse_verified_subject": false
+  },
+  {
+    "id": "wrong_goal_hijack",
+    "utterance": "换成华为",
+    "command": {
+      "type": "start_goal",
+      "domain": "order",
+      "operation": "status",
+      "subject_description": "华为"
+    },
+    "case": "refund_choice",
+    "expected": "fallback"
+  },
+  {
+    "id": "terminal_replace",
+    "utterance": "其实退华为",
+    "command": {
+      "type": "set_subject",
+      "domain": "",
+      "operation": "",
+      "subject_description": "华为"
+    },
+    "case": "completed_refund",
+    "expected": "fallback"
+  },
+  {
+    "id": "recent_completed_refund_replace",
+    "utterance": "刚才那单搞错了，其实退华为",
+    "command": {
+      "type": "set_subject",
+      "domain": "",
+      "operation": "",
+      "subject_description": "华为"
+    },
+    "case": "recent_completed_refund",
+    "expected": "set_subject_description"
+  },
+  {
+    "id": "staff_owned_replace",
+    "utterance": "换另一台",
+    "command": {
+      "type": "set_subject",
+      "domain": "",
+      "operation": "",
+      "subject_description": "另一台"
+    },
+    "case": "awaiting_staff_refund",
+    "expected": "fallback"
+  },
+  {
+    "id": "no_pending_choice",
+    "utterance": "第二个",
+    "command": {
+      "type": "set_subject",
+      "domain": "",
+      "operation": "",
+      "candidate_ref": "choice_2"
+    },
+    "case": "active_refund_bound",
+    "expected": "fallback"
+  },
+  {
+    "id": "stale_ref_out_of_frame",
+    "utterance": "第三个",
+    "command": {
+      "type": "set_subject",
+      "domain": "",
+      "operation": "",
+      "candidate_ref": "choice_3"
+    },
+    "case": "refund_choice_2",
+    "expected": "fallback"
+  },
+  {
+    "id": "empty_replace",
+    "utterance": "搞错了",
+    "command": {
+      "type": "set_subject",
+      "domain": "",
+      "operation": "",
+      "subject_description": ""
+    },
+    "case": "refund_choice",
+    "expected": "fallback"
+  },
+  {
+    "id": "cancel_not_cut_yet",
+    "utterance": "算了不退了",
+    "command": {
+      "type": "cancel_goal",
+      "domain": "refund",
+      "operation": "request"
+    },
+    "case": "refund_choice",
+    "expected": "fallback"
+  },
+  {
+    "id": "interrupt_not_cut_yet",
+    "utterance": "为什么一定要选一笔？",
+    "command": {
+      "type": "interrupt",
+      "subject_description": "询问选择原因"
+    },
+    "case": "refund_choice",
+    "expected": "fallback"
+  },
+  {
+    "id": "reject_not_cut_yet",
+    "utterance": "这些都不要",
+    "command": {
+      "type": "reject_pending",
+      "domain": "refund",
+      "operation": "request"
+    },
+    "case": "refund_choice",
+    "expected": "fallback"
+  },
+  {
+    "id": "payment_outside_slice",
+    "utterance": "我已经付款了",
+    "command": {
+      "type": "start_goal",
+      "domain": "payment",
+      "operation": "status"
+    },
+    "case": "none",
+    "expected": "fallback"
+  },
+  {
+    "id": "refund_new_request_not_cut",
+    "utterance": "我要退款",
+    "command": {
+      "type": "start_goal",
+      "domain": "refund",
+      "operation": "request",
+      "subject_description": "当前商品"
+    },
+    "case": "none",
+    "expected": "fallback"
+  },
+  {
+    "id": "replace_active_bound",
+    "utterance": "不是这台，是另一台华为",
+    "command": {
+      "type": "set_subject",
+      "domain": "",
+      "operation": "",
+      "subject_description": "另一台华为"
+    },
+    "case": "active_refund_bound",
+    "expected": "set_subject_description"
+  },
+  {
+    "id": "status_without_subject",
+    "utterance": "退款进度呢",
+    "command": {
+      "type": "start_goal",
+      "domain": "refund",
+      "operation": "status"
+    },
+    "case": "none",
+    "expected": "read_status",
+    "reuse_verified_subject": false
+  },
+  {
+    "id": "order_status_cancelled_context",
+    "utterance": "这单现在怎么样",
+    "command": {
+      "type": "start_goal",
+      "domain": "order",
+      "operation": "status",
+      "candidate_ref": "current_subject"
+    },
+    "case": "cancelled_order",
+    "expected": "fallback"
+  },
+  {
+    "id": "new_refund_status_does_not_stick_recent_subject",
+    "utterance": "查一下退款状态",
+    "command": {
+      "type": "start_goal",
+      "domain": "refund",
+      "operation": "status"
+    },
+    "case": "recent_completed_refund",
+    "expected": "read_status",
+    "reuse_verified_subject": false
+  },
+  {
+    "id": "status_interrupt_does_not_complete_active_refund_request",
+    "utterance": "顺便问下退款状态",
+    "command": {
+      "type": "start_goal",
+      "domain": "refund",
+      "operation": "status"
+    },
+    "case": "refund_choice",
+    "expected": "fallback"
+  },
+  {
+    "id": "new_order_status_does_not_stick_recent_subject",
+    "utterance": "我想查一笔订单状态",
+    "command": {
+      "type": "start_goal",
+      "domain": "order",
+      "operation": "status"
+    },
+    "case": "recent_completed_order",
+    "expected": "read_status",
+    "reuse_verified_subject": false
+  },
+  {
+    "id": "same_goal_status_continuation_reuses_verified_subject",
+    "utterance": "那现在呢",
+    "command": {
+      "type": "start_goal",
+      "domain": "order",
+      "operation": "status",
+      "candidate_ref": "current_subject"
+    },
+    "case": "active_order_bound",
+    "expected": "read_status",
+    "reuse_verified_subject": true
+  }
+]

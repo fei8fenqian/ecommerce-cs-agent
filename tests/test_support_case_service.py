@@ -241,7 +241,7 @@ async def test_supersede_retires_disputed_subject_and_transaction_facts(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_release_customer_choice_for_subject_change_preserves_goal_and_clears_only_pending(monkeypatch):
+async def test_retire_customer_subject_for_change_preserves_goal_and_retires_old_subject(monkeypatch):
     captured: dict = {}
 
     async def replace(case, **kwargs):
@@ -253,6 +253,19 @@ async def test_release_customer_choice_for_subject_change_preserves_goal_and_cle
         **{
             **_case(status="AWAITING_CUSTOMER").__dict__,
             "request_stack": [{"domain": "refund", "operation": "request"}],
+            "selected_subjects": {"order_id": "SO-OLD"},
+            "verified_facts": {
+                "refund_status": "PROCESSING",
+                "refund_amount": 999,
+                "_decision_contexts": [
+                    {
+                        "subject_type": "order",
+                        "subject_id": "SO-OLD",
+                        "provenance": "current",
+                        "facts": {"refund_status": "PROCESSING"},
+                    }
+                ],
+            },
             "pending": {
                 "kind": "customer_choice",
                 "choices": [
@@ -263,17 +276,21 @@ async def test_release_customer_choice_for_subject_change_preserves_goal_and_cle
         }
     )
 
-    result = await SupportCaseService().release_customer_choice_for_subject_change(case)
+    result = await SupportCaseService().retire_customer_subject_for_change(case)
 
     assert result == case
     assert captured["status"] == "ACTIVE"
     assert captured["pending"] == {}
     assert captured["pending_command"] == {}
     assert captured["request_stack"] == case.request_stack
-    assert captured["selected_subjects"] == case.selected_subjects
-    assert captured["verified_facts"] == case.verified_facts
+    assert captured["selected_subjects"] == {}
+    assert "refund_status" not in captured["verified_facts"]
+    assert "refund_amount" not in captured["verified_facts"]
+    assert captured["verified_facts"]["_decision_contexts"][0]["provenance"] == "historical"
+    assert captured["verified_facts"][SUBJECT_CONTEXT_RESET_MARKER]["from_subject_id"] == "SO-OLD"
     assert captured["event_type"] == "CUSTOMER_RESPONSE"
     assert captured["event_payload"]["reason"] == "SUBJECT_CHANGED"
+    assert captured["event_payload"]["old_subject_id"] == "SO-OLD"
     assert captured["event_payload"]["choice_count"] == 2
     assert captured["event_payload"]["request_stack_preserved"] is True
 

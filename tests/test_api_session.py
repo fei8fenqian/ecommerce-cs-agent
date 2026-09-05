@@ -99,3 +99,20 @@ def test_presentation_and_internal_metadata_never_enter_model_history():
     ]
 
     assert _model_safe_messages(messages) == [{"role": "assistant", "content": "请选择订单"}]
+
+
+def test_structured_ui_interaction_remains_customer_visible_but_is_hidden_from_model_history():
+    message = {
+        "role": "user",
+        "content": "已选择订单：SO-PRIVATE",
+        "_interaction": {
+            "type": "subject_choice",
+            "subject_type": "order",
+            "subject_id": "SO-PRIVATE",
+        },
+    }
+
+    safe = _customer_message(message, 9)
+    assert safe is not None
+    assert safe.content == "已选择订单：SO-PRIVATE"
+    assert _model_safe_messages([message]) == []

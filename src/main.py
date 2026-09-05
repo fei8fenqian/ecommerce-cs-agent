@@ -12,6 +12,7 @@ from agent.engines.support_workflow import SupportWorkflowAgent
 from agent.llm.intent_router import IntentRouter
 from agent.llm.llm_client import LLMClient
 from agent.llm.session import SessionManager
+from agent.llm.support_command import SupportCommandInterpreter
 from agent.mcp_tool import MCPClientManager, MCPTool
 from agent.rag.retrieve import warmup_customer_catalog_retrieval
 from agent.ticket_resolution import TicketResolutionAgent, TicketResolutionWorker
@@ -131,6 +132,33 @@ async def lifespan(app: FastAPI):
         ),
     )
     intent_router = IntentRouter(intent_llm)
+    support_command_interpreter = None
+    if settings.support_command_shadow_enabled or settings.support_command_cutover_enabled:
+        # Shadow migration must not share the Router circuit breaker.  A model
+        # failure here is observability-only and must never degrade the
+        # authoritative Router path.
+        support_command_interpreter_llm = LLMClient(
+            api_key=settings.llm_api_key.get_secret_value(),
+            base_url=settings.llm_base_url,
+            model=settings.intent_llm_model,
+            timeout=settings.llm_timeout_seconds,
+            max_attempts=settings.llm_max_attempts,
+            retry_backoff_seconds=settings.llm_retry_backoff_seconds,
+            sdk_max_retries=settings.llm_sdk_max_retries,
+            stream_timeout=settings.llm_stream_timeout_seconds,
+            circuit_breaker=CircuitBreaker(
+                failure_threshold=settings.llm_circuit_failure_threshold,
+                open_seconds=settings.llm_circuit_open_seconds,
+            ),
+        )
+        support_command_interpreter = SupportCommandInterpreter(support_command_interpreter_llm)
+        _logger.info(
+            "support command interpreter enabled",
+            extra={
+                "shadow_enabled": settings.support_command_shadow_enabled,
+                "cutover_enabled": settings.support_command_cutover_enabled,
+            },
+        )
     registry = ToolRegistry()
     registry.register(search_product.SearchProduct())
     registry.register(search_knowledge.SearchKnowledge())
@@ -179,6 +207,7 @@ async def lifespan(app: FastAPI):
     app.state.llm_client = llm
     app.state.intent_llm_client = intent_llm
     app.state.intent_router = intent_router
+    app.state.support_command_interpreter = support_command_interpreter
     app.state.registry = registry
     app.state.plan_execute_agent = plan_execute_agent
     app.state.support_workflow_agent = support_workflow_agent

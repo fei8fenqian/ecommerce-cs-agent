@@ -628,8 +628,7 @@ def test_safe_self_service_operator_prose_keeps_controlled_presentation_mode():
 def test_stale_operator_unknown_is_rejected_after_refund_eligibility_is_verified():
     result = LoopResult(
         answer=(
-            "我已经定位到你说的 iPhone 16，但目前无法可靠核验这笔订单的退款资格，"
-            "所以现在不能确定是否满足退款条件。"
+            "我已经定位到你说的 iPhone 16，但目前无法可靠核验这笔订单的退款资格，所以现在不能确定是否满足退款条件。"
         ),
         decision_contexts=[
             {
@@ -1009,3 +1008,64 @@ def test_unknown_refund_subject_rejects_clarification_that_invents_eligibility()
     assert "肯定符合退款资格" not in result.answer
     assert result.answer == "请补充或确认需要处理的订单信息。"
     assert result.response_control["reason"] == "subject_resolution_unknown"
+
+
+def test_bound_refund_subject_rejects_operator_reasking_for_order_selection():
+    """Once the server bound an order, prose cannot ask the customer to pick it again."""
+    result = LoopResult(
+        answer="请问您想退哪一笔华为订单？请回复序号或订单号，我来帮您查询退款状态。",
+        decision_contexts=[
+            {
+                "subject_type": "order",
+                "subject_id": "SO-HW80",
+                "provenance": "current",
+                "source": "query_refund_status",
+                "facts": {
+                    "order_identified": True,
+                    "refund_status": "NOT_FOUND",
+                },
+            }
+        ],
+        workflow_progress={"goal_status": "resolved", "next_action": "ANSWER", "next_actor": "NONE"},
+    )
+
+    compose_customer_response(
+        result,
+        [{"domain": "refund", "operation": "status"}],
+        selected_subjects={"order_id": "SO-HW80"},
+    )
+
+    assert "哪一笔华为订单" not in result.answer
+    assert "请回复序号或订单号" not in result.answer
+    assert result.answer == "当前账户中没有查到这笔订单的退款记录。"
+    assert result.response_control["mode"] == "FACT"
+    assert result.response_control["subject_id"] == "SO-HW80"
+
+
+def test_bound_refund_subject_may_keep_safe_status_prose_without_reselection_prompt():
+    result = LoopResult(
+        answer="这笔退款目前仍在等待商家核验。",
+        decision_contexts=[
+            {
+                "subject_type": "order",
+                "subject_id": "SO-IP",
+                "provenance": "current",
+                "source": "query_refund_status",
+                "facts": {
+                    "order_identified": True,
+                    "refund_status": "PENDING_MERCHANT_REVIEW",
+                },
+            }
+        ],
+        workflow_progress={"goal_status": "resolved", "next_action": "ANSWER", "next_actor": "NONE"},
+    )
+
+    compose_customer_response(
+        result,
+        [{"domain": "refund", "operation": "status"}],
+        selected_subjects={"order_id": "SO-IP"},
+    )
+
+    assert result.answer == "这笔退款目前仍在等待商家核验。"
+    assert result.answer_source == "OPERATOR_VALIDATED"
+    assert result.response_control["subject_id"] == "SO-IP"

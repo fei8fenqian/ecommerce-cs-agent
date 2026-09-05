@@ -83,8 +83,13 @@ async def test_product_resolver_gets_only_opaque_previous_selected_ref():
 
 
 @pytest.mark.asyncio
-async def test_product_resolver_is_not_a_recommendation_authority():
-    llm = FakeLLM({"status": "unknown"})
+async def test_product_resolver_owns_recommendation_order_inside_server_frame():
+    llm = FakeLLM(
+        {
+            "status": "unknown",
+            "recommended_refs": ["candidate_2", "candidate_1", "candidate_99"],
+        }
+    )
     result = await ProductResolver(llm).resolve(
         query="8000以内，显卡最好，给我推荐几款",
         candidates=[
@@ -107,16 +112,41 @@ async def test_product_resolver_is_not_a_recommendation_authority():
         ],
         product_context={"max_price_cents": 800000},
         history=[],
-        purpose="auto",
+        purpose="recommend",
     )
     assert result.status == "unknown"
+    assert result.recommended_refs == ["candidate_2", "candidate_1"]
     assert len(llm.calls) == 1
     assert llm.calls[0][1]["response_format"] == {"type": "json_object"}
     prompt = llm.messages[-1]["content"]
     assert '"gpu_chip":"RTX 4070"' in prompt
     assert "p-4070" not in prompt
-    # The resolver contract explicitly refuses to rank open-ended recommendations.
-    assert "不是推荐器" in llm.messages[0]["content"]
+    assert "推荐排序器" in llm.messages[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_product_resolver_collective_followup_reuses_only_current_verified_choice_refs():
+    llm = FakeLLM(
+        {
+            "status": "unknown",
+            "recommended_refs": ["candidate_2", "candidate_1", "candidate_99"],
+        }
+    )
+    result = await ProductResolver(llm).resolve(
+        query="这些对应链接呢",
+        candidates=CANDIDATES,
+        product_context={
+            "choice_refs": ["candidate_2", "candidate_1", "candidate_99"],
+        },
+        history=[{"role": "assistant", "content": "刚才推荐了两款。"}],
+        purpose="inspect",
+    )
+
+    assert result.status == "unknown"
+    assert result.recommended_refs == ["candidate_2", "candidate_1"]
+    payload = json.loads(llm.messages[-1]["content"])
+    assert payload["product_context"]["previous_choice_refs"] == ["candidate_2", "candidate_1"]
+    assert "candidate_99" not in payload["product_context"]["previous_choice_refs"]
 
 
 @pytest.mark.asyncio
@@ -156,4 +186,19 @@ async def test_product_resolver_does_not_outer_retry_after_llmclient_failure():
         purpose="inspect",
     )
     assert result.status == "unknown"
+    assert llm.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_product_resolver_recommendation_degrades_to_server_frame_order_on_llm_failure():
+    llm = FailingLLM()
+    result = await ProductResolver(llm).resolve(
+        query="6000左右推荐几台",
+        candidates=CANDIDATES,
+        product_context={},
+        history=[],
+        purpose="recommend",
+    )
+    assert result.status == "unknown"
+    assert result.recommended_refs == ["candidate_1", "candidate_2"]
     assert llm.calls == 1

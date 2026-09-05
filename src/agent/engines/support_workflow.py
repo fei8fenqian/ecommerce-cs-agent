@@ -74,6 +74,7 @@ class SupportWorkflowState(TypedDict, total=False):
     previous_subjects: dict[str, Any]
     product_subject_context: dict[str, Any]
     subject_relation: str
+    subject_description: str
     verified_facts: dict[str, Any]
     decision_facts: dict[str, Any]
     decision_contexts: list[dict[str, Any]]
@@ -486,21 +487,141 @@ class SupportWorkflowAgent:
         return update
 
     @staticmethod
+    def _compact_order_listing(data: dict[str, Any]) -> dict[str, Any] | None:
+        """Project a large authenticated order list into a stable candidate frame.
+
+        A discovery result can easily exceed the Case persistence budget because
+        checkout rows contain provider/refund/tracking metadata.  Replacing that
+        result with a prose summary destroys the very server-owned identities the
+        OrderSubjectResolver needs.  Keep only identity, display and current
+        subject facts required to bind one order; exact mutable facts are read
+        again after binding.
+        """
+        orders = data.get("orders")
+        if not isinstance(orders, list):
+            return None
+
+        projected: list[dict[str, Any]] = []
+        for raw in orders[:10]:
+            if not isinstance(raw, dict):
+                continue
+            order_id = raw.get("order_id") or raw.get("order_no")
+            if not isinstance(order_id, str) or not order_id.startswith("SO"):
+                continue
+            item: dict[str, Any] = {"order_id": order_id}
+            for key in (
+                "order_source",
+                "order_status",
+                "status",
+                "delivery_state",
+                "payment_status",
+                "payment_provider",
+                "expected_ship_time",
+            ):
+                value = raw.get(key)
+                if isinstance(value, str) and value.strip():
+                    item[key] = value.strip()[:160]
+            if isinstance(raw.get("order_cancel_supported"), bool):
+                item["order_cancel_supported"] = raw["order_cancel_supported"]
+            recency_rank = raw.get("recency_rank")
+            if isinstance(recency_rank, int) and not isinstance(recency_rank, bool) and recency_rank > 0:
+                item["recency_rank"] = recency_rank
+
+            product_name = raw.get("product_name")
+            raw_items = raw.get("items")
+            first_identity_item = (
+                raw_items[0] if isinstance(raw_items, list) and raw_items and isinstance(raw_items[0], dict) else {}
+            )
+            if not isinstance(product_name, str) or not product_name.strip():
+                product_name = first_identity_item.get("product_name")
+            if isinstance(product_name, str) and product_name.strip():
+                item["product_name"] = product_name.strip()[:240]
+
+            # Promote the minimum semantic identity needed for binding before
+            # optional item metadata is dropped to satisfy the persistence cap.
+            # This mirrors the real checkout tool shape, where catalog identity
+            # normally lives under items[] rather than at the order top level.
+            for key in ("catalog_category", "component_category", "catalog_product_id"):
+                value = raw.get(key) or first_identity_item.get(key)
+                if isinstance(value, str) and value.strip():
+                    item[key] = value.strip()[:200]
+
+            amount_cents = raw.get("amount_cents")
+            if amount_cents is None:
+                amount = raw.get("total_amount")
+                try:
+                    amount_cents = round(float(amount) * 100) if amount is not None else None
+                except (TypeError, ValueError):
+                    amount_cents = None
+            if isinstance(amount_cents, int | float) and not isinstance(amount_cents, bool):
+                item["amount_cents"] = int(amount_cents)
+
+            refund = raw.get("refund")
+            if isinstance(refund, dict) and isinstance(refund.get("status"), str):
+                item["refund"] = {"status": str(refund["status"])[:80]}
+
+            if isinstance(raw_items, list):
+                compact_items: list[dict[str, str]] = []
+                for raw_item in raw_items[:3]:
+                    if not isinstance(raw_item, dict):
+                        continue
+                    compact_item: dict[str, str] = {}
+                    for key in (
+                        "product_name",
+                        "catalog_category",
+                        "catalog_product_id",
+                        "component_category",
+                    ):
+                        value = raw_item.get(key)
+                        if isinstance(value, str) and value.strip():
+                            compact_item[key] = value.strip()[:200]
+                    if compact_item:
+                        compact_items.append(compact_item)
+                if compact_items:
+                    item["items"] = compact_items
+            projected.append(item)
+
+        if not projected:
+            return None
+        return {
+            "count": int(data.get("count") or len(orders)),
+            "orders": projected,
+            "multiple_results": bool(data.get("multiple_results") or len(orders) > 1),
+            "selection_required": bool(data.get("selection_required")),
+            "truncated": len(orders) > len(projected),
+        }
+
+    @staticmethod
     def _bounded_data(data: dict[str, Any]) -> dict[str, Any]:
-        """限制可持久化事实大小，防止一条订单列表吞掉整个 Case。"""
+        """限制可持久化事实大小，但绝不丢失已认证订单候选身份。"""
         try:
             encoded = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
         except (TypeError, ValueError):
             return {"summary": "工具返回了不可持久化的数据"}
         if len(encoded) <= 5000:
             return data
-        # 当前订单工具的顶层列表可以安全裁成前十条；其余工具超限时只保留结果可用性，
-        # 不将半截 JSON 当事实写入数据库。
-        orders = data.get("orders")
-        if isinstance(orders, list):
-            reduced = {**data, "orders": orders[:10], "truncated": True}
-            if len(json.dumps(reduced, ensure_ascii=False, separators=(",", ":"))) <= 5000:
-                return reduced
+
+        compact_orders = SupportWorkflowAgent._compact_order_listing(data)
+        if compact_orders is not None:
+            # The projection is intentionally compact enough for ten ordinary
+            # checkout orders.  If unusually long catalog labels still exceed
+            # the persistence budget, drop per-item metadata before dropping any
+            # order identity; top-level product_name remains available to bind.
+            compact_encoded = json.dumps(compact_orders, ensure_ascii=False, separators=(",", ":"))
+            if len(compact_encoded) > 5000:
+                for order in compact_orders["orders"]:
+                    order.pop("items", None)
+            compact_encoded = json.dumps(compact_orders, ensure_ascii=False, separators=(",", ":"))
+            if len(compact_encoded) > 5000:
+                # Preserve all ten authenticated identities before any optional
+                # status decoration.  Exact facts are refreshed after binding.
+                essential = {"order_id", "product_name", "amount_cents", "recency_rank"}
+                compact_orders["orders"] = [
+                    {key: value for key, value in order.items() if key in essential}
+                    for order in compact_orders["orders"]
+                ]
+            return compact_orders
+
         return {"summary": "工具结果过长，需用明确订单或商品标识继续查询", "truncated": True}
 
     @staticmethod
@@ -559,6 +680,10 @@ class SupportWorkflowAgent:
                 except (TypeError, ValueError):
                     amount_cents = None
             choice: dict[str, Any] = {"order_id": order_id}
+            for key in ("catalog_category", "component_category", "catalog_product_id"):
+                value = order.get(key)
+                if isinstance(value, str) and value.strip():
+                    choice[key] = value.strip()
             recency_rank = order.get("recency_rank")
             if isinstance(recency_rank, int) and not isinstance(recency_rank, bool) and recency_rank > 0:
                 choice["recency_rank"] = recency_rank
@@ -610,11 +735,18 @@ class SupportWorkflowAgent:
             return "", "", []
 
         query = str(state.get("query", ""))
+        semantic_subject = str(state.get("subject_description", "") or "").strip()
         previous_order_id = self._selected_order_id(state.get("previous_subjects"))
         product_subject_context = state.get("product_subject_context")
         if not isinstance(product_subject_context, dict):
             product_subject_context = {}
-        matches = match_subject_identity_choices(query, choices)
+        # A migrated SupportCommand already carries the LLM's semantic subject
+        # summary.  In that path the Runtime must not re-interpret the raw
+        # customer utterance through legacy lexical NLU.  Candidate identity
+        # binding still happens only against this authenticated server-owned
+        # frame.
+        matches = [] if semantic_subject else match_subject_identity_choices(query, choices)
+        resolver_query = semantic_subject or query
         # With no previous subject, a unique identity match is already a
         # deterministic proof.  With a previous subject, however, expressions
         # such as "另一部 iPhone" may still identity-match the old order; the
@@ -657,7 +789,7 @@ class SupportWorkflowAgent:
         if llm is not None:
             resolution = await resolve_order_subject(
                 llm,
-                query,
+                resolver_query,
                 resolution_pool,
                 previous_subject_ref=previous_ref,
                 recent_product_context=product_subject_context,
@@ -1643,6 +1775,7 @@ class SupportWorkflowAgent:
         previous_subjects: dict[str, Any] | None = None,
         product_subject_context: dict[str, Any] | None = None,
         subject_relation: str = "unknown",
+        subject_description: str = "",
         tool_context: ToolContext | None = None,
         historical_contexts: list[dict[str, Any]] | None = None,
         allow_historical_explanation: bool = False,
@@ -1670,6 +1803,7 @@ class SupportWorkflowAgent:
             "previous_subjects": previous_subjects or {},
             "product_subject_context": product_subject_context or {},
             "subject_relation": subject_relation if subject_relation in {"same", "changed", "unknown"} else "unknown",
+            "subject_description": subject_description.strip()[:240],
             "tool_context": tool_context,
             "historical_contexts": historical_contexts or [],
             "allow_historical_explanation": allow_historical_explanation,

@@ -1,9 +1,9 @@
-"""Semantic resolver for server-owned ecommerce candidate subjects.
+"""Semantic resolver for one server-owned ecommerce candidate frame.
 
-Recommendation is intentionally *not* owned here.  The Operator LLM may make
-open-ended recommendations over the server-owned candidate frame.  This
-resolver only answers the identity question: which candidate is the user
-referring to, or which candidates remain ambiguous?
+The resolver owns semantic product selection, ambiguity preservation and
+open-ended recommendation ordering *inside* that frame.  It never receives or
+returns canonical product ids; the server validates opaque refs and owns all
+navigation/actions.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ class ProductResolution:
     status: str = "unknown"  # selected | ambiguous | unknown
     selected_ref: str = ""
     ambiguous_refs: list[str] = field(default_factory=list)
+    recommended_refs: list[str] = field(default_factory=list)
 
 
 def _json_object(text: str) -> dict[str, Any] | None:
@@ -109,19 +110,28 @@ class ProductResolver:
             if isinstance(content, str) and content.strip():
                 recent.append({"role": str(item.get("role")), "content": content[:400]})
 
-        normalized_purpose = purpose if purpose in {"inspect", "purchase", "auto"} else "auto"
+        normalized_purpose = purpose if purpose in {"inspect", "purchase", "recommend", "auto"} else "auto"
+        previous_choice_refs = [
+            str(ref) for ref in product_context.get("choice_refs", []) if isinstance(ref, str) and ref in allowed
+        ][:12]
         context_payload = {
             "purpose": normalized_purpose,
             "preference_turns": product_context.get("preference_turns", [])[-6:],
             "previous_selected_ref": previous_selected_ref or None,
+            "previous_choice_refs": previous_choice_refs,
         }
         system = (
-            "你是商品指代解析器，不是推荐器。只能在服务端给出的 candidates 中判断客户当前指的是哪件商品。"
-            "如果客户明确选中一个唯一候选，status=selected 并返回 selected_ref；"
-            "如果客户指向一个型号/系列但存在多个配置且当前表达不足以区分，status=ambiguous 并返回相关 refs；"
-            "如果当前话只是开放式推荐、比较、换一批、性能最好、性价比等，没有明确选择某个候选，必须 status=unknown，"
-            "不要替导购做推荐排序。previous_selected_ref 只是已验证的上一轮商品上下文；只有客户继续问这款/它/详情/购买且没有切换证据时才能继续它。"
-            "不得输出 product_id，不得生成候选外商品。只返回一个JSON对象。"
+            "你是商品候选解析与推荐排序器。只能在服务端给出的 candidates 中工作，永远不能创造候选外商品。"
+            "如果客户明确选中一个唯一候选，status=selected 并只返回 selected_ref；"
+            "如果客户指向一个型号/系列但存在多个配置且当前表达不足以区分，status=ambiguous 并返回相关 ambiguous_refs；"
+            "如果当前是开放式推荐、换一批、预算内推荐、性能/影像/便携等偏好比较，status=unknown，"
+            "并用 recommended_refs 按最符合客户当前诉求的顺序返回候选。通常推荐 3-6 个；客户明确要求全部时才可更多。"
+            "推荐排序只依据客户语言、product_context 与 candidates 的真实公开属性；缺失属性不得脑补。"
+            "selected/ambiguous 与 recommendation 是不同语义：selected 或 ambiguous 时 recommended_refs 必须为空。"
+            "previous_selected_ref 只是已验证的上一轮单品上下文；只有客户继续问这款/它/详情/购买且没有切换证据时才能继续它。"
+            "previous_choice_refs 是同一个候选帧里上一轮服务端实际展示/推荐的有序集合；如果客户本轮整体指代‘这些/刚才推荐的/对应链接/对比它们’且没有新约束，"
+            "可以 status=unknown 并原顺序返回这些 recommended_refs。"
+            "不得输出 product_id、URL 或候选外商品。只返回一个JSON对象，字段仅使用 status、selected_ref、ambiguous_refs、recommended_refs。"
         )
         payload = {
             "query": query[:1200],
@@ -129,6 +139,11 @@ class ProductResolver:
             "product_context": context_payload,
             "candidates": safe_candidates,
         }
+        fallback_recommendations = (
+            [item["ref"] for item in safe_candidates[: min(5, len(safe_candidates))]]
+            if normalized_purpose == "recommend"
+            else []
+        )
         try:
             response = await self.llm.chat(
                 [
@@ -136,22 +151,26 @@ class ProductResolver:
                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False, separators=(",", ":"))},
                 ],
                 temperature=0.0,
-                max_tokens=220,
+                max_tokens=260,
                 response_format={"type": "json_object"},
             )
         except LLMError as exc:
             logger.warning("product resolver unavailable error_type=%s", type(exc).__name__)
-            return ProductResolution()
+            return ProductResolution(recommended_refs=fallback_recommendations)
 
         data = _json_object(response.content or "")
         if data is None:
             logger.warning("product resolver invalid json")
-            return ProductResolution()
+            return ProductResolution(recommended_refs=fallback_recommendations)
         status = str(data.get("status") or "unknown").strip().lower()
         selected_ref = str(data.get("selected_ref") or "").strip()
         ambiguous_refs = [
             str(ref) for ref in data.get("ambiguous_refs", []) if isinstance(ref, str) and ref in allowed
         ][:12]
+        recommended_refs = [
+            str(ref) for ref in data.get("recommended_refs", []) if isinstance(ref, str) and ref in allowed
+        ][:12]
+        recommended_refs = list(dict.fromkeys(recommended_refs))
 
         if status == "selected" and selected_ref in allowed:
             result = ProductResolution(status="selected", selected_ref=selected_ref)
@@ -161,15 +180,16 @@ class ProductResolver:
                 ambiguous_refs=list(dict.fromkeys(ambiguous_refs)),
             )
         else:
-            result = ProductResolution()
+            result = ProductResolution(recommended_refs=recommended_refs or fallback_recommendations)
 
         logger.info(
-            "product subject resolution status=%s purpose=%s candidates=%s ambiguous=%s selected=%s",
+            "product resolution status=%s purpose=%s candidates=%s ambiguous=%s selected=%s recommended=%s",
             result.status,
             normalized_purpose,
             len(safe_candidates),
             len(result.ambiguous_refs),
             bool(result.selected_ref),
+            len(result.recommended_refs),
         )
         return result
 
