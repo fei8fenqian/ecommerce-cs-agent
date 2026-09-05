@@ -72,7 +72,9 @@ jobs:
         run: ruff check src scripts
 
       - name: Apply database migrations
-        run: alembic upgrade head
+        # The Harness migration is an intentionally separate Alembic head;
+        # CI exercises the production schema branch only.
+        run: alembic upgrade d2e7a1c9b504
 
       - name: Run tests
         run: make test
