@@ -59,7 +59,7 @@
 - FastAPI `/chat` 与 `/chat/stream`；
 - SSE 流式输出；
 - React + TypeScript 前端；
-- Redis 多轮 Session；
+- PostgreSQL 持久化多轮 Session；
 - PostgreSQL + pgvector；
 - ToolRegistry 与 ToolContext；
 - JWT + Casbin 权限控制；
@@ -113,7 +113,7 @@
                              │
           ┌──────────────────┼──────────────────┐
           ▼                  ▼                  ▼
-      PostgreSQL           Redis          支付 / 退款接口
+      PostgreSQL       Redis（认证 / 限流 / 请求协调）   支付 / 退款接口
                              │
                              ▼
                    已核验的业务事实与状态
@@ -331,7 +331,8 @@ docs/                                 # 架构 / 运维 / 评测文档
 | Agent | Tool Calling、自定义 Agent Loop、LangGraph |
 | RAG | pgvector, BGE Embedding, BM25, RRF, BGE Reranker |
 | 数据库 | PostgreSQL + pgvector |
-| 会话 | Redis |
+| 会话 | PostgreSQL（`sessions` / `session_messages`） |
+| Redis | 登录态、限流和流式请求协调 |
 | 认证 / 权限 | JWT, Casbin |
 | 支付 | 银联测试环境 |
 | 测试 | pytest |
